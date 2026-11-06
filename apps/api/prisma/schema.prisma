@@ -1,0 +1,145 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Workspace {
+  id         String     @id @default(cuid())
+  name       String
+  slug       String     @unique
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  projects   Project[]
+  agents     Agent[]
+  tasks      Task[]
+  activities Activity[]
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  workspaceId String
+  key         String
+  name        String
+  description String   @default("")
+  color       String   @default("#6b7280")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  tasks       Task[]
+
+  @@unique([workspaceId, key])
+  @@index([workspaceId])
+}
+
+model Computer {
+  id         String   @id @default(cuid())
+  name       String
+  hostname   String
+  status     String   @default("online")
+  lastSeenAt DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  agents     Agent[]
+}
+
+model Agent {
+  id           String      @id @default(cuid())
+  workspaceId  String
+  computerId   String?
+  name         String
+  role         String
+  description  String      @default("")
+  runtime      String      @default("mock")
+  status       String      @default("idle")
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  lastActiveAt DateTime?
+  workspace    Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  computer     Computer?   @relation(fields: [computerId], references: [id], onDelete: SetNull)
+  tasks        Task[]      @relation("TaskAssignee")
+  executions   Execution[]
+  activities   Activity[]
+
+  @@index([workspaceId])
+  @@index([status])
+}
+
+model Task {
+  id              String      @id @default(cuid())
+  workspaceId     String
+  projectId       String
+  assigneeAgentId String?
+  title           String
+  description     String      @default("")
+  priority        String      @default("medium")
+  status          String      @default("todo")
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  workspace       Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  project         Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assignee        Agent?      @relation("TaskAssignee", fields: [assigneeAgentId], references: [id], onDelete: SetNull)
+  executions      Execution[]
+  activities      Activity[]
+
+  @@index([workspaceId])
+  @@index([status])
+  @@index([assigneeAgentId])
+}
+
+model Execution {
+  id            String         @id @default(cuid())
+  taskId        String
+  agentId       String
+  runtime       String         @default("mock")
+  status        String         @default("running")
+  progress      Int            @default(0)
+  startedAt     DateTime       @default(now())
+  endedAt       DateTime?
+  failureReason String?
+  cancelReason  String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  task          Task           @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  agent         Agent          @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  logs          ExecutionLog[]
+  activities    Activity[]
+
+  @@index([taskId])
+  @@index([agentId])
+  @@index([status])
+}
+
+model ExecutionLog {
+  id          String    @id @default(cuid())
+  executionId String
+  seq         Int
+  level       String    @default("info")
+  message     String
+  timestamp   DateTime  @default(now())
+  execution   Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+
+  @@unique([executionId, seq])
+  @@index([executionId, timestamp])
+}
+
+model Activity {
+  id          String     @id @default(cuid())
+  workspaceId String
+  type        String
+  summary     String
+  taskId      String?
+  agentId     String?
+  executionId String?
+  metadata    String?
+  createdAt   DateTime   @default(now())
+  workspace   Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  task        Task?      @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  agent       Agent?     @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  execution   Execution? @relation(fields: [executionId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+}

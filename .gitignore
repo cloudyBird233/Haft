@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+*.log
+.DS_Store
+.env
+.env.local
+.env.*.local
+apps/api/prisma/*.db
+apps/api/prisma/*.db-journal
+apps/api/prisma/*.db-wal
+apps/api/prisma/*.db-shm
+apps/web/playwright/
+.vscode/
+.idea/
