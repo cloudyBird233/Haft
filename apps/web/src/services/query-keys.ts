@@ -1,9 +1,14 @@
-import type { AgentListQuery, TaskListQuery } from '@raft-lite/contracts';
+import type {
+  AgentListQuery,
+  RunnerRuntimeAvailabilityQuery,
+  TaskListQuery,
+} from '@raft-lite/contracts';
 
 export const queryKeys = {
   dashboard: ['dashboard'] as const,
   workspace: ['workspace'] as const,
   computers: ['computers'] as const,
+  runtimes: (params: RunnerRuntimeAvailabilityQuery) => ['runtimes', params] as const,
   activities: (limit = 30) => ['activities', limit] as const,
   agents: {
     all: ['agents'] as const,

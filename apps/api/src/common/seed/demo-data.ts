@@ -36,7 +36,9 @@ export async function clearAllData(prisma: PrismaClient): Promise<void> {
     prisma.task.deleteMany(),
     prisma.agent.deleteMany(),
     prisma.project.deleteMany(),
-    prisma.computer.deleteMany(),
+    // Runners and computers describe the environment, not workspace content.
+    // Keeping them lets a connected Agent Runner survive the deterministic
+    // test reset without leaking tasks, agents or execution history.
     prisma.workspace.deleteMany(),
   ]);
 }
@@ -208,7 +210,9 @@ export async function initializeDemoData(
       agentId: SEED_IDS.developer,
       runtime: 'mock',
       status: 'completed',
+      phase: 'completed',
       progress: 100,
+      progressMode: 'determinate',
       startedAt: SEED.execution,
       endedAt: at('2026-01-12T14:00:18.000Z'),
       createdAt: SEED.execution,

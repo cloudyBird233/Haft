@@ -6,10 +6,15 @@ the web client cannot drift silently.
 
 ## Base URLs
 
-| Environment | REST base                   | Socket.IO                      | OpenAPI                          |
-| ----------- | --------------------------- | ------------------------------ | -------------------------------- |
-| Development | `http://127.0.0.1:3001/api` | `http://127.0.0.1:3001/events` | `http://127.0.0.1:3001/api/docs` |
-| E2E         | `http://127.0.0.1:3101/api` | `http://127.0.0.1:3101/events` | `http://127.0.0.1:3101/api/docs` |
+| Environment  | REST base                   | Socket.IO                      | OpenAPI                          |
+| ------------ | --------------------------- | ------------------------------ | -------------------------------- |
+| Development  | `http://127.0.0.1:3001/api` | `http://127.0.0.1:3001/events` | `http://127.0.0.1:3001/api/docs` |
+| E2E          | `http://127.0.0.1:3101/api` | `http://127.0.0.1:3101/events` | `http://127.0.0.1:3101/api/docs` |
+| Real CLI E2E | `http://127.0.0.1:3201/api` | `http://127.0.0.1:3201/events` | `http://127.0.0.1:3201/api/docs` |
+
+The runner protocol uses a third Socket.IO namespace, `/runner`, on the same API
+server. It is authenticated by the runner handshake and is not used by the
+browser. See [runner-protocol.md](runner-protocol.md).
 
 The API binds to `127.0.0.1` by default; set `HOST` to change the interface. The
 Vite dev server proxies `/api` and `/socket.io` to `127.0.0.1:3001` (or
@@ -145,8 +150,9 @@ Create body:
 
 - `name` and `role` are required; `description` defaults to `""`; `runtime`
   defaults to `mock`; `computerId` defaults to `null`.
-- `codex` and `opencode` are accepted values so agents can be configured ahead of
-  adapter availability, but executions with them are rejected.
+- `codex` and `opencode` are accepted values. They require a paired, connected
+  Agent Runner on the assigned computer, plus the matching runtime capability
+  and project mapping. The task drawer shows runtime availability before start.
 - Update accepts any subset of `name`, `role`, `description`, `runtime`,
   `computerId`, `status`; at least one field is required.
 - `status: "busy"` is rejected; the busy state belongs to executions.
@@ -245,8 +251,21 @@ Start returns the created `ExecutionDto` on success. Preconditions:
 | Agent already running something               | `409 AGENT_BUSY`                |
 | Agent offline                                 | `409 AGENT_OFFLINE`             |
 | Agent in error state                          | `409 AGENT_ERROR`               |
-| Runtime not `mock`                            | `422 RUNTIME_NOT_AVAILABLE`     |
+| Runner runtime without a computer             | `409 COMPUTER_NOT_ASSIGNED`     |
+| Computer offline                              | `409 COMPUTER_OFFLINE`          |
+| No runner registered for the computer         | `409 RUNNER_NOT_REGISTERED`     |
+| Runner registered but not connected           | `409 RUNNER_OFFLINE`            |
+| CLI not installed on the runner               | `422 CLI_NOT_INSTALLED`         |
+| CLI not authenticated on the runner           | `422 CLI_NOT_AUTHENTICATED`     |
+| Project not mapped in the runner config       | `422 PROJECT_NOT_MAPPED`        |
 | Runtime rejected the start                    | `500 RUNTIME_START_FAILED`      |
+
+For `codex`/`opencode`, the API asks
+`GET /api/runtimes?computerId=...&projectId=...` internally, records the
+selected `runnerId` on the execution, and waits up to 20 seconds for
+`execution.accepted` before returning `201`. A runner dispatch failure follows
+the same rollback path as a runtime rejection: the execution becomes `failed`,
+the task and agent are restored, and `RUNTIME_START_FAILED` is returned.
 
 Starts are serialized within one API process. Concurrent starts for the same
 task return one `201` and one `409 EXECUTION_ALREADY_RUNNING`; concurrent starts
@@ -284,9 +303,98 @@ Logs query parameters: `afterSeq` (int ≥ 0, exclusive), `limit` (1–500, defa
 same `afterSeq` filter.
 
 Cancel body is optional `{ "reason": "..." }`. Only `running` executions can be
-cancelled; otherwise `409 EXECUTION_NOT_RUNNING`. Cancellation sets the execution
-to `cancelled`, the task to `cancelled`, and the agent to `idle`, appends a
-warning log, records an activity, and emits realtime events.
+cancelled; otherwise `409 EXECUTION_NOT_RUNNING`.
+
+- **Mock runtime**: cancellation stops the in-memory session, sets the execution
+  to `cancelled`, the task to `cancelled`, and the agent to `idle`, appends a
+  warning log, records an activity, and emits realtime events.
+- **Runner runtime**: the API dispatches `execution.cancel` and then waits for
+  the runner's `execution.cancelled` message (default timeout 30 s,
+  `HAFT_RUNNER_CANCEL_TIMEOUT_MS`). It does not mark the execution cancelled
+  from the HTTP request alone. If the runner is offline, the request returns
+  `409 RUNNER_OFFLINE`; if it does not confirm in time, it returns
+  `409 RUNNER_CANCEL_TIMEOUT` and the execution remains `running`.
+
+`ExecutionDto` includes the durable orchestration fields:
+
+```json
+{
+  "id": "...",
+  "runtime": "codex",
+  "runnerId": "runner_local",
+  "status": "completed",
+  "phase": "completed",
+  "progress": 100,
+  "progressMode": "determinate",
+  "exitCode": 0,
+  "summary": "Implemented the change.",
+  "branchName": "haft/execution_...",
+  "baseCommit": "...",
+  "headCommit": "...",
+  "lastRunnerSeq": 42,
+  "startedAt": "...",
+  "endedAt": "...",
+  "failureReason": null,
+  "cancelReason": null
+}
+```
+
+`status` is the product-level state (`running`, `completed`, `failed`,
+`cancelled`). `phase` adds the finer stage (`queued`, `preparing`, `running`,
+`finalizing`, or a terminal outcome) and is safe to use for progress copy while a
+run is active.
+
+### Runtimes
+
+| Method | Path            | Description                                        |
+| ------ | --------------- | -------------------------------------------------- |
+| `GET`  | `/api/runtimes` | Runtime availability for a computer and/or project |
+
+Query: optional `computerId` and `projectId`. The response always includes
+`mock`; `codex` and `opencode` are evaluated against the paired runner.
+
+```json
+{
+  "items": [
+    {
+      "runtime": "codex",
+      "label": "Codex CLI",
+      "available": false,
+      "requiresRunner": true,
+      "reason": "Codex CLI is not authenticated on the runner",
+      "reasonCode": "CLI_NOT_AUTHENTICATED",
+      "runnerId": "runner_local",
+      "runnerStatus": "online",
+      "cliVersion": "codex-cli 0.x",
+      "authenticated": false,
+      "projectIds": ["project_demo"]
+    }
+  ]
+}
+```
+
+Reason codes: `COMPUTER_NOT_ASSIGNED`, `RUNNER_NOT_REGISTERED`,
+`RUNNER_OFFLINE`, `CLI_NOT_INSTALLED`, `CLI_NOT_AUTHENTICATED`,
+`PROJECT_NOT_MAPPED`. `mock` has `available: true`, `requiresRunner: false`, and
+`null` reasons.
+
+### Runners
+
+| Method | Path           | Description         |
+| ------ | -------------- | ------------------- |
+| `GET`  | `/api/runners` | List paired runners |
+
+Runner management is loopback-only by default. When
+`HAFT_RUNNER_ADMIN_TOKEN` is configured, requests must send
+`x-haft-admin-token` (invalid or missing → `401 RUNNER_ADMIN_FORBIDDEN`);
+otherwise only loopback (`127.0.0.1`/`::1`) requests are accepted and other
+clients receive `403 RUNNER_ADMIN_FORBIDDEN`. The response
+contains identity, status, platform, capabilities, concurrency, and heartbeat
+metadata. Runner tokens are never returned.
+
+Pairing itself is not an HTTP route: the runner authenticates on the `/runner`
+namespace with `HAFT_RUNNER_BOOTSTRAP_TOKEN`, exchanges it for a runner token,
+and stores the token locally. See [runner-protocol.md](runner-protocol.md).
 
 ### Activities
 
@@ -317,32 +425,42 @@ Computers are read-only in this phase; the seed registers `computer_local`.
 
 ## Error codes
 
-| HTTP | Code                        | Typical cause                                                      |
-| ---- | --------------------------- | ------------------------------------------------------------------ |
-| 400  | `VALIDATION_ERROR`          | Zod parse failure                                                  |
-| 400  | `PROJECT_NOT_FOUND`         | Unknown project on task create/update                              |
-| 400  | `COMPUTER_NOT_FOUND`        | Unknown computer on agent create/update                            |
-| 400  | `AGENT_NOT_FOUND`           | Unknown assignee on task create/assign                             |
-| 404  | `AGENT_NOT_FOUND`           | Agent route id not found                                           |
-| 404  | `TASK_NOT_FOUND`            | Task route id not found                                            |
-| 404  | `EXECUTION_NOT_FOUND`       | Execution route/logs id not found                                  |
-| 404  | `WORKSPACE_NOT_FOUND`       | Default workspace not seeded                                       |
-| 404  | `NOT_FOUND`                 | Prisma `P2025` fallback                                            |
-| 409  | `CONFLICT`                  | Prisma `P2002` fallback                                            |
-| 409  | `AGENT_BUSY`                | Agent running, or manual busy status                               |
-| 409  | `AGENT_STATUS_MANAGED`      | Attempt to set agent status to `busy`                              |
-| 409  | `AGENT_OFFLINE`             | Start with an offline agent                                        |
-| 409  | `AGENT_ERROR`               | Start with an agent in error state                                 |
-| 409  | `TASK_EXECUTION_ACTIVE`     | Edit status/assign/delete while running                            |
-| 409  | `TASK_TERMINAL`             | Cancel done task or assign terminal task                           |
-| 409  | `TASK_NOT_STARTABLE`        | Start from review/done/stopped                                     |
-| 409  | `TASK_UNASSIGNED`           | Start without an assignee                                          |
-| 409  | `INVALID_TASK_TRANSITION`   | Illegal state-machine move                                         |
-| 409  | `EXECUTION_ALREADY_RUNNING` | Second concurrent run for a task                                   |
-| 409  | `EXECUTION_NOT_RUNNING`     | Cancel an already terminal execution                               |
-| 422  | `RUNTIME_NOT_AVAILABLE`     | Codex/OpenCode runtime selected                                    |
-| 500  | `RUNTIME_START_FAILED`      | Runtime rejected a start; execution failed and task/agent restored |
-| 500  | `INTERNAL_ERROR`            | Unexpected exception (details not leaked)                          |
+| HTTP | Code                        | Typical cause                                                        |
+| ---- | --------------------------- | -------------------------------------------------------------------- |
+| 400  | `VALIDATION_ERROR`          | Zod parse failure                                                    |
+| 400  | `PROJECT_NOT_FOUND`         | Unknown project on task create/update                                |
+| 400  | `COMPUTER_NOT_FOUND`        | Unknown computer on agent create/update                              |
+| 400  | `AGENT_NOT_FOUND`           | Unknown assignee on task create/assign                               |
+| 404  | `AGENT_NOT_FOUND`           | Agent route id not found                                             |
+| 404  | `TASK_NOT_FOUND`            | Task route id not found                                              |
+| 404  | `EXECUTION_NOT_FOUND`       | Execution route/logs id not found                                    |
+| 404  | `WORKSPACE_NOT_FOUND`       | Default workspace not seeded                                         |
+| 404  | `NOT_FOUND`                 | Prisma `P2025` fallback                                              |
+| 409  | `CONFLICT`                  | Prisma `P2002` fallback                                              |
+| 409  | `AGENT_BUSY`                | Agent running, or manual busy status                                 |
+| 409  | `AGENT_STATUS_MANAGED`      | Attempt to set agent status to `busy`                                |
+| 409  | `AGENT_OFFLINE`             | Start with an offline agent                                          |
+| 409  | `AGENT_ERROR`               | Start with an agent in error state                                   |
+| 409  | `TASK_EXECUTION_ACTIVE`     | Edit status/assign/delete while running                              |
+| 409  | `TASK_TERMINAL`             | Cancel done task or assign terminal task                             |
+| 409  | `TASK_NOT_STARTABLE`        | Start from review/done/stopped                                       |
+| 409  | `TASK_UNASSIGNED`           | Start without an assignee                                            |
+| 409  | `INVALID_TASK_TRANSITION`   | Illegal state-machine move                                           |
+| 409  | `EXECUTION_ALREADY_RUNNING` | Second concurrent run for a task                                     |
+| 409  | `EXECUTION_NOT_RUNNING`     | Cancel an already terminal execution                                 |
+| 401  | `RUNNER_ADMIN_FORBIDDEN`    | Missing/invalid runner admin token                                   |
+| 403  | `RUNNER_ADMIN_FORBIDDEN`    | Runner management requested from a non-loopback client               |
+| 409  | `COMPUTER_NOT_ASSIGNED`     | Runner runtime with no computer on the agent                         |
+| 409  | `COMPUTER_OFFLINE`          | Computer marked offline                                              |
+| 409  | `RUNNER_NOT_REGISTERED`     | No runner paired for the computer                                    |
+| 409  | `RUNNER_OFFLINE`            | Runner not connected, or cancellation dispatched while offline       |
+| 409  | `RUNNER_CANCEL_TIMEOUT`     | Runner did not confirm process termination before the timeout        |
+| 422  | `CLI_NOT_INSTALLED`         | Runner reports the CLI missing                                       |
+| 422  | `CLI_NOT_AUTHENTICATED`     | Runner reports the CLI has no credentials                            |
+| 422  | `PROJECT_NOT_MAPPED`        | Project id not in the runner's configured project map                |
+| 422  | `RUNTIME_NOT_AVAILABLE`     | Unknown runtime or no availability descriptor                        |
+| 500  | `RUNTIME_START_FAILED`      | Runtime/runner rejected a start; execution failed and state restored |
+| 500  | `INTERNAL_ERROR`            | Unexpected exception (details not leaked)                            |
 
 Test-control codes such as `RUNTIME_SESSION_NOT_FOUND` and
 `RUNTIME_NOT_RUNNING` are only reachable when the test API is enabled.
@@ -365,6 +483,16 @@ server-to-client broadcasts.
 The web app also refetches after mutations, so missed events degrade to stale
 data rather than broken state.
 
+### Runner namespace
+
+Namespace: `/runner`. This is a bidirectional protocol for paired Agent Runner
+processes, not a browser API. The handshake carries `runnerId`, `computerId`,
+`protocolVersion`, and either a cached runner token or the bootstrap token.
+Messages are strict, versioned envelopes with a `messageId`; the gateway
+processes one runner's messages in arrival order. The full message catalogue,
+delivery semantics, log acknowledgement, and reconciliation rules are in
+[runner-protocol.md](runner-protocol.md).
+
 ## Test API
 
 Registered only when `E2E_TEST_MODE=true` **and** `NODE_ENV!=production`. These
@@ -386,6 +514,12 @@ configured SQLite database and the in-memory mock runtime.
 ```bash
 # Health
 curl http://127.0.0.1:3001/api/health
+
+# List runtime availability for an agent computer and project
+curl "http://127.0.0.1:3001/api/runtimes?computerId=computer_local&projectId=project_demo"
+
+# List paired runners (loopback-only unless HAFT_RUNNER_ADMIN_TOKEN is set)
+curl http://127.0.0.1:3001/api/runners
 
 # List tasks with a filter
 curl "http://127.0.0.1:3001/api/tasks?status=todo&priority=medium"

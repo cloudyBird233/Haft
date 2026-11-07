@@ -133,6 +133,11 @@ export const activityListQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).optional(),
 });
 
+export const runnerRuntimeAvailabilityQuerySchema = z.object({
+  computerId: z.string().trim().min(1).max(100).optional(),
+  projectId: z.string().trim().min(1).max(100).optional(),
+});
+
 export const cancelExecutionSchema = z
   .object({
     reason: z.string().trim().max(500).optional(),
@@ -176,6 +181,9 @@ export type TaskListQuery = z.infer<typeof taskListQuerySchema>;
 export type ExecutionListQuery = z.infer<typeof executionListQuerySchema>;
 export type ExecutionLogsQuery = z.infer<typeof executionLogsQuerySchema>;
 export type ActivityListQuery = z.infer<typeof activityListQuerySchema>;
+export type RunnerRuntimeAvailabilityQuery = z.infer<
+  typeof runnerRuntimeAvailabilityQuerySchema
+>;
 export type CancelExecutionInput = z.infer<typeof cancelExecutionSchema>;
 export type SeedRequestInput = z.infer<typeof seedRequestSchema>;
 export type RuntimeModeInput = z.infer<typeof runtimeModeSchema>;

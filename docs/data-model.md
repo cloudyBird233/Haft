@@ -14,10 +14,12 @@ erDiagram
     WORKSPACE ||--o{ TASK : contains
     WORKSPACE ||--o{ ACTIVITY : records
     COMPUTER ||--o{ AGENT : hosts
+    COMPUTER ||--o| RUNNER : paired_with
     PROJECT ||--o{ TASK : groups
     AGENT ||--o{ TASK : assigned
     TASK ||--o{ EXECUTION : runs
     AGENT ||--o{ EXECUTION : performs
+    RUNNER ||--o{ EXECUTION : executes
     EXECUTION ||--o{ EXECUTION_LOG : emits
     TASK ||--o{ ACTIVITY : relates
     AGENT ||--o{ ACTIVITY : relates
@@ -64,6 +66,32 @@ A machine that can host agents. The demo registers one local workstation.
 | `status`                 | String     | `online` or `offline`      |
 | `lastSeenAt`             | DateTime?  |                            |
 | `createdAt`, `updatedAt` | DateTime   |                            |
+
+### Runner
+
+A Haft Agent Runner process paired with one Computer. The row is durable identity
+and connection metadata; live sockets stay in API memory. `Runner.id` is the
+protocol `runnerId`.
+
+| Column                     | Type          | Notes                                        |
+| -------------------------- | ------------- | -------------------------------------------- |
+| `id`                       | String, PK    | Stable runner id (e.g. `runner_local`)       |
+| `computerId`               | FK → Computer | Unique; cascade delete with the computer     |
+| `tokenHash`                | String        | `sha256` of the issued runner token only     |
+| `protocolVersion`          | Int           | Runner protocol version, currently `1`       |
+| `runnerVersion`            | String        | Reported by the runner at registration       |
+| `platform`, `architecture` | String        | Reported OS/CPU metadata                     |
+| `status`                   | String        | `online`, `offline`, `busy`, or `degraded`   |
+| `capabilitiesJson`         | String        | Serialised runtime capabilities and projects |
+| `maxConcurrentExecutions`  | Int           | 1–32, clamped from the runner registration   |
+| `lastHeartbeatAt`          | DateTime?     | Updated on every accepted heartbeat          |
+| `connectedAt`              | DateTime?     | Last successful socket connection            |
+| `disconnectedAt`           | DateTime?     | Last disconnect                              |
+| `createdAt`, `updatedAt`   | DateTime      |                                              |
+
+Unique on `computerId`; indexed by `status` and `lastHeartbeatAt`. Bootstrap
+pairing creates or rotates the token hash. Runner tokens are never stored in
+plaintext and never sent to CLI child processes.
 
 ### Agent
 
@@ -118,21 +146,33 @@ Indexed by `workspaceId`, `status`, and `assigneeAgentId`.
 
 ### Execution
 
-| Column                   | Type       | Notes                                         |
-| ------------------------ | ---------- | --------------------------------------------- |
-| `id`                     | String, PK |                                               |
-| `taskId`                 | FK → Task  | Cascade delete                                |
-| `agentId`                | FK → Agent | Cascade delete                                |
-| `runtime`                | String     | Recorded per run (`mock`)                     |
-| `status`                 | String     | `running`, `completed`, `failed`, `cancelled` |
-| `progress`               | Int        | 0–100                                         |
-| `startedAt`              | DateTime   | Default now                                   |
-| `endedAt`                | DateTime?  | Set on terminal states                        |
-| `failureReason`          | String?    | Set on failure                                |
-| `cancelReason`           | String?    | Set on cancellation                           |
-| `createdAt`, `updatedAt` | DateTime   |                                               |
+| Column                     | Type         | Notes                                                               |
+| -------------------------- | ------------ | ------------------------------------------------------------------- |
+| `id`                       | String, PK   |                                                                     |
+| `taskId`                   | FK → Task    | Cascade delete                                                      |
+| `agentId`                  | FK → Agent   | Cascade delete                                                      |
+| `runnerId`                 | FK → Runner? | `SetNull` on runner delete; `null` for mock executions              |
+| `runtime`                  | String       | `mock`, `codex`, or `opencode`                                      |
+| `status`                   | String       | `running`, `completed`, `failed`, `cancelled`                       |
+| `phase`                    | String       | `queued`, `preparing`, `running`, `finalizing`, or terminal outcome |
+| `progress`                 | Int          | 0–100                                                               |
+| `progressMode`             | String       | `determinate` or `indeterminate`                                    |
+| `exitCode`                 | Int?         | Real CLI exit code; `null` when unavailable                         |
+| `summary`                  | String?      | Final CLI summary or deterministic fake summary                     |
+| `branchName`, `baseCommit` | String?      | Git evidence reported by the runner                                 |
+| `headCommit`               | String?      | Head after the CLI finished; may equal `baseCommit`                 |
+| `lastRunnerSeq`            | Int          | Highest runner log sequence applied                                 |
+| `startedAt`                | DateTime     | Default now                                                         |
+| `endedAt`                  | DateTime?    | Set on terminal states                                              |
+| `failureReason`            | String?      | Set on failure                                                      |
+| `cancelReason`             | String?      | Set on cancellation                                                 |
+| `createdAt`, `updatedAt`   | DateTime     |                                                                     |
 
-Indexed by `taskId`, `agentId`, and `status`.
+Indexed by `taskId`, `agentId`, `runnerId`, `status`, and `phase`.
+
+`status` remains the coarse product state; `phase` is an additive, more precise
+execution stage used by the UI and runner protocol. Existing rows keep their
+status values, and the migration maps terminal statuses to terminal phases.
 
 A task may have at most one `running` execution at a time; this is enforced in
 `ExecutionsService.startForTask` with an in-process start lock rather than by a
@@ -147,14 +187,23 @@ or distributed lock.
 | ------------- | -------------- | ------------------------------------- |
 | `id`          | String, PK     |                                       |
 | `executionId` | FK → Execution | Cascade delete                        |
-| `seq`         | Int            | Monotonic per execution               |
+| `seq`         | Int            | Server-assigned, monotonic per run    |
+| `stream`      | String         | `stdout`, `stderr`, or `system`       |
+| `eventId`     | String?        | Runner-generated stable event id      |
+| `runnerSeq`   | Int?           | Runner-local sequence for idempotency |
 | `level`       | String         | `info`, `success`, `warning`, `error` |
 | `message`     | String         | Human-readable log line               |
 | `timestamp`   | DateTime       | Default now                           |
 
-Unique on `(executionId, seq)`; indexed by `(executionId, timestamp)`. Logs are
-read in ascending `seq` order. The client can pass `afterSeq` to fetch only newer
+Unique on `(executionId, seq)`, `(executionId, eventId)`, and
+`(executionId, runnerSeq)`; indexed by `(executionId, timestamp)`. Logs are read
+in ascending `seq` order. The client can pass `afterSeq` to fetch only newer
 lines and `limit` (1–500, default 200).
+
+The two sequence spaces are deliberate: `runnerSeq` is the runner's monotonic
+sequence (1, 2, 3, ...) and is used only for deduplication and acknowledgement;
+`seq` is assigned by the server so server-generated logs (phase messages,
+failure summaries, cancellation notes) share one ordered stream with CLI output.
 
 ### Activity
 
@@ -245,24 +294,34 @@ agents — so the shell and agent roster are usable — but omits tasks, executi
 and activities. E2E tests use this preset to verify empty states.
 
 On API startup `SeedService` seeds the default preset only when the workspace
-table is empty. Test resets always call `initializeDemoData` explicitly.
+table is empty. Test resets always call `initializeDemoData` explicitly. Test and
+E2E resets preserve the `Computer` and `Runner` rows so an already-paired Fake
+Runner stays connected across tests.
 
 ## SQLite configuration and migrations
 
 - Prisma 6.16.2, SQLite provider.
 - `PrismaService.onModuleInit` sets `PRAGMA journal_mode = WAL`,
-  `PRAGMA synchronous = NORMAL`, and `PRAGMA busy_timeout = 5000`.
-- The initial migration is
-  `apps/api/prisma/migrations/20261106095317_init/migration.sql`.
+  `PRAGMA synchronous = NORMAL`, and `PRAGMA busy_timeout = 15000`.
+- Migrations are incremental and preserve user data:
+  - `apps/api/prisma/migrations/20261106095317_init/migration.sql`
+  - `apps/api/prisma/migrations/20261107090000_runner_phase1/migration.sql`
+    (adds `Runner`, execution phase/progress/Git fields, and structured log
+    columns; existing executions are copied and terminal statuses are mapped to
+    terminal phases).
 - Development database: `apps/api/prisma/dev.db` (`DATABASE_URL=file:./dev.db`).
 - API test database: `apps/api/prisma/test.db` (`apps/api/.env.test`).
 - E2E database: `apps/api/prisma/e2e.db` (`apps/api/.env.e2e`).
+- Real CLI E2E database: `apps/api/prisma/real-e2e.db`
+  (`apps/api/.env.real-e2e`).
 
-`prisma db push --force-reset` is used for test databases; the development
-database uses `prisma migrate deploy` (or `prisma migrate dev` when evolving the
-schema). SQLite WAL sidecar files (`-wal`, `-shm`) can survive an interrupted
-reset and make the file unreadable; see the troubleshooting section in
-[testing.md](testing.md).
+Test database URLs include `connection_limit=1&socket_timeout=20` to reduce
+Prisma/SQLite lock contention during serial test resets; the server-side
+`busy_timeout` covers normal writes. `prisma db push --force-reset` is used for
+test databases; the development database uses `prisma migrate deploy` (or
+`prisma migrate dev` when evolving the schema). SQLite WAL sidecar files (`-wal`,
+`-shm`) can survive an interrupted reset and make the file unreadable; see the
+troubleshooting section in [testing.md](testing.md).
 
 ## Data retention
 
@@ -274,3 +333,9 @@ in `claimed`, `in_progress`, or `in_review` are reset to `todo` and unassigned;
 terminal tasks keep their status but also lose the assignee through the
 `SetNull` relation. The demo UI blocks deletion while an execution is running to
 keep this predictable.
+
+Deleting a computer cascades to its runner row. Deleting a runner (or a computer)
+sets `Execution.runnerId` to `NULL` for historical executions, preserving the
+execution and log history. Git worktrees and branches created by the runner are
+outside the database and are not deleted automatically; see
+[runner-setup.md](runner-setup.md) for cleanup guidance.

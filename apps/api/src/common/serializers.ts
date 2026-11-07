@@ -9,6 +9,9 @@ import type {
   ExecutionLogDto,
   ExecutionSummaryDto,
   ProjectDto,
+  RunnerCapabilitiesDto,
+  RunnerDto,
+  RunnerSummaryDto,
   TaskDetailDto,
   TaskDto,
   TaskSummaryDto,
@@ -18,14 +21,18 @@ import type {
   ActivityType,
   AgentRuntimeType,
   AgentStatus,
+  ExecutionPhase,
   ExecutionStatus,
   LogLevel,
+  LogStream,
+  ProgressMode,
+  RunnerStatus,
   TaskPriority,
   TaskStatus,
 } from '@raft-lite/contracts';
 
 export const agentRelations = {
-  computer: true,
+  computer: { include: { runner: true } },
 } satisfies Prisma.AgentInclude;
 export type AgentWithRelations = Prisma.AgentGetPayload<{ include: typeof agentRelations }>;
 
@@ -63,9 +70,33 @@ export type ActivityWithRelations = Prisma.ActivityGetPayload<{
   include: typeof activityRelations;
 }>;
 
+export const runnerRelations = {
+  computer: true,
+} satisfies Prisma.RunnerInclude;
+export type RunnerWithRelations = Prisma.RunnerGetPayload<{ include: typeof runnerRelations }>;
+
 const iso = (value: Date): string => value.toISOString();
 const isoOrNull = (value: Date | null): string | null => (value ? iso(value) : null);
 const asEnum = <T extends string>(value: string): T => value as T;
+
+function parseRunnerCapabilities(value: string): RunnerCapabilitiesDto {
+  try {
+    const parsed = JSON.parse(value) as Partial<RunnerCapabilitiesDto>;
+    if (parsed && typeof parsed === 'object') {
+      return {
+        runtimes: Array.isArray(parsed.runtimes) ? parsed.runtimes : [],
+        projectIds: Array.isArray(parsed.projectIds) ? parsed.projectIds : [],
+        maxConcurrentExecutions:
+          typeof parsed.maxConcurrentExecutions === 'number'
+            ? parsed.maxConcurrentExecutions
+            : null,
+      };
+    }
+  } catch {
+    // Ignore malformed legacy capability blobs; the API remains readable.
+  }
+  return { runtimes: [], projectIds: [], maxConcurrentExecutions: null };
+}
 
 export function toComputerDto(computer: Prisma.ComputerGetPayload<object>): ComputerDto {
   return {
@@ -89,12 +120,47 @@ export function toProjectDto(project: Prisma.ProjectGetPayload<object>): Project
   };
 }
 
+export function toRunnerSummaryDto(runner: {
+  id: string;
+  computerId: string;
+  status: string;
+  runnerVersion: string;
+  platform: string;
+  architecture: string;
+  lastHeartbeatAt: Date | null;
+}): RunnerSummaryDto {
+  return {
+    id: runner.id,
+    computerId: runner.computerId,
+    status: asEnum<RunnerStatus>(runner.status),
+    runnerVersion: runner.runnerVersion,
+    platform: runner.platform,
+    architecture: runner.architecture,
+    lastHeartbeatAt: isoOrNull(runner.lastHeartbeatAt),
+  };
+}
+
+export function toRunnerDto(runner: RunnerWithRelations): RunnerDto {
+  return {
+    ...toRunnerSummaryDto(runner),
+    protocolVersion: runner.protocolVersion,
+    capabilities: parseRunnerCapabilities(runner.capabilitiesJson),
+    maxConcurrentExecutions: runner.maxConcurrentExecutions,
+    connectedAt: isoOrNull(runner.connectedAt),
+    disconnectedAt: isoOrNull(runner.disconnectedAt),
+    createdAt: iso(runner.createdAt),
+    updatedAt: iso(runner.updatedAt),
+    computer: runner.computer ? toComputerDto(runner.computer) : null,
+  };
+}
+
 export function toAgentSummaryDto(agent: {
   id: string;
   name: string;
   role: string;
   status: string;
   runtime: string;
+  computerId?: string | null;
 }): AgentSummaryDto {
   return {
     id: agent.id,
@@ -102,6 +168,7 @@ export function toAgentSummaryDto(agent: {
     role: agent.role,
     status: asEnum<AgentStatus>(agent.status),
     runtime: asEnum<AgentRuntimeType>(agent.runtime),
+    computerId: agent.computerId ?? null,
   };
 }
 
@@ -116,6 +183,7 @@ export function toAgentDto(agent: AgentWithRelations): AgentDto {
     status: asEnum<AgentStatus>(agent.status),
     computerId: agent.computerId,
     computer: agent.computer ? toComputerDto(agent.computer) : null,
+    runner: agent.computer?.runner ? toRunnerSummaryDto(agent.computer.runner) : null,
     createdAt: iso(agent.createdAt),
     updatedAt: iso(agent.updatedAt),
     lastActiveAt: isoOrNull(agent.lastActiveAt),
@@ -128,7 +196,9 @@ export function toExecutionSummaryDto(execution: {
   agentId: string;
   runtime: string;
   status: string;
+  phase: string;
   progress: number;
+  progressMode: string;
   startedAt: Date;
   endedAt: Date | null;
   createdAt: Date;
@@ -139,7 +209,9 @@ export function toExecutionSummaryDto(execution: {
     agentId: execution.agentId,
     runtime: execution.runtime,
     status: asEnum<ExecutionStatus>(execution.status),
+    phase: asEnum<ExecutionPhase>(execution.phase),
     progress: execution.progress,
+    progressMode: asEnum<ProgressMode>(execution.progressMode),
     startedAt: iso(execution.startedAt),
     endedAt: isoOrNull(execution.endedAt),
     createdAt: iso(execution.createdAt),
@@ -206,8 +278,17 @@ export function toExecutionDto(execution: ExecutionWithRelations): ExecutionDto 
     taskId: execution.taskId,
     agentId: execution.agentId,
     runtime: execution.runtime,
+    runnerId: execution.runnerId,
     status: asEnum<ExecutionStatus>(execution.status),
+    phase: asEnum<ExecutionPhase>(execution.phase),
     progress: execution.progress,
+    progressMode: asEnum<ProgressMode>(execution.progressMode),
+    exitCode: execution.exitCode,
+    summary: execution.summary,
+    branchName: execution.branchName,
+    baseCommit: execution.baseCommit,
+    headCommit: execution.headCommit,
+    lastRunnerSeq: execution.lastRunnerSeq,
     startedAt: iso(execution.startedAt),
     endedAt: isoOrNull(execution.endedAt),
     failureReason: execution.failureReason,
@@ -224,6 +305,9 @@ export function toExecutionLogDto(log: Prisma.ExecutionLogGetPayload<object>): E
     id: log.id,
     executionId: log.executionId,
     seq: log.seq,
+    stream: asEnum<LogStream>(log.stream),
+    eventId: log.eventId,
+    runnerSeq: log.runnerSeq,
     level: asEnum<LogLevel>(log.level),
     message: log.message,
     timestamp: iso(log.timestamp),

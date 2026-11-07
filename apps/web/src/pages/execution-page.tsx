@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, Ban, Clock3, RefreshCw, Terminal } from 'lucide-react';
+import { RUNTIME_LABELS, type AgentRuntimeType } from '@raft-lite/contracts';
 import { useExecution, useExecutionLogs } from '../hooks/use-raft-data';
 import { useSocketStatus } from '../providers/socket-provider';
 import { useToast } from '../providers/toast-provider';
@@ -103,9 +104,11 @@ export function ExecutionPage(): JSX.Element {
     );
   }
 
+  const runtimeLabel =
+    RUNTIME_LABELS[execution.runtime as AgentRuntimeType] ?? execution.runtime;
   const outcomeCopy =
     execution.status === 'running'
-      ? 'The Mock runtime is executing this task. Logs stream live over Socket.IO.'
+      ? `The ${runtimeLabel} runtime is executing this task. Logs stream live over Socket.IO.`
       : execution.status === 'completed'
         ? 'The execution completed and the task moved to Done. The agent is idle.'
         : execution.status === 'failed'
@@ -136,7 +139,7 @@ export function ExecutionPage(): JSX.Element {
             <ExecutionStatusBadge status={execution.status} />
           </div>
           <p className="mt-1.5 max-w-2xl text-[12.5px] leading-5 text-muted">
-            {execution.task.title} · {execution.runtime} runtime
+            {execution.task.title} · {runtimeLabel} runtime
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -250,7 +253,7 @@ export function ExecutionPage(): JSX.Element {
             </div>
             <div>
               <dt className="text-faint">Runtime</dt>
-              <dd className="mt-1 font-medium text-ink">{execution.runtime}</dd>
+              <dd className="mt-1 font-medium text-ink">{runtimeLabel}</dd>
             </div>
           </dl>
           {execution.failureReason ? (
@@ -316,7 +319,7 @@ export function ExecutionPage(): JSX.Element {
               </span>
             </div>
             <div className="mt-3 border-t border-line pt-3 text-[10.5px] text-faint">
-              {execution.agent.runtime} runtime · Execution {shortId(execution.id)}
+              {RUNTIME_LABELS[execution.agent.runtime]} runtime · Execution {shortId(execution.id)}
             </div>
           </section>
         </div>
@@ -337,7 +340,7 @@ export function ExecutionPage(): JSX.Element {
         open={stopOpen}
         onOpenChange={setStopOpen}
         title="Cancel this execution?"
-        description="The running Mock execution will stop immediately. The task moves to Cancelled and the agent returns to Idle."
+        description="The running execution will stop once the runtime confirms cancellation. The task moves to Cancelled and the agent returns to Idle."
         confirmLabel="Cancel execution"
         cancelLabel="Keep running"
         onConfirm={() => void handleStop()}

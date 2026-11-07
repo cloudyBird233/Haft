@@ -13,7 +13,9 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
     "db:prepare:e2e": "dotenv -e .env.e2e -- node scripts/reset-database.mjs && dotenv -e .env.e2e -- prisma db push --force-reset --skip-generate",
+    "db:prepare:real-e2e": "dotenv -e .env.real-e2e -- node scripts/reset-database.mjs && dotenv -e .env.real-e2e -- prisma db push --force-reset --skip-generate",
     "start:e2e": "dotenv -e .env.e2e -- nest start",
+    "start:real-e2e": "dotenv -e .env.real-e2e -- nest start",
     "test": "dotenv -e .env.test -- node scripts/reset-database.mjs && dotenv -e .env.test -- prisma db push --force-reset --skip-generate && dotenv -e .env.test -- vitest run"
   },
   "dependencies": {
@@ -39,6 +41,7 @@
     "@types/node": "^24.3.0",
     "@types/supertest": "^6.0.3",
     "dotenv-cli": "^10.0.0",
+    "socket.io-client": "^4.8.1",
     "prisma": "6.16.2",
     "supertest": "^7.1.4",
     "tsx": "^4.20.5",

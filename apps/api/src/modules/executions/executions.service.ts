@@ -1,12 +1,12 @@
 import {
   HttpStatus,
-  Inject,
   Injectable,
   type OnModuleDestroy,
   type OnModuleInit,
 } from '@nestjs/common';
 import type {
   AgentDto,
+  AgentRuntimeType,
   CancelExecutionInput,
   ExecutionDto,
   ExecutionListQuery,
@@ -28,14 +28,17 @@ import {
   toExecutionDto,
   toExecutionLogDto,
   toTaskDto,
+  type ExecutionWithRelations,
 } from '../../common/serializers';
 import { ActivitiesService } from '../activities/activities.service';
 import { EventsGateway } from '../events/events.gateway';
-import {
-  AGENT_RUNTIME,
-  type AgentRuntime,
-  type RuntimeEvent,
-} from '../runtime/agent-runtime.interface';
+import type { RuntimeEvent } from '../runtime/agent-runtime.interface';
+import { RuntimeRegistryService } from '../runtime/runtime-registry.service';
+
+const RUNNER_CANCEL_TIMEOUT_MS = Math.max(
+  5_000,
+  Number(process.env.HAFT_RUNNER_CANCEL_TIMEOUT_MS ?? 30_000),
+);
 
 @Injectable()
 export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
@@ -47,11 +50,11 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     private readonly activities: ActivitiesService,
     private readonly events: EventsGateway,
     private readonly logger: AppLogger,
-    @Inject(AGENT_RUNTIME) private readonly runtime: AgentRuntime,
+    private readonly runtimes: RuntimeRegistryService,
   ) {}
 
   onModuleInit(): void {
-    this.unsubscribe = this.runtime.onEvent((event) => {
+    this.unsubscribe = this.runtimes.onEvent((event) => {
       void this.withExecutionLock(event.executionId, () => this.handleRuntimeEvent(event)).catch(
         (error: unknown) => {
           this.logger.error({
@@ -138,12 +141,41 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     if (task.assignee.status === 'busy') {
       throw new AppException('AGENT_BUSY', 'The assigned agent is busy', HttpStatus.CONFLICT);
     }
-    if (task.assignee.runtime !== 'mock') {
-      throw new AppException(
-        'RUNTIME_NOT_AVAILABLE',
-        `${task.assignee.runtime} runtime is reserved but not connected in this phase`,
-        HttpStatus.UNPROCESSABLE_ENTITY,
+
+    const runtimeType = task.assignee.runtime as AgentRuntimeType;
+    const requiresRunner = runtimeType !== 'mock';
+    let runnerId: string | null = null;
+    if (requiresRunner) {
+      if (!task.assignee.computerId || !task.assignee.computer) {
+        throw new AppException(
+          'COMPUTER_NOT_ASSIGNED',
+          'Assign the agent to a computer with a connected runner',
+          HttpStatus.CONFLICT,
+        );
+      }
+      if (task.assignee.computer.status === 'offline') {
+        throw new AppException(
+          'COMPUTER_OFFLINE',
+          'The assigned computer is offline',
+          HttpStatus.CONFLICT,
+        );
+      }
+      const availability = await this.runtimes.getAvailability(
+        runtimeType,
+        task.assignee.computerId,
+        task.projectId,
       );
+      if (!availability.available) {
+        throw runtimeUnavailable(availability.reasonCode, availability.reason, runtimeType);
+      }
+      runnerId = availability.runnerId;
+      if (!runnerId) {
+        throw new AppException(
+          'RUNNER_OFFLINE',
+          'No connected runner is available for this execution',
+          HttpStatus.CONFLICT,
+        );
+      }
     }
 
     const execution = await this.prisma.$transaction(async (tx) => {
@@ -151,9 +183,12 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         data: {
           taskId,
           agentId: assigneeAgentId,
-          runtime: 'mock',
+          runnerId,
+          runtime: runtimeType,
           status: 'running',
+          phase: requiresRunner ? 'queued' : 'running',
           progress: 0,
+          progressMode: requiresRunner ? 'indeterminate' : 'determinate',
         },
         include: executionRelations,
       });
@@ -186,7 +221,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     this.events.emitExecutionUpdated(executionDto);
     this.logger.info({
       eventType: 'execution.started',
-      message: 'Mock execution started',
+      message: `${runtimeType} execution started`,
       taskId,
       agentId: assigneeAgentId,
       executionId: execution.id,
@@ -194,12 +229,15 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     });
 
     try {
-      await this.runtime.start({
+      await this.runtimes.start(runtimeType, {
         executionId: execution.id,
         taskId,
         taskTitle: task.title,
+        taskDescription: task.description,
+        projectId: task.projectId,
         agentId: assigneeAgentId,
         agentName: executionDto.agent.name,
+        runnerId,
       });
     } catch (error) {
       try {
@@ -223,7 +261,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
           error: rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
         });
       }
-      await this.runtime.stop(execution.id).catch(() => undefined);
+      await this.runtimes.stop(runtimeType, execution.id).catch(() => undefined);
       this.logger.error({
         eventType: 'runtime.start_failed',
         message: 'Runtime rejected execution start',
@@ -297,68 +335,132 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async cancel(id: string, input?: CancelExecutionInput): Promise<ExecutionDto> {
-    return this.withExecutionLock(id, async () => {
-      const execution = await this.prisma.execution.findUnique({
-        where: { id },
-        include: executionRelations,
-      });
-      if (!execution) {
-        throw new AppException('EXECUTION_NOT_FOUND', 'Execution not found', HttpStatus.NOT_FOUND);
-      }
-      if (execution.status !== 'running') {
-        throw new AppException(
-          'EXECUTION_NOT_RUNNING',
-          'Only a running execution can be cancelled',
-          HttpStatus.CONFLICT,
-        );
-      }
-      await this.runtime.stop(id);
-      const reason = input?.reason ?? 'Cancelled by operator';
-      const endedAt = new Date();
-
-      await this.prisma.$transaction([
-        this.prisma.execution.update({
-          where: { id },
-          data: { status: 'cancelled', endedAt, cancelReason: reason },
-        }),
-        this.prisma.task.update({
-          where: { id: execution.taskId },
-          data: { status: 'cancelled' },
-        }),
-        this.prisma.agent.update({
-          where: { id: execution.agentId },
-          data: { status: 'idle', lastActiveAt: endedAt },
-        }),
-      ]);
-
-      await this.appendLog(id, 'warning', `Execution cancelled: ${reason}`);
-
-      const [updatedExecution, taskDto, agentDto] = await Promise.all([
-        this.getExecutionDto(id),
-        this.getTaskDto(execution.taskId),
-        this.getAgentDto(execution.agentId),
-      ]);
-      this.events.emitExecutionUpdated(updatedExecution);
-      this.events.emitTaskUpdated(taskDto);
-      this.events.emitAgentUpdated(agentDto);
-      await this.activities.record({
-        type: 'execution.cancelled',
-        summary: `${updatedExecution.agent.name} stopped “${updatedExecution.task.title}”`,
-        taskId: execution.taskId,
-        agentId: execution.agentId,
-        executionId: id,
-        metadata: { reason },
-      });
-      this.logger.info({
-        eventType: 'execution.cancelled',
-        message: 'Execution cancelled by operator',
-        taskId: execution.taskId,
-        agentId: execution.agentId,
-        executionId: id,
-        status: 'cancelled',
-      });
-      return updatedExecution;
+    const current = await this.prisma.execution.findUnique({
+      where: { id },
+      include: executionRelations,
     });
+    if (!current) {
+      throw new AppException('EXECUTION_NOT_FOUND', 'Execution not found', HttpStatus.NOT_FOUND);
+    }
+    if (current.status !== 'running') {
+      throw new AppException(
+        'EXECUTION_NOT_RUNNING',
+        'Only a running execution can be cancelled',
+        HttpStatus.CONFLICT,
+      );
+    }
+
+    if (current.runtime === 'mock') {
+      return this.withExecutionLock(id, () => this.cancelMockExecution(current, input));
+    }
+    return this.cancelRunnerExecution(current, input);
+  }
+
+  private async cancelMockExecution(
+    execution: ExecutionWithRelations,
+    input?: CancelExecutionInput,
+  ): Promise<ExecutionDto> {
+    const current = execution;
+    if (current.status !== 'running') {
+      throw new AppException(
+        'EXECUTION_NOT_RUNNING',
+        'Only a running execution can be cancelled',
+        HttpStatus.CONFLICT,
+      );
+    }
+    await this.runtimes.stop(current.runtime as AgentRuntimeType, current.id);
+    const reason = input?.reason ?? 'Cancelled by operator';
+    const endedAt = new Date();
+
+    await this.prisma.$transaction([
+      this.prisma.execution.update({
+        where: { id: current.id },
+        data: {
+          status: 'cancelled',
+          phase: 'cancelled',
+          endedAt,
+          cancelReason: reason,
+        },
+      }),
+      this.prisma.task.update({
+        where: { id: current.taskId },
+        data: { status: 'cancelled' },
+      }),
+      this.prisma.agent.update({
+        where: { id: current.agentId },
+        data: { status: 'idle', lastActiveAt: endedAt },
+      }),
+    ]);
+
+    await this.appendLog(current.id, 'warning', `Execution cancelled: ${reason}`);
+
+    const [updatedExecution, taskDto, agentDto] = await Promise.all([
+      this.getExecutionDto(current.id),
+      this.getTaskDto(current.taskId),
+      this.getAgentDto(current.agentId),
+    ]);
+    this.events.emitExecutionUpdated(updatedExecution);
+    this.events.emitTaskUpdated(taskDto);
+    this.events.emitAgentUpdated(agentDto);
+    await this.activities.record({
+      type: 'execution.cancelled',
+      summary: `${updatedExecution.agent.name} stopped “${updatedExecution.task.title}”`,
+      taskId: current.taskId,
+      agentId: current.agentId,
+      executionId: current.id,
+      metadata: { reason },
+    });
+    this.logger.info({
+      eventType: 'execution.cancelled',
+      message: 'Execution cancelled by operator',
+      taskId: current.taskId,
+      agentId: current.agentId,
+      executionId: current.id,
+      status: 'cancelled',
+    });
+    return updatedExecution;
+  }
+
+  private async cancelRunnerExecution(
+    execution: ExecutionWithRelations,
+    input?: CancelExecutionInput,
+  ): Promise<ExecutionDto> {
+    const reason = input?.reason ?? 'Cancelled by operator';
+    let dispatched = true;
+    if (execution.runnerId) {
+      dispatched = this.runtimes.cancelOnRunner(execution.runnerId, execution.id, reason);
+    } else {
+      await this.runtimes.stop(execution.runtime as AgentRuntimeType, execution.id);
+    }
+    if (!dispatched) {
+      const latest = await this.findExecutionWithRelations(execution.id);
+      if (latest && latest.status !== 'running') {
+        return toExecutionDto(latest);
+      }
+      throw new AppException(
+        'RUNNER_OFFLINE',
+        'The runner is offline; the execution was not cancelled and remains running',
+        HttpStatus.CONFLICT,
+        { executionId: execution.id },
+      );
+    }
+
+    // Real cancellation is only complete when the runner confirms that the
+    // process tree stopped. Never assume success from the request alone.
+    const terminal = await this.waitForExecutionTerminal(execution.id, RUNNER_CANCEL_TIMEOUT_MS);
+    if (!terminal) {
+      const latest = await this.findExecutionWithRelations(execution.id);
+      if (latest && latest.status !== 'running') {
+        return toExecutionDto(latest);
+      }
+      throw new AppException(
+        'RUNNER_CANCEL_TIMEOUT',
+        'The runner did not confirm that the process tree stopped; the execution remains running',
+        HttpStatus.CONFLICT,
+        { executionId: execution.id, timeoutMs: RUNNER_CANCEL_TIMEOUT_MS },
+      );
+    }
+    return this.getExecutionDto(execution.id);
   }
 
   async cancelTask(taskId: string, input?: CancelExecutionInput): Promise<TaskCancellationDto> {
@@ -426,6 +528,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         where: { id: input.executionId },
         data: {
           status: 'failed',
+          phase: 'failed',
           endedAt,
           failureReason,
         },
@@ -470,14 +573,33 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       case 'log':
         await this.handleLog(event);
         break;
+      case 'phase':
+        await this.handlePhase(event);
+        break;
       case 'progress':
         await this.handleProgress(event);
         break;
       case 'completed':
-        await this.finishExecution(event.executionId, 'completed');
+        await this.finishExecution(event.executionId, 'completed', {
+          exitCode: event.exitCode ?? null,
+          summary: event.summary ?? null,
+          git: event.git ?? null,
+        });
         break;
       case 'failed':
-        await this.finishExecution(event.executionId, 'failed', event.reason);
+        await this.finishExecution(event.executionId, 'failed', {
+          reason: event.reason,
+          exitCode: event.exitCode ?? null,
+          summary: event.summary ?? null,
+          git: event.git ?? null,
+        });
+        break;
+      case 'cancelled':
+        await this.finishExecution(event.executionId, 'cancelled', {
+          reason: event.reason ?? 'Cancelled by operator',
+          exitCode: event.exitCode ?? null,
+          git: event.git ?? null,
+        });
         break;
     }
   }
@@ -485,26 +607,75 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   private async handleLog(event: Extract<RuntimeEvent, { type: 'log' }>): Promise<void> {
     const execution = await this.prisma.execution.findUnique({
       where: { id: event.executionId },
-      select: { id: true, status: true },
+      select: { id: true, status: true, runnerId: true },
     });
     if (!execution || execution.status !== 'running') {
       return;
     }
-    const log = await this.prisma.executionLog.create({
-      data: {
-        executionId: event.executionId,
-        seq: event.seq,
-        level: event.level,
-        message: event.message,
-      },
-    });
+    // Runner sequence numbers are local to that execution on that runner.
+    // Server-generated logs (phase messages, failures) also occupy `seq`, so
+    // allocating a server sequence here prevents a runner log from being
+    // mistaken for a duplicate of a server log. `runnerSeq` remains the
+    // idempotency key for runner replays.
+    const seq = event.runnerSeq ? await this.nextLogSeq(event.executionId) : event.seq;
+    let log;
+    try {
+      log = await this.prisma.executionLog.create({
+        data: {
+          executionId: event.executionId,
+          seq,
+          stream: event.stream ?? 'system',
+          eventId: event.eventId ?? null,
+          runnerSeq: event.runnerSeq ?? null,
+          level: event.level,
+          message: event.message,
+          ...(event.timestamp ? { timestamp: new Date(event.timestamp) } : {}),
+        },
+      });
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        if (execution.runnerId && event.runnerSeq) {
+          this.runtimes.acknowledgeLog(execution.runnerId, event.executionId, event.runnerSeq);
+        }
+        return;
+      }
+      throw error;
+    }
+
+    if (event.runnerSeq) {
+      await this.prisma.execution.updateMany({
+        where: { id: event.executionId, lastRunnerSeq: { lt: event.runnerSeq } },
+        data: { lastRunnerSeq: event.runnerSeq },
+      });
+    }
     this.events.emitExecutionLog(toExecutionLogDto(log));
+    if (execution.runnerId && event.runnerSeq) {
+      this.runtimes.acknowledgeLog(execution.runnerId, event.executionId, event.runnerSeq);
+    }
+  }
+
+  private async handlePhase(event: Extract<RuntimeEvent, { type: 'phase' }>): Promise<void> {
+    const result = await this.prisma.execution.updateMany({
+      where: { id: event.executionId, status: 'running' },
+      data: { phase: event.phase },
+    });
+    if (result.count === 0) {
+      return;
+    }
+    if (event.message) {
+      await this.appendLog(event.executionId, 'info', event.message);
+    }
+    const execution = await this.getExecutionDto(event.executionId);
+    this.events.emitExecutionUpdated(execution);
   }
 
   private async handleProgress(event: Extract<RuntimeEvent, { type: 'progress' }>): Promise<void> {
     const result = await this.prisma.execution.updateMany({
       where: { id: event.executionId, status: 'running' },
-      data: { progress: Math.min(100, Math.max(0, event.progress)) },
+      data: {
+        progress: Math.min(100, Math.max(0, event.progress)),
+        ...(event.progressMode ? { progressMode: event.progressMode } : {}),
+      },
     });
     if (result.count === 0) {
       return;
@@ -515,8 +686,20 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
 
   private async finishExecution(
     id: string,
-    outcome: 'completed' | 'failed',
-    failureReason?: string,
+    outcome: 'completed' | 'failed' | 'cancelled',
+    metadata: {
+      reason?: string | null;
+      exitCode?: number | null;
+      summary?: string | null;
+      git?: {
+        branchName: string;
+        baseCommit: string;
+        headCommit: string | null;
+        changedFiles: number;
+        diffStat: string;
+        gitStatus: string;
+      } | null;
+    } = {},
   ): Promise<void> {
     const current = await this.prisma.execution.findUnique({
       where: { id },
@@ -526,17 +709,33 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     const endedAt = new Date();
-    const nextTaskStatus = outcome === 'completed' ? 'done' : 'failed';
-    const nextAgentStatus = outcome === 'completed' ? 'idle' : 'error';
+    const nextTaskStatus =
+      outcome === 'completed' ? 'done' : outcome === 'failed' ? 'failed' : 'cancelled';
+    const nextAgentStatus = outcome === 'failed' ? 'error' : 'idle';
+    const git = metadata.git;
 
     await this.prisma.$transaction([
       this.prisma.execution.update({
         where: { id },
         data: {
           status: outcome,
+          phase: outcome,
           progress: outcome === 'completed' ? 100 : current.progress,
+          progressMode: outcome === 'completed' ? 'determinate' : current.progressMode,
           endedAt,
-          ...(failureReason ? { failureReason } : {}),
+          ...(metadata.exitCode !== undefined ? { exitCode: metadata.exitCode } : {}),
+          ...(metadata.summary !== undefined ? { summary: metadata.summary } : {}),
+          ...(outcome === 'failed' && metadata.reason ? { failureReason: metadata.reason } : {}),
+          ...(outcome === 'cancelled'
+            ? { cancelReason: metadata.reason ?? 'Cancelled by operator' }
+            : {}),
+          ...(git
+            ? {
+                branchName: git.branchName,
+                baseCommit: git.baseCommit,
+                headCommit: git.headCommit,
+              }
+            : {}),
         },
       }),
       this.prisma.task.update({
@@ -549,6 +748,25 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       }),
     ]);
 
+    this.runtimes.noteFinished(current.runtime as AgentRuntimeType, id);
+
+    if (outcome === 'failed' && metadata.reason) {
+      const errorLog = await this.prisma.executionLog.findFirst({
+        where: { executionId: id, level: 'error' },
+        select: { id: true },
+      });
+      if (!errorLog) {
+        await this.appendLog(id, 'error', `Execution failed: ${metadata.reason}`);
+      }
+    }
+    if (outcome === 'cancelled') {
+      await this.appendLog(
+        id,
+        'warning',
+        `Execution cancelled: ${metadata.reason ?? 'Cancelled by operator'}`,
+      );
+    }
+
     const [executionDto, taskDto, agentDto] = await Promise.all([
       this.getExecutionDto(id),
       this.getTaskDto(current.taskId),
@@ -559,24 +777,46 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     this.events.emitAgentUpdated(agentDto);
 
     await this.activities.record({
-      type: outcome === 'completed' ? 'execution.completed' : 'execution.failed',
+      type:
+        outcome === 'completed'
+          ? 'execution.completed'
+          : outcome === 'failed'
+            ? 'execution.failed'
+            : 'execution.cancelled',
       summary:
         outcome === 'completed'
           ? `${executionDto.agent.name} completed “${executionDto.task.title}”`
-          : `${executionDto.agent.name} failed “${executionDto.task.title}”`,
+          : outcome === 'failed'
+            ? `${executionDto.agent.name} failed “${executionDto.task.title}”`
+            : `${executionDto.agent.name} stopped “${executionDto.task.title}”`,
       taskId: current.taskId,
       agentId: current.agentId,
       executionId: id,
-      metadata: failureReason ? { failureReason } : null,
+      metadata:
+        outcome === 'failed'
+          ? { failureReason: metadata.reason ?? null, exitCode: metadata.exitCode ?? null }
+          : outcome === 'cancelled'
+            ? { reason: metadata.reason ?? null }
+            : null,
     });
     this.logger.info({
-      eventType: outcome === 'completed' ? 'execution.completed' : 'execution.failed',
-      message: outcome === 'completed' ? 'Execution completed successfully' : 'Execution failed',
+      eventType:
+        outcome === 'completed'
+          ? 'execution.completed'
+          : outcome === 'failed'
+            ? 'execution.failed'
+            : 'execution.cancelled',
+      message:
+        outcome === 'completed'
+          ? 'Execution completed successfully'
+          : outcome === 'failed'
+            ? 'Execution failed'
+            : 'Execution cancelled',
       taskId: current.taskId,
       agentId: current.agentId,
       executionId: id,
       status: outcome,
-      ...(failureReason ? { error: failureReason } : {}),
+      ...(metadata.reason ? { error: metadata.reason } : {}),
     });
   }
 
@@ -584,23 +824,49 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     executionId: string,
     level: 'info' | 'success' | 'warning' | 'error',
     message: string,
+    stream: 'stdout' | 'stderr' | 'system' = 'system',
   ): Promise<void> {
-    const aggregate = await this.prisma.executionLog.aggregate({
-      where: { executionId },
-      _max: { seq: true },
-    });
-    const seq = (aggregate._max.seq ?? 0) + 1;
+    const seq = await this.nextLogSeq(executionId);
     const log = await this.prisma.executionLog.create({
-      data: { executionId, seq, level, message },
+      data: { executionId, seq, level, message, stream },
     });
     this.events.emitExecutionLog(toExecutionLogDto(log));
   }
 
-  private async getExecutionDto(id: string): Promise<ExecutionDto> {
-    const execution = await this.prisma.execution.findUnique({
+  private async nextLogSeq(executionId: string): Promise<number> {
+    const aggregate = await this.prisma.executionLog.aggregate({
+      where: { executionId },
+      _max: { seq: true },
+    });
+    return (aggregate._max.seq ?? 0) + 1;
+  }
+
+  private async waitForExecutionTerminal(
+    id: string,
+    timeoutMs: number,
+  ): Promise<{ status: string } | null> {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const execution = await this.prisma.execution.findUnique({
+        where: { id },
+        select: { status: true },
+      });
+      if (!execution) return null;
+      if (execution.status !== 'running') return execution;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return null;
+  }
+
+  private async findExecutionWithRelations(id: string) {
+    return this.prisma.execution.findUnique({
       where: { id },
       include: executionRelations,
     });
+  }
+
+  private async getExecutionDto(id: string): Promise<ExecutionDto> {
+    const execution = await this.findExecutionWithRelations(id);
     if (!execution) {
       throw new AppException('EXECUTION_NOT_FOUND', 'Execution not found', HttpStatus.NOT_FOUND);
     }
@@ -649,4 +915,33 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       }
     }
   }
+}
+
+function runtimeUnavailable(
+  reasonCode: string | null,
+  reason: string | null,
+  runtime: AgentRuntimeType,
+): AppException {
+  const conflictCodes = new Set([
+    'COMPUTER_NOT_ASSIGNED',
+    'RUNNER_NOT_REGISTERED',
+    'RUNNER_OFFLINE',
+    'COMPUTER_OFFLINE',
+  ]);
+  const code = reasonCode ?? 'RUNTIME_NOT_AVAILABLE';
+  return new AppException(
+    code,
+    reason ?? `${runtime} runtime is not available`,
+    conflictCodes.has(code) ? HttpStatus.CONFLICT : HttpStatus.UNPROCESSABLE_ENTITY,
+    { runtime, reasonCode: code },
+  );
+}
+
+function isUniqueConstraintError(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      (error as { code?: unknown }).code === 'P2002',
+  );
 }

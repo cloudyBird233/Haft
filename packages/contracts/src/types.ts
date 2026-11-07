@@ -2,8 +2,12 @@ import type {
   ActivityType,
   AgentRuntimeType,
   AgentStatus,
+  ExecutionPhase,
   ExecutionStatus,
   LogLevel,
+  LogStream,
+  ProgressMode,
+  RunnerStatus,
   TaskPriority,
   TaskStatus,
 } from './constants';
@@ -41,6 +45,55 @@ export interface ComputerDto {
   createdAt: string;
 }
 
+export interface RunnerRuntimeCapabilityDto {
+  runtime: AgentRuntimeType;
+  installed: boolean;
+  version: string | null;
+  authenticated: boolean;
+  message: string | null;
+}
+
+export interface RunnerCapabilitiesDto {
+  runtimes: RunnerRuntimeCapabilityDto[];
+  projectIds: string[];
+  maxConcurrentExecutions: number | null;
+}
+
+export interface RunnerSummaryDto {
+  id: string;
+  computerId: string;
+  status: RunnerStatus;
+  runnerVersion: string;
+  platform: string;
+  architecture: string;
+  lastHeartbeatAt: string | null;
+}
+
+export interface RunnerDto extends RunnerSummaryDto {
+  protocolVersion: number;
+  capabilities: RunnerCapabilitiesDto;
+  maxConcurrentExecutions: number;
+  connectedAt: string | null;
+  disconnectedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  computer: ComputerDto | null;
+}
+
+export interface RuntimeAvailabilityDto {
+  runtime: AgentRuntimeType;
+  label: string;
+  available: boolean;
+  requiresRunner: boolean;
+  reason: string | null;
+  reasonCode: string | null;
+  runnerId: string | null;
+  runnerStatus: RunnerStatus | null;
+  cliVersion: string | null;
+  authenticated: boolean | null;
+  projectIds: string[];
+}
+
 export interface ProjectDto {
   id: string;
   name: string;
@@ -64,6 +117,7 @@ export interface AgentSummaryDto {
   role: string;
   status: AgentStatus;
   runtime: AgentRuntimeType;
+  computerId: string | null;
 }
 
 export interface AgentDto {
@@ -76,6 +130,7 @@ export interface AgentDto {
   status: AgentStatus;
   computerId: string | null;
   computer: ComputerDto | null;
+  runner?: RunnerSummaryDto | null;
   createdAt: string;
   updatedAt: string;
   lastActiveAt: string | null;
@@ -101,7 +156,9 @@ export interface ExecutionSummaryDto {
   agentId: string;
   runtime: string;
   status: ExecutionStatus;
+  phase: ExecutionPhase;
   progress: number;
+  progressMode: ProgressMode;
   startedAt: string;
   endedAt: string | null;
   createdAt: string;
@@ -137,8 +194,17 @@ export interface ExecutionDto {
   taskId: string;
   agentId: string;
   runtime: string;
+  runnerId: string | null;
   status: ExecutionStatus;
+  phase: ExecutionPhase;
   progress: number;
+  progressMode: ProgressMode;
+  exitCode: number | null;
+  summary: string | null;
+  branchName: string | null;
+  baseCommit: string | null;
+  headCommit: string | null;
+  lastRunnerSeq: number;
   startedAt: string;
   endedAt: string | null;
   failureReason: string | null;
@@ -153,9 +219,21 @@ export interface ExecutionLogDto {
   id: string;
   executionId: string;
   seq: number;
+  stream: LogStream;
+  eventId: string | null;
+  runnerSeq: number | null;
   level: LogLevel;
   message: string;
   timestamp: string;
+}
+
+export interface GitExecutionResultDto {
+  branchName: string;
+  baseCommit: string;
+  headCommit: string | null;
+  changedFiles: number;
+  diffStat: string;
+  gitStatus: string;
 }
 
 export interface AgentDetailDto extends AgentDto {

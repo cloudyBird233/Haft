@@ -83,7 +83,7 @@ export function AgentFormDialog({
   const dialogTitle = mode === 'create' ? 'Create agent' : 'Edit agent';
   const dialogDescription =
     mode === 'create'
-      ? 'Add an AI worker to this workspace. Mock runtime executions are available immediately.'
+      ? 'Add an AI worker to this workspace. Mock executions run locally; Codex and OpenCode require a connected Agent Runner.'
       : 'Update how this agent appears and which runtime it targets.';
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>): Promise<void> {
@@ -205,8 +205,8 @@ export function AgentFormDialog({
                 error={errors.runtime}
                 hint={
                   runtime === 'mock'
-                    ? 'Mock runtime is available in Phase 1.'
-                    : 'Reserved adapter. Executions are disabled until connected.'
+                    ? 'Deterministic runtime. Executions start immediately.'
+                    : 'Runner-backed runtime. The assigned runner must be online with this CLI installed and the project mapped.'
                 }
               >
                 <Select
@@ -220,7 +220,6 @@ export function AgentFormDialog({
                   {(Object.keys(RUNTIME_LABELS) as AgentRuntimeType[]).map((key) => (
                     <option key={key} value={key}>
                       {RUNTIME_LABELS[key]}
-                      {key === 'mock' ? '' : ' (not connected)'}
                     </option>
                   ))}
                 </Select>

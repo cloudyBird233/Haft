@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import type { AgentDto, TaskDetailDto, TaskStatus } from '@raft-lite/contracts';
 import {
+  RUNTIME_LABELS,
   TASK_STATUS_LABELS,
   TASK_STATUS_TRANSITIONS,
   isTerminalTaskStatus,
@@ -18,7 +19,7 @@ import {
 } from 'lucide-react';
 import { api, ApiError } from '../../services/api';
 import { queryKeys } from '../../services/query-keys';
-import { useTask } from '../../hooks/use-raft-data';
+import { useRuntimes, useTask } from '../../hooks/use-raft-data';
 import { useToast } from '../../providers/toast-provider';
 import { formatDate, formatDuration, formatShortDateTime } from '../../lib/utils';
 import { Avatar } from '../../components/ui/avatar';
@@ -83,6 +84,27 @@ export function TaskDetailDrawer({
   const activeExecution = task?.latestExecution?.status === 'running';
   const allowedTransitions = task ? TASK_STATUS_TRANSITIONS[task.status] : [];
   const assignee = task?.assignee;
+  const requiresRunner = Boolean(assignee && assignee.runtime !== 'mock');
+  const runtimesQuery = useRuntimes(
+    {
+      ...(assignee?.computerId ? { computerId: assignee.computerId } : {}),
+      ...(task?.projectId ? { projectId: task.projectId } : {}),
+    },
+    open && requiresRunner && Boolean(task),
+  );
+  const runtimeAvailability =
+    runtimesQuery.data?.items.find((item) => item.runtime === assignee?.runtime) ?? null;
+  const runtimeBlockedReason = !requiresRunner
+    ? null
+    : runtimesQuery.isLoading
+      ? `Checking ${RUNTIME_LABELS[assignee?.runtime ?? 'mock']} availability…`
+      : !runtimeAvailability
+        ? `${RUNTIME_LABELS[assignee?.runtime ?? 'mock']} availability could not be determined`
+        : !runtimeAvailability.available
+          ? (runtimeAvailability.reason ??
+            `${RUNTIME_LABELS[assignee?.runtime ?? 'mock']} is unavailable`)
+          : null;
+
   const paused =
     !task ||
     activeExecution ||
@@ -92,7 +114,7 @@ export function TaskDetailDrawer({
     assignee.status === 'offline' ||
     assignee.status === 'error' ||
     assignee.status === 'busy' ||
-    assignee.runtime !== 'mock';
+    runtimeBlockedReason !== null;
 
   const startBlockedReason = !task
     ? 'Task not loaded'
@@ -108,9 +130,7 @@ export function TaskDetailDrawer({
               ? 'Reset the assigned agent to Idle first'
               : assignee.status === 'busy'
                 ? 'The assigned agent is busy'
-                : assignee.runtime !== 'mock'
-                  ? 'This runtime adapter is not connected'
-                  : null;
+                : runtimeBlockedReason;
 
   function invalidate(): void {
     void queryClient.invalidateQueries({ queryKey: queryKeys.tasks.all });
@@ -168,7 +188,7 @@ export function TaskDetailDrawer({
       onOpenChange(false);
       toast({
         title: 'Execution started',
-        description: 'The mock runtime is now working on this task.',
+        description: `${RUNTIME_LABELS[execution.runtime as keyof typeof RUNTIME_LABELS] ?? execution.runtime} is now working on this task.`,
         variant: 'success',
       });
       navigate(`/executions/${execution.id}`);
@@ -469,7 +489,12 @@ export function TaskDetailDrawer({
                       onClick={() => void handleStart()}
                       loading={pending === 'start'}
                       disabled={paused || pending !== null}
-                      title={startBlockedReason ?? 'Start a deterministic Mock execution'}
+                      title={
+                        startBlockedReason ??
+                        (assignee
+                          ? `Start a ${RUNTIME_LABELS[assignee.runtime]} execution`
+                          : 'Start an execution')
+                      }
                       data-testid="execution-start-button"
                     >
                       <Play size={13} aria-hidden="true" />
@@ -481,7 +506,9 @@ export function TaskDetailDrawer({
                       </p>
                     ) : (
                       <p className="mt-2 text-center text-[10.5px] text-faint">
-                        Runs with the deterministic Mock runtime.
+                        {assignee?.runtime === 'mock'
+                          ? 'Runs with the deterministic Mock runtime.'
+                          : `Runs on ${RUNTIME_LABELS[assignee?.runtime ?? 'mock']} through the assigned runner.`}
                       </p>
                     )}
                   </div>

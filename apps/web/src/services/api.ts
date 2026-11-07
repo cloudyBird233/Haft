@@ -24,6 +24,8 @@ import type {
   AgentDetailDto,
   AgentDto,
   AgentListQuery,
+  RunnerRuntimeAvailabilityQuery,
+  RuntimeAvailabilityDto,
 } from '@raft-lite/contracts';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '/api';
@@ -118,6 +120,13 @@ export const api = {
   getWorkspace: () => request<WorkspaceDto>('/workspace'),
   getDashboard: () => request<DashboardDto>('/dashboard'),
   getComputers: () => request<ListDto<ComputerDto>>('/computers'),
+  listRuntimes: (params: RunnerRuntimeAvailabilityQuery = {}) =>
+    request<{ items: RuntimeAvailabilityDto[] }>(
+      `/runtimes${queryString({
+        computerId: params.computerId,
+        projectId: params.projectId,
+      })}`,
+    ),
 
   listAgents: (params: AgentListQuery = {}) =>
     request<ListDto<AgentDto>>(

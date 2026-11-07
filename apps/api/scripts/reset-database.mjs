@@ -11,8 +11,8 @@ import { fileURLToPath } from 'node:url';
  * image is malformed", which Prisma cannot always recover from even with
  * `--force-reset`. Deleting the files first makes test startup deterministic.
  *
- * Safety: only `test.db` and `e2e.db` are allowed. The development database is
- * never touched by this script.
+ * Safety: only `test.db`, `e2e.db` and `real-e2e.db` are allowed. The
+ * development database is never touched by this script.
  */
 const url = process.env.DATABASE_URL;
 if (!url || !url.startsWith('file:')) {
@@ -20,11 +20,12 @@ if (!url || !url.startsWith('file:')) {
   process.exit(1);
 }
 
-const fileName = url.slice('file:'.length);
+const fileName = url.slice('file:'.length).split('?')[0] ?? '';
 const baseName = fileName.split('/').pop();
-if (baseName !== 'test.db' && baseName !== 'e2e.db') {
+const DISPOSABLE = new Set(['test.db', 'e2e.db', 'real-e2e.db']);
+if (!baseName || !DISPOSABLE.has(baseName)) {
   console.error(
-    `reset-database: refusing to delete "${fileName}" (only test.db and e2e.db are disposable)`,
+    `reset-database: refusing to delete "${fileName}" (only ${[...DISPOSABLE].join(', ')} are disposable)`,
   );
   process.exit(1);
 }

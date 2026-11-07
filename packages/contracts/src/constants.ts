@@ -1,7 +1,12 @@
 export const AGENT_RUNTIMES = ['mock', 'codex', 'opencode'] as const;
 export type AgentRuntimeType = (typeof AGENT_RUNTIMES)[number];
 
-export const EXECUTABLE_RUNTIMES = ['mock'] as const;
+/** Runtimes that can be dispatched when their runtime prerequisites are met. */
+export const EXECUTABLE_RUNTIMES = ['mock', 'codex', 'opencode'] as const;
+
+/** Runtimes that require a connected Haft Agent Runner. */
+export const RUNNER_RUNTIMES = ['codex', 'opencode'] as const;
+export type RunnerRuntimeType = (typeof RUNNER_RUNTIMES)[number];
 
 export const AGENT_STATUSES = ['idle', 'busy', 'offline', 'error'] as const;
 export type AgentStatus = (typeof AGENT_STATUSES)[number];
@@ -25,6 +30,28 @@ export type ExecutionStatus = (typeof EXECUTION_STATUSES)[number];
 
 export const LOG_LEVELS = ['info', 'success', 'warning', 'error'] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
+
+export const LOG_STREAMS = ['stdout', 'stderr', 'system'] as const;
+export type LogStream = (typeof LOG_STREAMS)[number];
+
+export const EXECUTION_PHASES = [
+  'queued',
+  'preparing',
+  'running',
+  'finalizing',
+  'completed',
+  'failed',
+  'cancelled',
+] as const;
+export type ExecutionPhase = (typeof EXECUTION_PHASES)[number];
+
+export const PROGRESS_MODES = ['determinate', 'indeterminate'] as const;
+export type ProgressMode = (typeof PROGRESS_MODES)[number];
+
+export const RUNNER_STATUSES = ['online', 'offline', 'busy', 'degraded'] as const;
+export type RunnerStatus = (typeof RUNNER_STATUSES)[number];
+
+export const RUNNER_PROTOCOL_VERSION = 1 as const;
 
 export const ACTIVITY_TYPES = [
   'agent.created',
@@ -78,6 +105,34 @@ export const EXECUTION_STATUS_LABELS: Record<ExecutionStatus, string> = {
   completed: 'Completed',
   failed: 'Failed',
   cancelled: 'Cancelled',
+};
+
+export const EXECUTION_PHASE_LABELS: Record<ExecutionPhase, string> = {
+  queued: 'Queued',
+  preparing: 'Preparing workspace',
+  running: 'Running',
+  finalizing: 'Collecting results',
+  completed: 'Completed',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+};
+
+export const PROGRESS_MODE_LABELS: Record<ProgressMode, string> = {
+  determinate: 'Determinate',
+  indeterminate: 'Indeterminate',
+};
+
+export const LOG_STREAM_LABELS: Record<LogStream, string> = {
+  stdout: 'stdout',
+  stderr: 'stderr',
+  system: 'system',
+};
+
+export const RUNNER_STATUS_LABELS: Record<RunnerStatus, string> = {
+  online: 'Online',
+  offline: 'Offline',
+  busy: 'Busy',
+  degraded: 'Degraded',
 };
 
 /**

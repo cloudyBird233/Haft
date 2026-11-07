@@ -4,6 +4,11 @@ import { defineConfig, devices } from '@playwright/test';
 
 const API_URL = process.env.E2E_API_URL ?? 'http://127.0.0.1:3101';
 const WEB_URL = process.env.E2E_BASE_URL ?? 'http://127.0.0.1:5174';
+const RUNNER_HEALTH_PORT = process.env.E2E_RUNNER_HEALTH_PORT ?? '3199';
+const RUNNER_HEALTH_URL =
+  process.env.E2E_RUNNER_HEALTH_URL ?? `http://127.0.0.1:${RUNNER_HEALTH_PORT}`;
+const RUNNER_BOOTSTRAP_TOKEN =
+  process.env.E2E_RUNNER_BOOTSTRAP_TOKEN ?? 'e2e-runner-bootstrap-token';
 
 /**
  * Keep screenshots comparable across machines by preferring the Chromium
@@ -96,6 +101,30 @@ export default defineConfig({
       url: WEB_URL,
       reuseExistingServer: !process.env.CI,
       timeout: 180_000,
+    },
+    // Deterministic Fake Runner: proves the Socket.IO protocol, server-side
+    // persistence and the UI loop without invoking a real model or CLI.
+    {
+      command: 'pnpm --filter @raft-lite/runner start',
+      url: `${RUNNER_HEALTH_URL}/ready`,
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+      env: {
+        ...process.env,
+        HAFT_SERVER_URL: API_URL,
+        HAFT_RUNNER_ID: 'runner_e2e',
+        HAFT_RUNNER_COMPUTER_ID: 'computer_local',
+        HAFT_RUNNER_BOOTSTRAP_TOKEN: RUNNER_BOOTSTRAP_TOKEN,
+        HAFT_RUNNER_TOKEN_FILE: join(
+          process.cwd(),
+          'test-results',
+          '.runner',
+          'runner-e2e.json',
+        ),
+        HAFT_RUNNER_MODE: 'fake',
+        HAFT_RUNNER_PROJECTS: JSON.stringify({ project_demo: process.cwd() }),
+        HAFT_RUNNER_HEALTH_PORT: RUNNER_HEALTH_PORT,
+      },
     },
   ],
 });

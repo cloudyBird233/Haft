@@ -11,6 +11,7 @@ import type {
   ExecutionLogDto,
   FinishExecutionResult,
   ListDto,
+  RuntimeAvailabilityDto,
   RuntimeControlMode,
   RuntimeFinishOutcome,
   TaskCancellationDto,
@@ -151,6 +152,16 @@ export class RaftTestFactory {
 
   async cancelTask(taskId: string, reason?: string): Promise<TaskCancellationDto> {
     return this.call('POST', `/api/tasks/${taskId}/cancel`, reason ? { reason } : {});
+  }
+
+  async getRuntimes(
+    params: { computerId?: string; projectId?: string } = {},
+  ): Promise<{ items: RuntimeAvailabilityDto[] }> {
+    const search = new URLSearchParams();
+    if (params.computerId) search.set('computerId', params.computerId);
+    if (params.projectId) search.set('projectId', params.projectId);
+    const query = search.toString();
+    return this.call('GET', `/api/runtimes${query ? `?${query}` : ''}`);
   }
 
   async getExecution(id: string): Promise<ExecutionDto> {

@@ -1,0 +1,287 @@
+import { randomUUID } from 'node:crypto';
+import type {
+  ExecutionPhase,
+  ExecutionStartMessage,
+  GitExecutionResult,
+  RunnerLogEntry,
+  RunnerRuntimeType,
+} from '@raft-lite/contracts';
+import type { RunnerConfig } from './config';
+import type { ExecutorCallbacks, RunnerExecutor } from './executor';
+
+export type { CancelledPayload, CompletedPayload, ExecutorCallbacks, FailedPayload } from './executor';
+
+export interface FakeSession {
+  executionId: string;
+  runtime: RunnerRuntimeType;
+  phase: ExecutionPhase;
+  lastSeq: number;
+  startedAt: string;
+  taskTitle: string;
+  pending: Map<number, RunnerLogEntry>;
+  timer: NodeJS.Timeout | null;
+  cancelled: boolean;
+}
+
+interface FakeStep {
+  progress: number;
+  message: string;
+  level: RunnerLogEntry['level'];
+}
+
+const STEPS: readonly FakeStep[] = [
+  { progress: 10, message: 'Fake runner prepared an isolated worktree.', level: 'info' },
+  { progress: 30, message: 'Fake runner inspected repository conventions.', level: 'info' },
+  { progress: 50, message: 'Fake runner applied simulated implementation changes.', level: 'info' },
+  { progress: 70, message: 'Fake runner updated simulated tests.', level: 'info' },
+  { progress: 85, message: 'Fake runner validated the simulated diff.', level: 'success' },
+  { progress: 95, message: 'Fake runner collected the simulated Git result.', level: 'info' },
+];
+
+/**
+ * Deterministic runner-side execution engine used before a real CLI is wired.
+ *
+ * It exercises the complete server/runner/database/UI path without calling a
+ * model or a shell, so protocol and recovery failures stay reproducible.
+ */
+export class FakeExecutor implements RunnerExecutor {
+  private readonly sessions = new Map<string, FakeSession>();
+
+  constructor(
+    private readonly config: RunnerConfig,
+    private readonly callbacks: ExecutorCallbacks,
+  ) {}
+
+  start(payload: ExecutionStartMessage['payload']): void {
+    if (this.sessions.has(payload.executionId)) {
+      return;
+    }
+    if (this.sessions.size >= this.config.maxConcurrentExecutions) {
+      this.callbacks.onFailed(this.createSession(payload), {
+        reason: 'RUNNER_BUSY: maximum concurrent executions reached',
+        exitCode: null,
+        summary: null,
+        git: null,
+      });
+      return;
+    }
+
+    const session = this.createSession(payload);
+    this.sessions.set(session.executionId, session);
+    this.callbacks.onPhase(session, 'preparing', 'Runner accepted the execution');
+    this.log(session, 'system', 'info', `Fake runner accepted ${payload.runtime} execution.`);
+    this.log(
+      session,
+      'system',
+      'info',
+      `Project ${payload.projectId} mapped; simulated worktree created.`,
+    );
+
+    if (this.shouldFail(payload)) {
+      this.log(session, 'stderr', 'warning', 'Fake failure mode was requested by the task.');
+    }
+
+    let stepIndex = 0;
+    const tick = (): void => {
+      if (session.cancelled) return;
+      if (stepIndex === 0) {
+        this.callbacks.onPhase(session, 'running', 'Execution is running');
+        this.callbacks.onProgress(session, 5, 0);
+      }
+      if (stepIndex >= STEPS.length) {
+        this.finish(session, payload);
+        return;
+      }
+      const step = STEPS[stepIndex];
+      if (!step) {
+        this.finish(session, payload);
+        return;
+      }
+      stepIndex += 1;
+      this.log(
+        session,
+        step.level === 'warning' ? 'stderr' : 'stdout',
+        step.level,
+        step.message,
+      );
+      this.callbacks.onProgress(session, step.progress, stepIndex);
+
+      if (this.shouldFail(payload) && stepIndex === 3) {
+        this.fail(session, payload);
+        return;
+      }
+      session.timer = setTimeout(tick, this.config.stepMs);
+    };
+    session.timer = setTimeout(tick, this.config.stepMs);
+  }
+
+  cancel(executionId: string, reason?: string): void {
+    const session = this.sessions.get(executionId);
+    if (!session || session.cancelled) {
+      return;
+    }
+    session.cancelled = true;
+    if (session.timer) {
+      clearTimeout(session.timer);
+      session.timer = null;
+    }
+    this.log(
+      session,
+      'system',
+      'warning',
+      `Cancellation requested: ${reason?.trim() || 'Cancelled by operator'}`,
+    );
+    const delay = Math.min(100, this.config.stepMs);
+    setTimeout(() => {
+      if (!this.sessions.has(executionId)) return;
+      this.callbacks.onCancelled(session, {
+        reason: reason?.trim() || 'Cancelled by operator',
+        exitCode: null,
+        git: this.fakeGitResult(executionId),
+      });
+      this.sessions.delete(executionId);
+    }, delay);
+  }
+
+  acknowledge(executionId: string, throughSeq: number): void {
+    const session = this.sessions.get(executionId);
+    if (!session) return;
+    for (const seq of session.pending.keys()) {
+      if (seq <= throughSeq) {
+        session.pending.delete(seq);
+      }
+    }
+  }
+
+  pendingLogs(executionId: string): RunnerLogEntry[] {
+    const session = this.sessions.get(executionId);
+    if (!session) return [];
+    return [...session.pending.values()].sort((left, right) => left.sequence - right.sequence);
+  }
+
+  pendingLogCount(): number {
+    let total = 0;
+    for (const session of this.sessions.values()) {
+      total += session.pending.size;
+    }
+    return total;
+  }
+
+  snapshot(): Array<{
+    executionId: string;
+    phase: ExecutionPhase;
+    lastSeq: number;
+    startedAt: string;
+    runtime: RunnerRuntimeType;
+  }> {
+    return [...this.sessions.values()].map((session) => ({
+      executionId: session.executionId,
+      phase: session.phase,
+      lastSeq: session.lastSeq,
+      startedAt: session.startedAt,
+      runtime: session.runtime,
+    }));
+  }
+
+  activeExecutionIds(): string[] {
+    return [...this.sessions.keys()];
+  }
+
+  shutdown(reason = 'Runner shutting down'): void {
+    for (const session of [...this.sessions.values()]) {
+      this.cancel(session.executionId, reason);
+    }
+  }
+
+  private createSession(payload: ExecutionStartMessage['payload']): FakeSession {
+    return {
+      executionId: payload.executionId,
+      runtime: payload.runtime,
+      phase: 'preparing',
+      lastSeq: 0,
+      startedAt: new Date().toISOString(),
+      taskTitle: payload.taskTitle,
+      pending: new Map(),
+      timer: null,
+      cancelled: false,
+    };
+  }
+
+  private finish(session: FakeSession, payload: ExecutionStartMessage['payload']): void {
+    this.callbacks.onPhase(session, 'finalizing', 'Collecting simulated Git result');
+    this.log(session, 'stdout', 'success', 'Fake runner completed all simulated steps.');
+    this.callbacks.onProgress(session, 100, STEPS.length);
+    this.callbacks.onCompleted(session, {
+      exitCode: 0,
+      summary: `Fake runner completed "${payload.taskTitle}" without invoking a real model.`,
+      git: this.fakeGitResult(session.executionId),
+    });
+    this.sessions.delete(session.executionId);
+  }
+
+  private fail(session: FakeSession, payload: ExecutionStartMessage['payload']): void {
+    if (session.timer) {
+      clearTimeout(session.timer);
+      session.timer = null;
+    }
+    this.callbacks.onPhase(session, 'failed', 'Fake failure path');
+    this.log(
+      session,
+      'stderr',
+      'error',
+      'FAKE_RUNNER_FAILURE: the task requested a deterministic failure.',
+    );
+    this.callbacks.onFailed(session, {
+      reason: 'FAKE_RUNNER_FAILURE: deterministic failure requested by the task',
+      exitCode: 2,
+      summary: `Fake runner failed "${payload.taskTitle}" on purpose.`,
+      git: this.fakeGitResult(session.executionId),
+    });
+    this.sessions.delete(session.executionId);
+  }
+
+  private log(
+    session: FakeSession,
+    stream: RunnerLogEntry['stream'],
+    level: RunnerLogEntry['level'],
+    message: string,
+  ): void {
+    session.lastSeq += 1;
+    const entry: RunnerLogEntry = {
+      sequence: session.lastSeq,
+      eventId: randomUUID(),
+      stream,
+      level,
+      message: message.slice(0, 8000),
+      timestamp: new Date().toISOString(),
+    };
+    session.pending.set(entry.sequence, entry);
+    this.callbacks.onLog(session, entry);
+  }
+
+  private shouldFail(payload: ExecutionStartMessage['payload']): boolean {
+    return (
+      process.env.HAFT_RUNNER_FAKE_FAIL === '1' ||
+      payload.taskTitle.includes('[fail]') ||
+      payload.taskDescription.includes('HAFT_FAKE_FAIL')
+    );
+  }
+
+  private fakeGitResult(executionId: string): GitExecutionResult {
+    return {
+      branchName: `haft/${sanitize(executionId)}`,
+      baseCommit: '0'.repeat(40),
+      headCommit: 'f'.repeat(40),
+      changedFiles: 3,
+      diffStat:
+        ' packages/example/src/feature.ts | 42 ++++++++++++++++++++++++++++++++----\n' +
+        ' packages/example/test/feature.spec.ts | 18 ++++++++++++++++++\n' +
+        ' 2 files changed, 56 insertions(+), 4 deletions(-)',
+      gitStatus: 'working tree clean (simulated)',
+    };
+  }
+}
+
+function sanitize(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 80);
+}

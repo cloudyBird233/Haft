@@ -1,0 +1,26 @@
+{
+  "name": "@raft-lite/runner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Haft Agent Runner: owns local CLI processes and Git worktrees",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "start": "tsx src/main.ts",
+    "start:prod": "node dist/main.js",
+    "build": "tsup src/main.ts --format cjs --clean --sourcemap",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@raft-lite/contracts": "workspace:*",
+    "socket.io-client": "^4.8.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "tsup": "^8.5.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

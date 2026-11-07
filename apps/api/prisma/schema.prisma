@@ -44,6 +44,32 @@ model Computer {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
   agents     Agent[]
+  runner     Runner?
+}
+
+/// A Haft Agent Runner process registered against one Computer.
+/// Token material is stored as a one-way hash only.
+model Runner {
+  id                      String      @id @default(cuid())
+  computerId              String      @unique
+  tokenHash               String
+  protocolVersion         Int         @default(1)
+  runnerVersion           String      @default("")
+  platform                String      @default("")
+  architecture            String      @default("")
+  status                  String      @default("offline")
+  capabilitiesJson        String      @default("{}")
+  maxConcurrentExecutions Int         @default(1)
+  lastHeartbeatAt         DateTime?
+  connectedAt             DateTime?
+  disconnectedAt          DateTime?
+  createdAt               DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
+  computer                Computer    @relation(fields: [computerId], references: [id], onDelete: Cascade)
+  executions              Execution[]
+
+  @@index([status])
+  @@index([lastHeartbeatAt])
 }
 
 model Agent {
@@ -94,9 +120,18 @@ model Execution {
   id            String         @id @default(cuid())
   taskId        String
   agentId       String
+  runnerId      String?
   runtime       String         @default("mock")
   status        String         @default("running")
+  phase         String         @default("running")
   progress      Int            @default(0)
+  progressMode  String         @default("determinate")
+  exitCode      Int?
+  summary       String?
+  branchName    String?
+  baseCommit    String?
+  headCommit    String?
+  lastRunnerSeq Int            @default(0)
   startedAt     DateTime       @default(now())
   endedAt       DateTime?
   failureReason String?
@@ -105,24 +140,32 @@ model Execution {
   updatedAt     DateTime       @updatedAt
   task          Task           @relation(fields: [taskId], references: [id], onDelete: Cascade)
   agent         Agent          @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  runner        Runner?        @relation(fields: [runnerId], references: [id], onDelete: SetNull)
   logs          ExecutionLog[]
   activities    Activity[]
 
   @@index([taskId])
   @@index([agentId])
+  @@index([runnerId])
   @@index([status])
+  @@index([phase])
 }
 
 model ExecutionLog {
   id          String    @id @default(cuid())
   executionId String
   seq         Int
+  stream      String    @default("system")
+  eventId     String?
+  runnerSeq   Int?
   level       String    @default("info")
   message     String
   timestamp   DateTime  @default(now())
   execution   Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
 
   @@unique([executionId, seq])
+  @@unique([executionId, eventId])
+  @@unique([executionId, runnerSeq])
   @@index([executionId, timestamp])
 }
 

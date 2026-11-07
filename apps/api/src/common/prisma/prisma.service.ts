@@ -11,7 +11,10 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     // test suite and local development responsive.
     await this.$queryRawUnsafe('PRAGMA journal_mode = WAL');
     await this.$queryRawUnsafe('PRAGMA synchronous = NORMAL');
-    await this.$queryRawUnsafe('PRAGMA busy_timeout = 5000');
+    // SQLite permits one writer at a time. Windows filesystem/AV stalls can
+    // hold a write lock for several seconds while E2E reset and runner log
+    // writes overlap; 15s avoids surfacing a transient lock as an HTTP 500.
+    await this.$queryRawUnsafe('PRAGMA busy_timeout = 15000');
   }
 
   async onModuleDestroy(): Promise<void> {

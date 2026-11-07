@@ -1,5 +1,9 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import type { AgentListQuery, TaskListQuery } from '@raft-lite/contracts';
+import type {
+  AgentListQuery,
+  RunnerRuntimeAvailabilityQuery,
+  TaskListQuery,
+} from '@raft-lite/contracts';
 import { api } from '../services/api';
 import { queryKeys } from '../services/query-keys';
 
@@ -15,6 +19,18 @@ export function useComputers() {
     queryKey: queryKeys.computers,
     queryFn: api.getComputers,
     staleTime: 60_000,
+  });
+}
+
+export function useRuntimes(
+  params: RunnerRuntimeAvailabilityQuery = {},
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: queryKeys.runtimes(params),
+    queryFn: () => api.listRuntimes(params),
+    enabled,
+    staleTime: 5_000,
   });
 }
 
