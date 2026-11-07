@@ -31,6 +31,8 @@ export interface RuntimeGitResult {
   changedFiles: number;
   diffStat: string;
   gitStatus: string;
+  diff: string;
+  diffTruncated: boolean;
 }
 
 export type RuntimeEvent =

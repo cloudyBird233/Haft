@@ -94,6 +94,19 @@ export function useExecutionLogs(id: string | undefined, live: boolean) {
   });
 }
 
+/**
+ * On-demand Git diff. It is only requested when the Changes tab is opened, so
+ * execution lists and the default log view never download large patches.
+ */
+export function useExecutionDiff(id: string | undefined, enabled: boolean) {
+  return useQuery({
+    queryKey: queryKeys.executions.diff(id ?? 'none'),
+    queryFn: () => api.getExecutionDiff(id as string),
+    enabled: Boolean(id) && enabled,
+    staleTime: 30_000,
+  });
+}
+
 export function useActivities(limit = 30) {
   return useQuery({
     queryKey: queryKeys.activities(limit),

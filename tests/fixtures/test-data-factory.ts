@@ -7,6 +7,7 @@ import type {
   ApiSuccess,
   CreateAgentInput,
   CreateTaskInput,
+  ExecutionDiffDto,
   ExecutionDto,
   ExecutionLogDto,
   FinishExecutionResult,
@@ -170,6 +171,10 @@ export class RaftTestFactory {
 
   async getExecutionLogs(id: string): Promise<ListDto<ExecutionLogDto>> {
     return this.call('GET', `/api/executions/${id}/logs?limit=500`);
+  }
+
+  async getExecutionDiff(id: string): Promise<ExecutionDiffDto> {
+    return this.call('GET', `/api/executions/${id}/diff`);
   }
 
   /**

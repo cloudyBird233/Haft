@@ -121,6 +121,12 @@ export default defineConfig({
           '.runner',
           'runner-e2e.json',
         ),
+        HAFT_RUNNER_RECOVERY_ROOT: join(
+          process.cwd(),
+          'test-results',
+          '.runner',
+          'recovery',
+        ),
         HAFT_RUNNER_MODE: 'fake',
         HAFT_RUNNER_PROJECTS: JSON.stringify({ project_demo: process.cwd() }),
         HAFT_RUNNER_HEALTH_PORT: RUNNER_HEALTH_PORT,

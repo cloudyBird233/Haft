@@ -53,6 +53,13 @@ export type RunnerStatus = (typeof RUNNER_STATUSES)[number];
 
 export const RUNNER_PROTOCOL_VERSION = 1 as const;
 
+/**
+ * Maximum size of a collected unified patch that the runner may submit and the
+ * API may persist. Diffs above this size are truncated by the runner and the
+ * `diffTruncated` flag is set. The value is a byte budget for UTF-8 content.
+ */
+export const EXECUTION_DIFF_MAX_BYTES = 1024 * 1024;
+
 export const ACTIVITY_TYPES = [
   'agent.created',
   'agent.updated',

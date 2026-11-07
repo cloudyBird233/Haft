@@ -1,6 +1,6 @@
 # Testing strategy and UI contract
 
-Raft Lite is tested at four levels. The goal is not “many tests”; it is that every
+Raft Lite is tested at five levels. The goal is not “many tests”; it is that every
 primary flow is proven end-to-end against the real API, every invariant is proven
 without a browser, and every UI affordance is addressable by a stable semantic
 selector.
@@ -11,9 +11,11 @@ selector.
 | ----------------------------------------- | ----------------------- | ------------------------------- | ----- |
 | Shared contracts                          | Vitest                  | `packages/contracts/test`       | 5     |
 | API integration + runtime + state machine | Vitest, Supertest       | `apps/api/test`, `apps/api/src` | 26    |
-| Runner unit tests                         | Vitest                  | `apps/runner/test`              | 29    |
-| Web component behavior                    | Vitest, Testing Library | `apps/web/src/test`             | 12    |
+| Runner unit tests                         | Vitest                  | `apps/runner/test`              | 53    |
+| Web component behavior                    | Vitest, Testing Library | `apps/web/src/test`             | 22    |
 | Browser E2E                               | Playwright              | `tests/e2e`                     | 42    |
+
+The deterministic unit/integration/component total is **106 tests**.
 
 Browser E2E is split into three suites on purpose:
 
@@ -29,7 +31,7 @@ never counted in the deterministic suite.
 ## Commands
 
 ```bash
-pnpm test          # contracts + API + runner + web (72 tests)
+pnpm test          # contracts + API + runner + web (106 tests)
 pnpm test:e2e      # resets the E2E DB, starts isolated servers + Fake Runner, runs 42 tests
 pnpm test:e2e:real # opt-in real Codex/OpenCode suite (HAFT_REAL_CLI_E2E=1)
 pnpm test:e2e:ui   # Playwright UI mode
@@ -146,17 +148,51 @@ The Fake Runner is covered by three E2E tests in
 protocol and task completion, cancellation waiting for a runner confirmation,
 and deterministic failure propagation to task/agent state and logs. API-level
 protocol tests in `apps/api/test/runner.integration.spec.ts` cover pairing,
-dispatch, stale-runner reconciliation, and duplicate log handling.
+dispatch, stale-runner reconciliation, duplicate log handling, diff persistence,
+diff idempotency, and rejection of Git results from a non-owning runner.
+
+### Git diff coverage
+
+- `apps/runner/test/git-worktree.spec.ts` creates real temporary repositories and
+  covers modified, added, deleted, renamed, untracked, binary, empty, and
+  over-limit patches, plus worktree retention and repository-root rejection.
+- `apps/api/test/runner.integration.spec.ts` asserts the diff metadata and patch
+  are persisted separately, the diff endpoint returns the stored artifact,
+  duplicate terminal messages are idempotent, and an intruder runner cannot
+  submit Git evidence.
+- `apps/web/src/test/diff-parser.test.ts` covers file/status/rename/binary
+  parsing; `changes-panel.test.tsx` covers loading, empty, populated, and error
+  states.
+- `tests/e2e/functional/runner-execution.spec.ts` asserts the Changes tab
+  selectors, statuses, diff content, and truncation badge against the Fake
+  Runner.
+
+### Runner crash-recovery coverage
+
+- `execution-journal.spec.ts` — complete record round-trip, atomic recovery with
+  a crashed temp file, corrupt-file quarantine, terminal pruning.
+- `log-spool.spec.ts` — ordered persistence, duplicate suppression, ACK cleanup,
+  crash recovery with a partial final line (including repair before the next
+  append), size caps, replay limit.
+- `recovery.spec.ts` — interruption reporting, worktree/log preservation, PID
+  start-time verification, PID-reuse protection, ownership mismatch, unverified
+  identity, orphan tree termination, and no replay of terminal journals.
+- `process-identity.spec.ts` — live start marker/command line, exit waiting, and
+  process-tree termination.
+- `fake-executor.spec.ts` — shutdown waits for session termination and reports a
+  clean result instead of relying on a fixed delay.
 
 ## Real CLI E2E (opt-in)
 
-Real CLI execution has a completely separate Playwright project:
+Real CLI execution has a completely separate Playwright project with three
+tests: a Codex API flow, a Codex browser-UI flow, and a separately gated OpenCode
+API flow.
 
 ```bash
-# Codex only; OpenCode test is skipped unless explicitly enabled.
+# Codex API + Codex UI; the OpenCode test is skipped unless explicitly enabled.
 HAFT_REAL_CLI_E2E=1 pnpm test:e2e:real
 
-# Both CLIs, with an explicit OpenCode model.
+# All three, with an explicit OpenCode model.
 HAFT_REAL_CLI_E2E=1 \
 HAFT_REAL_E2E_OPENCODE=1 \
 HAFT_REAL_OPENCODE_MODEL=tvt/tvt-deepseek-v4.1-flash \
@@ -169,24 +205,35 @@ It uses:
 | ------------- | -------------------------------------------------------- |
 | Config        | `playwright.real.config.ts`                              |
 | API           | `http://127.0.0.1:3201`                                  |
+| Web           | `http://127.0.0.1:5274`                                  |
 | Runner health | `http://127.0.0.1:3299`                                  |
 | Database      | `apps/api/prisma/real-e2e.db`                            |
 | Runner id     | `runner_real_e2e`                                        |
 | Project       | disposable Git repo at `test-results/real-e2e/workspace` |
 | Worktrees     | `test-results/real-e2e/worktrees` (kept for assertions)  |
+| Recovery      | `test-results/real-e2e/recovery`                         |
 | Mode          | `real`, runtimes `codex,opencode`, timeout 600 s         |
 
-`tests/e2e-real/prepare-project.mjs` creates the one-time repository. Each test
-starts a real task, waits for a terminal state, and asserts:
+`tests/e2e-real/prepare-project.mjs` creates the disposable repository.
+`tests/e2e-real/real-cli.spec.ts` starts a real task through the API and
+`tests/e2e-real/real-ui.spec.ts` drives the real browser UI end to end:
 
-- the execution is `completed`, `phase` is `completed`, `runnerId` is
-  `runner_real_e2e`, the branch is `haft/<executionId>`, exit code is 0, and a
-  summary exists;
-- the task is `done` and the agent is `idle`;
-- the marker file exists inside the worktree with the expected content;
-- the primary checkout was not modified;
-- logs contain the isolated-worktree and successful-exit messages, and `seq`
-  values are unique.
+- creates the Codex agent and task through the UI;
+- starts from task detail, waits for live logs and a `completed` banner;
+- verifies task `done` and agent `idle`;
+- opens the Changes tab and asserts branch, base/head commit, changed file,
+  unified diff content, and `diffTruncated=false`;
+- asserts the marker file exists inside the worktree with the expected content;
+- asserts the primary checkout has the same HEAD, commit count, `git status`, and
+  remote configuration, and that the execution branch never moved past the base
+  commit (no commit, merge, or push);
+- asserts logs contain the isolated-worktree and successful-exit messages, and
+  `seq` values are unique.
+
+The UI suite uses `apps/web/.env.real-e2e` and a Vite proxy targeting port 3201.
+Both suites use their own runner token file, database, ports, worktree root, and
+recovery root, so they cannot affect the deterministic E2E database or the
+user's real repositories.
 
 Codex and OpenCode are installed and authenticated on the runner host. The runner
 probes capabilities at startup; if a CLI is unavailable or unauthenticated, the
@@ -227,7 +274,7 @@ user-visible surface used by the E2E suites:
 - five board lanes and the statuses mapped to each;
 - UI state sets for forms, executions, agents, and tasks;
 - canonical flows (`createAgent`, `createTask`, `startExecution`,
-  `stopExecution`);
+  `stopExecution`, `inspectExecutionChanges`);
 - test API endpoints, gating condition, and deterministic seed IDs.
 
 `tests/support/ui-contract.ts` loads the contract at import time. It throws if a
@@ -260,6 +307,12 @@ All of these are present and exercised:
 | `execution-start-button` | Start execution in task detail                       |
 | `execution-stop-button`  | Cancel execution on the execution page               |
 | `execution-log`          | Live log viewer (`role="log"`, accessible name)      |
+| `execution-changes-tab`  | Changes tab (`role="tab"`, name `Changes`)           |
+| `execution-changed-files`| Changed-file list in the diff panel                  |
+| `execution-diff-panel`   | Git diff panel                                       |
+| `execution-diff-file`    | One parsed file patch (`data-status`, `data-path`)   |
+| `execution-diff-content` | Unified patch text for one file                      |
+| `execution-diff-truncated` | Truncation badge (`data-truncated`)                |
 
 ### Naming rules
 
@@ -338,6 +391,16 @@ The latest hardening pass adds targeted coverage for:
   events from a runner that does not own the execution (API).
 - **Runner log idempotency** — duplicate `messageId`/`eventId` replays do not
   duplicate logs, and server `seq` stays unique (API + runner unit).
+- **Diff ownership and persistence** — a non-owning runner cannot submit Git
+  evidence, duplicate terminal messages are idempotent, and the patch is stored
+  as a separate artifact rather than in `ExecutionDto` (API).
+- **Crash recovery** — journals/spools survive crashes, corrupt files are
+  quarantined, PID reuse and ownership mismatches are left untouched, verified
+  orphans are terminated, worktrees/logs are preserved, and interrupted runs are
+  never replayed (runner unit).
+- **Shutdown termination** — shutdown waits for the session/process to actually
+  end and reports incomplete cleanup instead of relying on a fixed delay (runner
+  unit).
 
 ## Accessibility and interaction guarantees
 
@@ -350,6 +413,9 @@ The E2E suite verifies, not just describes:
 - the execution log is `role="log"` with an accessible name;
 - progress is `role="progressbar"` with `aria-valuenow`;
 - status changes are exposed through `data-status` and live status text;
+- the Logs/Changes views are real `role="tab"` controls with matching tabpanels;
+- diff files expose `data-status`/`data-path`, and binary files set
+  `data-binary="true"` and render an explicit binary hint;
 - error surfaces use alerts and focusable retry actions;
 - no primary action is hidden behind hover.
 
@@ -379,6 +445,8 @@ a different browser build.
 | API tests fail with “database disk image is malformed” | An interrupted run left a corrupt `test.db`. Delete `apps/api/prisma/test.db`, `test.db-wal`, and `test.db-shm`, then rerun.                                   |
 | E2E pretest fails with malformed `e2e.db`              | Same as above; delete the three `e2e.db*` files and rerun `pnpm test:e2e`. `apps/api/scripts/reset-database.mjs` removes stale sidecars before reset.          |
 | `EADDRINUSE` on 3101/5174                              | A previous Playwright server is still running. Stop it or let Playwright reuse it if healthy; CI requires free ports.                                          |
+| `EADDRINUSE` on 3201/5274/3299 (real E2E)              | Stop a previous real E2E API/web/runner. The real config never reuses servers, so a stale process always fails fast.                                          |
+| Stale recovery journal after a crash                   | Inspect `test-results/real-e2e/recovery` (real suite) or `~/.haft/recovery/<runnerId>`; it is evidence, not state. The next runner start reports it and never re-runs it. |
 | Playwright cannot launch Chromium 1248                 | Use the cached 1228 fallback described above, or set `PLAYWRIGHT_CHROMIUM_EXECUTABLE`.                                                                         |
 | Socket status stays disconnected in E2E                | Check `apps/web/.env.e2e`: `VITE_SOCKET_URL` must point at `http://127.0.0.1:3101`; the E2E web server must bind `127.0.0.1`.                                  |
 | Old toast assertions fail late in a flow               | Toasts live 4.5 s. Assert the toast immediately after the action, or assert durable UI state instead.                                                          |
@@ -416,4 +484,6 @@ lacks Chromium 1248, either install it or set
 
 Do not run `pnpm test:e2e:real` on a generic CI worker without provisioning and
 authenticating both CLIs. It is a manual/self-hosted acceptance gate; the
-deterministic Fake Runner suite already covers the protocol end to end.
+deterministic Fake Runner suite already covers the protocol end to end. The real
+project now includes a browser-UI test, so the self-hosted job must also be able
+to bind ports 3201/5274/3299 and allocate a disposable Git workspace.

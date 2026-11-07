@@ -31,12 +31,16 @@ See [runner-protocol.md](runner-protocol.md) for the wire format,
                                           │ WebSocket, protocol v1
 ┌─────────────────────────────────────────▼─────────────────────────────┐
 │ Runner process                                                        │
-│  RunnerClient        handshake, register, heartbeat, snapshot, send   │
+│  RunnerClient        handshake, register, recovery, heartbeat, replay │
 │  TokenStore          local token cache (0600 where supported)         │
 │  FakeExecutor        deterministic six-step simulation                │
-│  RealExecutor        worktree → CLI → parse → finalize                │
+│  RealExecutor        journal → worktree → CLI → parse → finalize      │
+│  ExecutionJournal    atomic per-execution crash record                │
+│  LogSpool            durable NDJSON log spool with ACK cleanup        │
+│  ExecutionRecovery   startup scan, PID identity, orphan termination    │
+│  ProcessIdentity     start time, command line, tree termination        │
 │  CliProbe            version + authentication checks                  │
-│  GitWorktreeManager  prepare / collect / cleanup                      │
+│  GitWorktreeManager  prepare / collect full diff / cleanup            │
 │  ProcessUtils        argv spawn, process-tree termination, env strip   │
 │  health server       optional /health and /ready on 127.0.0.1         │
 └─────────────────────────────────────────┬─────────────────────────────┘
@@ -101,12 +105,18 @@ project allowlist and CLI path are runner configuration.
 
 ### `RunnerClient`
 
-- Probes capabilities at startup.
+- Probes capabilities at startup and scans the recovery journal before
+  connecting.
 - Reads a cached token; if absent, uses the bootstrap token from configuration.
 - Maintains the Socket.IO connection, heartbeat, and reconnect loop.
-- Registers capabilities after every connect and sends a local snapshot.
-- Replays unacknowledged logs after reconnect.
+- Registers capabilities after every connect, reports interrupted executions
+  found in the journal, then sends a snapshot of genuine in-memory sessions.
+- Appends every log entry to the durable spool before sending it; acks clean up
+  the spool and pending buffer.
+- Replays the merged spool + pending entries after reconnect, deduplicated by
+  sequence.
 - Dispatches server messages to the executor and sends executor callbacks back.
+- Awaits executor shutdown and flushes recovery evidence before disconnecting.
 - Re-pairs once with the bootstrap token if the cached token is rejected.
 
 ### Executors
@@ -122,7 +132,13 @@ interface RunnerExecutor {
   pendingLogCount(): number;
   snapshot(): RunnerSnapshotExecution[];
   activeExecutionIds(): string[];
-  shutdown(reason?: string): void;
+  shutdown(reason?: string): Promise<ShutdownResult>;
+}
+
+interface ShutdownResult {
+  clean: boolean;
+  remainingExecutionIds: string[];
+  forced: boolean;
 }
 ```
 
@@ -130,14 +146,20 @@ interface RunnerExecutor {
 `RealExecutor` implements the full pipeline:
 
 1. Verify the runtime is enabled and the concurrency limit is free.
-2. Emit `preparing`.
+2. Emit `preparing` and write an `active` journal record.
 3. Resolve the project path from `HAFT_RUNNER_PROJECTS`.
-4. Create a worktree and branch.
+4. Create a worktree and branch; persist worktree/branch/base commit.
 5. Resolve the executable (including Windows `.cmd` shim resolution).
 6. Build argv, spawn with `shell: false`, write the prompt to stdin.
-7. Emit `running`, stream parsed logs and progress.
-8. On exit, collect Git evidence and emit `finalizing` → terminal event.
-9. Clean up the worktree if `HAFT_RUNNER_KEEP_WORKTREES=0`.
+7. Attach the child `close` listener, then persist PID, process start marker, and
+   process group.
+8. Emit `running`, stream parsed logs and progress; append every log to the
+   spool before sending it and update the journal sequence.
+9. On exit, collect the full Git diff and emit `finalizing` → terminal event.
+10. Mark the journal terminal and clean up the worktree if
+    `HAFT_RUNNER_KEEP_WORKTREES=0`.
+11. On shutdown, cancel every session, wait for real process exit, force-kill
+    after the grace window, and return a `ShutdownResult`.
 
 ### Capability probe
 
@@ -194,13 +216,34 @@ marks the execution `failed`, restores task/agent state, and returns
   dispatch.
 - The existing agent/task locks already prevent one agent or one task from
   running twice; the runner limit is an additional host-level guard.
-- Each session buffers up to 10,000 unacknowledged log entries. The server acks
-  the highest persisted `runnerSeq`; `execution.log.ack` lets the runner drop
-  those entries. After reconnect, the runner replays up to 200 entries per
-  message, and the server deduplicates by `eventId` and `runnerSeq`.
+- Each session buffers up to 10,000 unacknowledged log entries in memory and in
+  a durable NDJSON spool (8 MiB cap). The server acks the highest persisted
+  `runnerSeq`; `execution.log.ack` lets the runner compact both stores. After
+  reconnect, the runner merges and deduplicates spool + memory entries, replays
+  up to 200 entries per message, and the server deduplicates by `eventId` and
+  `runnerSeq`.
 - A slow or disconnected server therefore does not silently lose the recent log
-  tail, but the buffer is bounded: very long disconnections can drop older
+  tail, but the stores are bounded: very long disconnections can drop older
   unacknowledged entries.
+
+## Crash recovery
+
+Every real execution writes `<recoveryRoot>/<executionId>.json` before the CLI
+spawns. The record includes the PID, platform start marker, process group,
+worktree, branch, base commit, phase, status, and last log sequence. Writes use a
+temp file + atomic rename; corrupt files are quarantined.
+
+On startup, `ExecutionRecovery.scan()` verifies each `active` journal:
+
+- no live PID → report `RUNNER_INTERRUPTED`, preserve worktree and logs;
+- different start marker → PID reuse, leave the process untouched;
+- command line/process group mismatch → ownership mismatch, leave it untouched;
+- verified identity → terminate the whole tree and wait for the actual exit;
+- still alive after termination → report that termination was not confirmed.
+
+Recovery reports are sent after registration and before the snapshot. The runner
+never starts a replacement execution. See
+[execution-recovery.md](execution-recovery.md) for the full state machine.
 
 ## Isolation and trust boundaries
 
@@ -209,6 +252,14 @@ marks the execution `failed`, restores task/agent state, and returns
   The main checkout is never the CLI working directory. The runner refuses
   non-Git roots, missing commits, existing branches, and existing worktree
   paths. It never commits, pushes, merges, or fetches.
+- **Complete diff evidence.** On terminal completion the runner collects one
+  unified diff covering modified, added, deleted, renamed, untracked, and binary
+  files, plus base/head commit, changed-file count, diff stat, and porcelain
+  status. Untracked files use `git diff --no-index` so the index is untouched.
+  The patch is capped at 1 MiB and marked `diffTruncated` when cut. The API
+  persists the patch as an `ExecutionArtifact` of kind `diff`, separate from
+  `ExecutionDto`, and the browser loads it lazily through
+  `GET /api/executions/:id/diff`.
 - **No shell.** CLI and Git calls use `spawn(binary, args, { shell: false })`.
   Task prompts go to stdin, so shell metacharacters in task text cannot become
   commands.
@@ -234,6 +285,7 @@ marks the execution `failed`, restores task/agent state, and returns
 | Failure                 | Owner  | Behavior                                                         |
 | ----------------------- | ------ | ---------------------------------------------------------------- |
 | Runner process exits    | server | Grace window, then `RUNNER_DISCONNECTED` failure; no re-run      |
+| Runner restarts         | runner | Journal scan reports `RUNNER_INTERRUPTED`; orphan identity check |
 | Runner reconnect        | both   | Snapshot reconciliation; missing executions fail, shared resume  |
 | API process restarts    | server | On runner reconnect, reconcile running rows; no automatic re-run |
 | CLI exits non-zero      | runner | `execution.failed` with exit code and parsed error               |

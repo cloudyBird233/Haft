@@ -37,6 +37,8 @@ function makeConfig(overrides: Partial<RunnerConfig> = {}): RunnerConfig {
     gitBinary: 'git',
     worktreeRoot: process.cwd(),
     keepWorktrees: true,
+    recoveryRoot: process.cwd(),
+    shutdownGraceMs: 3000,
     cliTimeoutMs: 60_000,
     allowAutoApprove: false,
     projectPaths: { project_demo: process.cwd() },
@@ -121,7 +123,10 @@ describe('FakeExecutor', () => {
     });
     const git = captured.completed[0]?.payload.git as GitExecutionResult;
     expect(git.branchName).toBe('haft/execution_runner_test');
-    expect(git.changedFiles).toBe(3);
+    expect(git.changedFiles).toBe(2);
+    expect(git.diffTruncated).toBe(false);
+    expect(git.diff).toContain('diff --git a/packages/example/src/feature.ts');
+    expect(git.diff).toContain('+++ b/packages/example/test/feature.spec.ts');
 
     expect(captured.phases.map((phase) => phase.phase)).toEqual([
       'preparing',
@@ -190,5 +195,27 @@ describe('FakeExecutor', () => {
     });
     executor.cancel('execution_runner_test', 'cleanup');
     await waitFor(() => captured.cancelled.length === 1);
+  });
+
+  it('waits for each session to terminate during shutdown', async () => {
+    const { executor, captured } = createExecutor(makeConfig({ stepMs: 1000 }));
+    executor.start(startPayload());
+    await waitFor(() => captured.logs.length >= 1);
+
+    const startedAt = Date.now();
+    const result = await executor.shutdown('Runner shutting down');
+    const elapsed = Date.now() - startedAt;
+
+    expect(result).toEqual({
+      clean: true,
+      remainingExecutionIds: [],
+      forced: false,
+    });
+    expect(captured.cancelled).toHaveLength(1);
+    expect(captured.cancelled[0]?.payload.reason).toContain('Runner shutting down');
+    // Cancellation is acknowledged after the session's delay, not a fixed
+    // fire-and-forget 150 ms sleep.
+    expect(elapsed).toBeGreaterThanOrEqual(50);
+    expect(executor.activeExecutionIds()).toEqual([]);
   });
 });

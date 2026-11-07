@@ -19,6 +19,8 @@ export interface RunnerConfig {
   gitBinary: string;
   worktreeRoot: string;
   keepWorktrees: boolean;
+  recoveryRoot: string;
+  shutdownGraceMs: number;
   cliTimeoutMs: number;
   allowAutoApprove: boolean;
   projectPaths: Record<string, string>;
@@ -58,7 +60,8 @@ Environment equivalents use the HAFT_ prefix:
   HAFT_CODEX_BIN, HAFT_OPENCODE_BIN, HAFT_CODEX_MODEL, HAFT_OPENCODE_MODEL,
   HAFT_RUNNER_PROJECTS (JSON map), HAFT_RUNNER_PROJECT_ID,
   HAFT_RUNNER_WORKSPACE_ROOT, HAFT_RUNNER_WORKTREE_ROOT, HAFT_GIT_BIN,
-  HAFT_RUNNER_KEEP_WORKTREES, HAFT_RUNNER_CLI_TIMEOUT_MS,
+  HAFT_RUNNER_KEEP_WORKTREES, HAFT_RUNNER_RECOVERY_ROOT,
+  HAFT_RUNNER_SHUTDOWN_GRACE_MS, HAFT_RUNNER_CLI_TIMEOUT_MS,
   HAFT_RUNNER_ALLOW_AUTO_APPROVE, HAFT_RUNNER_STEP_MS,
   HAFT_RUNNER_HEALTH_PORT, HAFT_RUNNER_MAX_CONCURRENT.
 
@@ -177,6 +180,15 @@ export function loadConfig(argv: string[] = process.argv.slice(2), env: NodeJS.P
       env.HAFT_RUNNER_WORKTREE_ROOT ?? join(homedir(), '.haft', 'worktrees'),
     ),
     keepWorktrees: env.HAFT_RUNNER_KEEP_WORKTREES !== '0',
+    recoveryRoot: expandHome(
+      env.HAFT_RUNNER_RECOVERY_ROOT ?? join(homedir(), '.haft', 'recovery', runnerId),
+    ),
+    shutdownGraceMs: clampInt(
+      env.HAFT_RUNNER_SHUTDOWN_GRACE_MS ?? '10000',
+      1000,
+      120_000,
+      'shutdown-grace-ms',
+    ),
     cliTimeoutMs: clampInt(
       env.HAFT_RUNNER_CLI_TIMEOUT_MS ?? String(30 * 60 * 1000),
       10_000,

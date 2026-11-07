@@ -7,6 +7,7 @@ import type { INestApplication } from '@nestjs/common';
 import {
   RUNNER_PROTOCOL_VERSION,
   runnerServerMessageSchema,
+  type ExecutionDiffDto,
   type ExecutionDto,
   type ExecutionLogDto,
   type ListDto,
@@ -291,6 +292,15 @@ describe('Runner protocol v1 integration', () => {
         changedFiles: 2,
         diffStat: '2 files changed',
         gitStatus: 'clean',
+        diff: [
+          'diff --git a/src/example.ts b/src/example.ts',
+          '--- a/src/example.ts',
+          '+++ b/src/example.ts',
+          '@@ -1 +1 @@',
+          '-export const value = 1;',
+          '+export const value = 2;',
+        ].join('\n'),
+        diffTruncated: false,
       },
     });
 
@@ -309,6 +319,48 @@ describe('Runner protocol v1 integration', () => {
       lastRunnerSeq: 2,
     });
     expect(completed.branchName).toBe(`haft/${executionId}`);
+    expect(completed.changedFiles).toBe(2);
+    expect(completed.gitStatus).toBe('clean');
+    expect(completed.diffTruncated).toBe(false);
+    // The potentially large patch must never be embedded in the execution DTO.
+    expect(completed).not.toHaveProperty('diff');
+
+    const diffResponse = await request(server)
+      .get(`/api/executions/${executionId}/diff`)
+      .expect(200);
+    const storedDiff = (diffResponse.body as ApiSuccessBody<ExecutionDiffDto>).data;
+    expect(storedDiff).toMatchObject({
+      executionId,
+      available: true,
+      branchName: `haft/${executionId}`,
+      baseCommit: '0'.repeat(40),
+      headCommit: 'f'.repeat(40),
+      changedFiles: 2,
+      diffStat: '2 files changed',
+      gitStatus: 'clean',
+      diffTruncated: false,
+    });
+    expect(storedDiff.diff).toContain('-export const value = 1;');
+    expect(storedDiff.diff).toContain('+export const value = 2;');
+    expect(storedDiff.createdAt).toBeTruthy();
+
+    // A duplicate terminal message must not create a second artifact or change
+    // the stored patch.
+    send(connected.socket, 'execution.completed', {
+      executionId,
+      exitCode: 0,
+      summary: 'Duplicate completion must be ignored.',
+      git: null,
+    });
+    await delay(200);
+    const duplicateDiff = await request(server)
+      .get(`/api/executions/${executionId}/diff`)
+      .expect(200);
+    expect((duplicateDiff.body as ApiSuccessBody<ExecutionDiffDto>).data.diff).toContain(
+      '+export const value = 2;',
+    );
+    const artifactCount = await prisma.executionArtifact.count({ where: { executionId } });
+    expect(artifactCount).toBe(1);
 
     const logResponse = await request(server)
       .get(`/api/executions/${executionId}/logs`)
@@ -447,7 +499,16 @@ describe('Runner protocol v1 integration', () => {
         executionId,
         exitCode: 0,
         summary: 'Intruder completion must be ignored.',
-        git: null,
+        git: {
+          branchName: 'haft/intruder',
+          baseCommit: '0'.repeat(40),
+          headCommit: 'f'.repeat(40),
+          changedFiles: 1,
+          diffStat: '1 file changed',
+          gitStatus: ' M intruder.ts',
+          diff: '+intruder diff must never be stored',
+          diffTruncated: false,
+        },
       },
       'runner_intruder',
     );
@@ -455,6 +516,13 @@ describe('Runner protocol v1 integration', () => {
     await delay(300);
     const current = await request(server).get(`/api/executions/${executionId}`).expect(200);
     expect((current.body as ApiSuccessBody<ExecutionDto>).data.status).toBe('running');
+    const diff = await request(server)
+      .get(`/api/executions/${executionId}/diff`)
+      .expect(200);
+    expect((diff.body as ApiSuccessBody<ExecutionDiffDto>).data).toMatchObject({
+      available: false,
+      diff: '',
+    });
     const logs = await request(server)
       .get(`/api/executions/${executionId}/logs`)
       .expect(200);

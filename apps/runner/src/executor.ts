@@ -52,6 +52,15 @@ export interface CancelledPayload {
   git: GitExecutionResult | null;
 }
 
+export interface ShutdownResult {
+  /** True only when every session reached a terminal state and its process exited. */
+  clean: boolean;
+  /** Sessions that were still active after the shutdown grace window. */
+  remainingExecutionIds: string[];
+  /** True when the runner had to escalate from graceful cancellation to a tree kill. */
+  forced: boolean;
+}
+
 export interface RunnerExecutor {
   start(payload: ExecutionStartMessage['payload']): void;
   cancel(executionId: string, reason?: string): void;
@@ -66,5 +75,5 @@ export interface RunnerExecutor {
     runtime: RunnerRuntimeType;
   }>;
   activeExecutionIds(): string[];
-  shutdown(reason?: string): void;
+  shutdown(reason?: string): Promise<ShutdownResult>;
 }

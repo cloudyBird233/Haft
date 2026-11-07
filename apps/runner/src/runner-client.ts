@@ -10,10 +10,11 @@ import {
 } from '@raft-lite/contracts';
 import type { RunnerConfig } from './config';
 import { probeRuntimeCapabilities } from './cli-probe';
-import type { ExecutorCallbacks, RunnerExecutor } from './executor';
+import type { ExecutorCallbacks, RunnerExecutor, ShutdownResult } from './executor';
 import { FakeExecutor } from './fake-executor';
 import { log } from './logger';
 import { RealExecutor } from './real-executor';
+import { ExecutionRecovery, type RecoveredExecution } from './recovery';
 import { TokenStore } from './token-store';
 
 export interface RunnerClientOptions {
@@ -33,6 +34,8 @@ export class RunnerClient {
   private readonly config: RunnerConfig;
   private readonly tokenStore: TokenStore;
   private readonly executor: RunnerExecutor;
+  private readonly recovery: ExecutionRecovery;
+  private recoveredExecutions: RecoveredExecution[] = [];
   private readonly onFatal: (message: string) => void;
   private runtimeCapabilities: RunnerRuntimeCapability[] = [];
   private socket: Socket | null = null;
@@ -48,6 +51,7 @@ export class RunnerClient {
     this.config = options.config;
     this.onFatal = options.onFatal ?? (() => undefined);
     this.tokenStore = new TokenStore(this.config.tokenFile, this.config.runnerId);
+    this.recovery = new ExecutionRecovery(this.config.recoveryRoot);
     const callbacks: ExecutorCallbacks = {
       onPhase: (session, phase, message) => {
         this.send('execution.phase', {
@@ -57,6 +61,9 @@ export class RunnerClient {
         });
       },
       onLog: (session, entry) => {
+        // Append before sending: a crash between these two calls leaves a
+        // durable spool entry that can be replayed, never a silent gap.
+        void this.recovery.appendLog(session.executionId, entry);
         this.send('execution.log', {
           executionId: session.executionId,
           entries: [entry],
@@ -99,11 +106,19 @@ export class RunnerClient {
     this.executor =
       this.config.mode === 'fake'
         ? new FakeExecutor(this.config, callbacks)
-        : new RealExecutor(this.config, callbacks);
+        : new RealExecutor(this.config, callbacks, this.recovery);
   }
 
   async start(): Promise<void> {
     await this.prepareCapabilities();
+    this.recoveredExecutions = await this.recovery.scan();
+    if (this.recoveredExecutions.length > 0) {
+      log('warn', {
+        eventType: 'runner.recovery_found',
+        message: `Runner found ${this.recoveredExecutions.length} interrupted execution(s) from a previous process`,
+        status: 'degraded',
+      });
+    }
     this.token = await this.tokenStore.read();
     if (!this.token && !this.config.bootstrapToken) {
       throw new Error(
@@ -129,15 +144,37 @@ export class RunnerClient {
     return this.executor.pendingLogCount();
   }
 
-  async stop(): Promise<void> {
+  async stop(): Promise<ShutdownResult> {
     this.stopHeartbeat();
-    this.executor.shutdown();
-    await delay(150);
+    // Keep the socket connected while sessions finalize so their terminal
+    // events reach the server. Never assume a fixed delay equals termination.
+    const result = await this.executor.shutdown('Runner shutting down');
+    if (!result.clean) {
+      log('error', {
+        eventType: 'runner.shutdown_incomplete',
+        message: 'Runner could not confirm that every CLI process stopped',
+        status: 'error',
+        remainingExecutionIds: result.remainingExecutionIds,
+        forced: result.forced,
+      });
+    } else {
+      log('info', {
+        eventType: 'runner.shutdown_complete',
+        message: 'All runner sessions reached a terminal state',
+        status: 'offline',
+        forced: result.forced,
+      });
+    }
+    // Terminal events may still be in the log spool queue when the last
+    // session finalizes; make the recovery evidence durable before exit.
+    await this.recovery.spool.flush();
+    await this.recovery.journal.flushAll();
     if (this.socket) {
       this.socket.removeAllListeners();
       this.socket.disconnect();
       this.socket = null;
     }
+    return result;
   }
 
   private connect(): void {
@@ -162,10 +199,7 @@ export class RunnerClient {
         message: 'Connected to the Haft API',
         status: 'online',
       });
-      this.sendRegister();
-      this.sendSnapshot();
-      this.resendPendingLogs();
-      this.startHeartbeat();
+      void this.onConnected();
     });
 
     socket.on('disconnect', (reason) => {
@@ -243,6 +277,10 @@ export class RunnerClient {
         break;
       case 'execution.log.ack':
         this.executor.acknowledge(message.payload.executionId, message.payload.throughSeq);
+        void this.recovery.acknowledgeLogs(
+          message.payload.executionId,
+          message.payload.throughSeq,
+        );
         break;
     }
   }
@@ -390,11 +428,73 @@ export class RunnerClient {
     });
   }
 
-  private resendPendingLogs(): void {
-    for (const executionId of this.executor.activeExecutionIds()) {
-      const entries = this.executor.pendingLogs(executionId);
+  private async onConnected(): Promise<void> {
+    this.sendRegister();
+    await this.sendRecoveryReports();
+    this.sendSnapshot();
+    await this.resendPendingLogs();
+    this.startHeartbeat();
+  }
+
+  /**
+   * Reports executions found in the recovery journal before the snapshot is
+   * sent. The snapshot then contains only genuinely live in-memory sessions, so
+   * the server does not misinterpret a recovered execution as still running.
+   */
+  private async sendRecoveryReports(): Promise<void> {
+    if (this.recoveredExecutions.length === 0) return;
+    const pending: RecoveredExecution[] = [];
+    for (let index = 0; index < this.recoveredExecutions.length; index += 1) {
+      const report = this.recoveredExecutions[index] as RecoveredExecution;
+      const entries =
+        report.logs.length > 0
+          ? report.logs
+          : await this.recovery.readLogs(report.record.executionId, 200);
+      let delivered = true;
       if (entries.length > 0) {
-        this.send('execution.log', { executionId, entries: entries.slice(0, 200) });
+        delivered = this.send('execution.log', {
+          executionId: report.record.executionId,
+          entries: entries.slice(-200),
+        });
+      }
+      if (delivered) {
+        delivered = this.send('execution.failed', {
+          executionId: report.record.executionId,
+          reason: report.summary.slice(0, 2000),
+          exitCode: null,
+          summary: report.summary,
+          git: null,
+        });
+      }
+      if (!delivered) {
+        pending.push(...this.recoveredExecutions.slice(index));
+        break;
+      }
+      log('warn', {
+        eventType: 'runner.recovery_reported',
+        message: report.summary,
+        status: 'interrupted',
+        executionId: report.record.executionId,
+        orphanTerminated: report.orphanTerminated,
+        orphanStillAlive: report.orphanStillAlive,
+      });
+    }
+    this.recoveredExecutions = pending;
+  }
+
+  private async resendPendingLogs(): Promise<void> {
+    for (const executionId of this.executor.activeExecutionIds()) {
+      const pending = this.executor.pendingLogs(executionId);
+      const spooled = await this.recovery.readLogs(executionId);
+      const bySequence = new Map<number, (typeof pending)[number]>();
+      for (const entry of [...spooled, ...pending]) {
+        bySequence.set(entry.sequence, entry);
+      }
+      const entries = [...bySequence.values()]
+        .sort((left, right) => left.sequence - right.sequence)
+        .slice(-200);
+      if (entries.length > 0) {
+        this.send('execution.log', { executionId, entries });
       }
     }
   }
@@ -477,8 +577,4 @@ export class RunnerClient {
     socket.emit('runner.message', envelope);
     return socket.connected;
   }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

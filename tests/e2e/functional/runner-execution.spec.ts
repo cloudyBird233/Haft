@@ -80,9 +80,41 @@ test.describe('Fake Agent Runner', () => {
     expect(execution.phase).toBe('completed');
     expect(execution.runnerId).toBe('runner_e2e');
     expect(execution.branchName).toBe(`haft/${executionId}`);
+    expect(execution.changedFiles).toBe(2);
+    expect(execution.gitStatus).toContain('packages/example/src/feature.ts');
+    expect(execution.diffTruncated).toBe(false);
     expect(execution.exitCode).toBe(0);
     expect((await factory.getTask(task.id)).status).toBe('done');
     expect((await factory.getAgent(agent.id)).status).toBe('idle');
+
+    const diff = await factory.getExecutionDiff(executionId);
+    expect(diff.available).toBe(true);
+    expect(diff.executionId).toBe(executionId);
+    expect(diff.changedFiles).toBe(2);
+    expect(diff.diff).toContain('diff --git a/packages/example/src/feature.ts');
+    expect(diff.diff).toContain('+++ b/packages/example/test/feature.spec.ts');
+    expect(diff.diffTruncated).toBe(false);
+    expect(diff.createdAt).not.toBeNull();
+
+    await byTestId(page, 'execution.changesTab').click();
+    await expect(byTestId(page, 'execution.diffPanel')).toBeVisible();
+    await expect(byTestId(page, 'execution.changedFiles')).toBeVisible();
+    await expect(byTestId(page, 'execution.diffFile')).toHaveCount(2);
+    await expect(byTestId(page, 'execution.diffFile').first()).toHaveAttribute(
+      'data-status',
+      'modified',
+    );
+    await expect(byTestId(page, 'execution.diffFile').nth(1)).toHaveAttribute(
+      'data-status',
+      'added',
+    );
+    await expect(byTestId(page, 'execution.diffContent').first()).toContainText(
+      'return "simulated";',
+    );
+    await expect(byTestId(page, 'execution.diffTruncated')).toHaveAttribute(
+      'data-truncated',
+      'false',
+    );
 
     const logs = await factory.getExecutionLogs(executionId);
     expect(logs.items.some((entry) => entry.message.includes('Fake runner completed all simulated steps.'))).toBe(

@@ -131,6 +131,10 @@ model Execution {
   branchName    String?
   baseCommit    String?
   headCommit    String?
+  changedFiles  Int            @default(0)
+  diffStat      String         @default("")
+  gitStatus     String         @default("")
+  diffTruncated Boolean        @default(false)
   lastRunnerSeq Int            @default(0)
   startedAt     DateTime       @default(now())
   endedAt       DateTime?
@@ -142,6 +146,7 @@ model Execution {
   agent         Agent          @relation(fields: [agentId], references: [id], onDelete: Cascade)
   runner        Runner?        @relation(fields: [runnerId], references: [id], onDelete: SetNull)
   logs          ExecutionLog[]
+  artifacts     ExecutionArtifact[]
   activities    Activity[]
 
   @@index([taskId])
@@ -149,6 +154,23 @@ model Execution {
   @@index([runnerId])
   @@index([status])
   @@index([phase])
+}
+
+/// Durable execution payload that is too large for the execution list DTO.
+/// The unified diff lives here and is fetched through GET /api/executions/:id/diff.
+model ExecutionArtifact {
+  id          String    @id @default(cuid())
+  executionId String
+  kind        String    @default("git-diff")
+  content     String
+  byteSize    Int
+  truncated   Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  execution   Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+
+  @@unique([executionId, kind])
+  @@index([executionId])
 }
 
 model ExecutionLog {

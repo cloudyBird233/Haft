@@ -4,17 +4,19 @@ import {
   type OnModuleDestroy,
   type OnModuleInit,
 } from '@nestjs/common';
-import type {
-  AgentDto,
-  AgentRuntimeType,
-  CancelExecutionInput,
-  ExecutionDto,
-  ExecutionListQuery,
-  ExecutionLogDto,
-  ExecutionLogsQuery,
-  ListDto,
-  TaskCancellationDto,
-  TaskDto,
+import {
+  EXECUTION_DIFF_MAX_BYTES,
+  type AgentDto,
+  type AgentRuntimeType,
+  type CancelExecutionInput,
+  type ExecutionDiffDto,
+  type ExecutionDto,
+  type ExecutionListQuery,
+  type ExecutionLogDto,
+  type ExecutionLogsQuery,
+  type ListDto,
+  type TaskCancellationDto,
+  type TaskDto,
 } from '@raft-lite/contracts';
 import type { Prisma } from '@prisma/client';
 import { AppException } from '../../common/errors/app.exception';
@@ -25,6 +27,7 @@ import {
   executionRelations,
   taskRelations,
   toAgentDto,
+  toExecutionDiffDto,
   toExecutionDto,
   toExecutionLogDto,
   toTaskDto,
@@ -309,6 +312,37 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       throw new AppException('EXECUTION_NOT_FOUND', 'Execution not found', HttpStatus.NOT_FOUND);
     }
     return toExecutionDto(execution);
+  }
+
+  /**
+   * Returns the stored unified diff for an execution.
+   *
+   * The patch is read from a dedicated artifact row; no request parameter can
+   * point at an arbitrary file or repository path. Large patches are never
+   * embedded in execution list responses.
+   */
+  async diff(id: string): Promise<ExecutionDiffDto> {
+    const execution = await this.prisma.execution.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        branchName: true,
+        baseCommit: true,
+        headCommit: true,
+        changedFiles: true,
+        diffStat: true,
+        gitStatus: true,
+        diffTruncated: true,
+      },
+    });
+    if (!execution) {
+      throw new AppException('EXECUTION_NOT_FOUND', 'Execution not found', HttpStatus.NOT_FOUND);
+    }
+    const artifact = await this.prisma.executionArtifact.findUnique({
+      where: { executionId_kind: { executionId: id, kind: 'git-diff' } },
+      select: { content: true, byteSize: true, truncated: true, createdAt: true },
+    });
+    return toExecutionDiffDto(execution, artifact);
   }
 
   async logs(id: string, query: ExecutionLogsQuery): Promise<ListDto<ExecutionLogDto>> {
@@ -698,6 +732,8 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         changedFiles: number;
         diffStat: string;
         gitStatus: string;
+        diff: string;
+        diffTruncated: boolean;
       } | null;
     } = {},
   ): Promise<void> {
@@ -713,9 +749,10 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       outcome === 'completed' ? 'done' : outcome === 'failed' ? 'failed' : 'cancelled';
     const nextAgentStatus = outcome === 'failed' ? 'error' : 'idle';
     const git = metadata.git;
+    const diff = git ? normalizeDiff(git.diff, git.diffTruncated) : null;
 
-    await this.prisma.$transaction([
-      this.prisma.execution.update({
+    await this.prisma.$transaction(async (tx) => {
+      await tx.execution.update({
         where: { id },
         data: {
           status: outcome,
@@ -734,19 +771,40 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
                 branchName: git.branchName,
                 baseCommit: git.baseCommit,
                 headCommit: git.headCommit,
+                changedFiles: git.changedFiles,
+                diffStat: git.diffStat,
+                gitStatus: git.gitStatus,
+                diffTruncated: diff?.truncated ?? git.diffTruncated,
               }
             : {}),
         },
-      }),
-      this.prisma.task.update({
+      });
+      if (git && diff) {
+        await tx.executionArtifact.upsert({
+          where: { executionId_kind: { executionId: id, kind: 'git-diff' } },
+          create: {
+            executionId: id,
+            kind: 'git-diff',
+            content: diff.content,
+            byteSize: Buffer.byteLength(diff.content, 'utf8'),
+            truncated: diff.truncated,
+          },
+          update: {
+            content: diff.content,
+            byteSize: Buffer.byteLength(diff.content, 'utf8'),
+            truncated: diff.truncated,
+          },
+        });
+      }
+      await tx.task.update({
         where: { id: current.taskId },
         data: { status: nextTaskStatus },
-      }),
-      this.prisma.agent.update({
+      });
+      await tx.agent.update({
         where: { id: current.agentId },
         data: { status: nextAgentStatus, lastActiveAt: endedAt },
-      }),
-    ]);
+      });
+    });
 
     this.runtimes.noteFinished(current.runtime as AgentRuntimeType, id);
 
@@ -944,4 +1002,17 @@ function isUniqueConstraintError(error: unknown): boolean {
       'code' in error &&
       (error as { code?: unknown }).code === 'P2002',
   );
+}
+
+function normalizeDiff(
+  raw: string | null | undefined,
+  truncated: boolean,
+): { content: string; truncated: boolean } {
+  const value = raw ?? '';
+  const bytes = Buffer.byteLength(value, 'utf8');
+  if (bytes <= EXECUTION_DIFF_MAX_BYTES) {
+    return { content: value, truncated };
+  }
+  const buffer = Buffer.from(value, 'utf8').subarray(0, EXECUTION_DIFF_MAX_BYTES);
+  return { content: buffer.toString('utf8'), truncated: true };
 }

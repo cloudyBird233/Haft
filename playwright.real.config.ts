@@ -9,6 +9,7 @@ import { defineConfig } from '@playwright/test';
  * deterministic Fake Runner suite (`pnpm test:e2e`).
  */
 const API_URL = process.env.REAL_E2E_API_URL ?? 'http://127.0.0.1:3201';
+const WEB_URL = process.env.REAL_E2E_WEB_URL ?? 'http://127.0.0.1:5274';
 const RUNNER_HEALTH_PORT = process.env.REAL_E2E_RUNNER_HEALTH_PORT ?? '3299';
 const RUNNER_HEALTH_URL = `http://127.0.0.1:${RUNNER_HEALTH_PORT}`;
 const RUNNER_BOOTSTRAP_TOKEN =
@@ -17,6 +18,7 @@ const RUNNER_BOOTSTRAP_TOKEN =
 const REAL_E2E_ROOT = join(process.cwd(), 'test-results', 'real-e2e');
 const PROJECT_DIR = join(REAL_E2E_ROOT, 'workspace');
 const WORKTREE_ROOT = join(REAL_E2E_ROOT, 'worktrees');
+const RECOVERY_ROOT = join(REAL_E2E_ROOT, 'recovery');
 
 const runnerEnv: Record<string, string> = {
   ...(process.env as Record<string, string>),
@@ -30,6 +32,7 @@ const runnerEnv: Record<string, string> = {
   HAFT_RUNNER_PROJECTS: JSON.stringify({ project_demo: PROJECT_DIR }),
   HAFT_RUNNER_WORKTREE_ROOT: WORKTREE_ROOT,
   HAFT_RUNNER_KEEP_WORKTREES: '1',
+  HAFT_RUNNER_RECOVERY_ROOT: RECOVERY_ROOT,
   HAFT_RUNNER_CLI_TIMEOUT_MS: '600000',
   HAFT_RUNNER_HEALTH_PORT: RUNNER_HEALTH_PORT,
   HAFT_RUNNER_MAX_CONCURRENT: '1',
@@ -54,8 +57,15 @@ export default defineConfig({
   reporter: [['list']],
   outputDir: 'test-results/real-e2e/playwright',
   use: {
+    baseURL: WEB_URL,
+    viewport: { width: 1440, height: 900 },
+    locale: 'en-US',
+    timezoneId: 'UTC',
+    colorScheme: 'light',
+    reducedMotion: 'reduce',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
+    video: 'off',
   },
   webServer: [
     {
@@ -67,6 +77,17 @@ export default defineConfig({
         ...process.env,
         NODE_ENV: 'test',
         E2E_TEST_MODE: 'true',
+      },
+    },
+    {
+      command: 'pnpm --filter @raft-lite/web dev:real-e2e',
+      url: WEB_URL,
+      reuseExistingServer: false,
+      timeout: 180_000,
+      env: {
+        ...process.env,
+        VITE_API_PROXY_TARGET: API_URL,
+        VITE_SOCKET_URL: API_URL,
       },
     },
     {

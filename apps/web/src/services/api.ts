@@ -10,6 +10,7 @@ import type {
   CreateTaskInput,
   DashboardDto,
   ExecutionDto,
+  ExecutionDiffDto,
   ExecutionListQuery,
   ExecutionLogDto,
   HealthDto,
@@ -200,6 +201,8 @@ export const api = {
     request<ListDto<ExecutionLogDto>>(
       `/executions/${encodeURIComponent(id)}/logs${queryString({ limit: 500 })}`,
     ),
+  getExecutionDiff: (id: string) =>
+    request<ExecutionDiffDto>(`/executions/${encodeURIComponent(id)}/diff`),
   cancelExecution: (id: string, input?: CancelExecutionInput) =>
     request<ExecutionDto>(`/executions/${encodeURIComponent(id)}/cancel`, {
       method: 'POST',

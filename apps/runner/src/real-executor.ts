@@ -22,6 +22,7 @@ import type {
   FailedPayload,
   RunnerExecutor,
   RunnerSessionView,
+  ShutdownResult,
 } from './executor';
 import { GitWorktreeError, GitWorktreeManager, type WorktreeInfo } from './git-worktree';
 import {
@@ -30,6 +31,9 @@ import {
   resolveExecutable,
   terminateProcess,
 } from './process-utils';
+import { inspectProcess } from './process-identity';
+import type { ExecutionRecovery } from './recovery';
+import type { ExecutionJournalPatch } from './execution-journal';
 
 const MAX_PENDING_LOGS = 10_000;
 const CANCEL_GRACE_MS = 5_000;
@@ -52,6 +56,8 @@ interface RealSession extends RunnerSessionView {
   sawOutput: boolean;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
+  processStartTime: string | null;
+  processGroupId: number | null;
 }
 
 interface FinalizeResult {
@@ -84,6 +90,7 @@ export class RealExecutor implements RunnerExecutor {
   constructor(
     private readonly config: RunnerConfig,
     private readonly callbacks: ExecutorCallbacks,
+    private readonly recovery?: ExecutionRecovery,
   ) {
     this.git = new GitWorktreeManager(config);
   }
@@ -203,16 +210,51 @@ export class RealExecutor implements RunnerExecutor {
     return [...this.sessions.keys()];
   }
 
-  shutdown(reason = 'Runner shutting down'): void {
-    for (const session of [...this.sessions.values()]) {
-      this.cancel(session.executionId, reason);
+  async shutdown(reason = 'Runner shutting down'): Promise<ShutdownResult> {
+    const initial = [...this.sessions.keys()];
+    if (initial.length === 0) {
+      return { clean: true, remainingExecutionIds: [], forced: false };
     }
+    for (const executionId of initial) {
+      this.cancel(executionId, reason);
+    }
+
+    let forced = false;
+    let clean = await waitFor(() => this.sessions.size === 0, this.config.shutdownGraceMs);
+    if (!clean) {
+      forced = true;
+      for (const session of this.sessions.values()) {
+        this.log(
+          session,
+          'system',
+          'warning',
+          'Graceful shutdown timed out; force-terminating the CLI process tree.',
+        );
+        if (session.child) {
+          await terminateProcess(session.child, true);
+        } else {
+          await this.finalize(session, 'cancelled', {
+            reason: `${reason}: the CLI had not started`,
+            exitCode: null,
+            summary: null,
+          });
+        }
+      }
+      clean = await waitFor(() => this.sessions.size === 0, 5000);
+    }
+
+    return {
+      clean,
+      remainingExecutionIds: [...this.sessions.keys()],
+      forced,
+    };
   }
 
   private async prepareAndRun(
     session: RealSession,
     payload: ExecutionStartMessage['payload'],
   ): Promise<void> {
+    await this.beginJournal(session, payload);
     const projectPath = this.config.projectPaths[payload.projectId];
     if (!projectPath) {
       throw new RunnerFailure(
@@ -228,6 +270,16 @@ export class RealExecutor implements RunnerExecutor {
       payload.executionId,
     );
     session.worktree = worktree;
+    await this.persistJournal(
+      session,
+      {
+        worktreePath: worktree.path,
+        branchName: worktree.branchName,
+        baseCommit: worktree.baseCommit,
+        phase: session.phase,
+      },
+      true,
+    );
     this.log(
       session,
       'system',
@@ -309,6 +361,23 @@ export class RealExecutor implements RunnerExecutor {
     child.once('close', (code, signal) => {
       void this.finishFromClose(session, code, signal);
     });
+
+    const pid = child.pid ?? null;
+    if (pid) {
+      const identity = await inspectProcess(pid).catch(() => null);
+      session.processStartTime = identity?.startTime ?? null;
+      session.processGroupId = identity?.processGroupId ?? pid;
+      await this.persistJournal(
+        session,
+        {
+          pid,
+          processStartTime: session.processStartTime,
+          processGroupId: session.processGroupId,
+          phase: session.phase,
+        },
+        true,
+      );
+    }
 
     const timeoutMs = Math.min(
       payload.options.timeoutMs ?? this.config.cliTimeoutMs,
@@ -403,6 +472,7 @@ export class RealExecutor implements RunnerExecutor {
 
     const git = await this.collectGit(session);
     session.phase = outcome;
+    await this.finishJournal(session, outcome);
 
     if (outcome === 'completed') {
       const summary =
@@ -524,6 +594,7 @@ export class RealExecutor implements RunnerExecutor {
     message: string | null,
   ): void {
     session.phase = phase;
+    void this.persistJournal(session, { phase, status: 'active' }, true);
     this.callbacks.onPhase(session, phase, message);
   }
 
@@ -558,6 +629,11 @@ export class RealExecutor implements RunnerExecutor {
       }
     }
     session.pending.set(entry.sequence, entry);
+    void this.persistJournal(
+      session,
+      { lastSequence: session.lastSeq, phase: session.phase, status: 'active' },
+      false,
+    );
     this.callbacks.onLog(session, entry);
   }
 
@@ -584,6 +660,8 @@ export class RealExecutor implements RunnerExecutor {
       sawOutput: false,
       exitCode: null,
       signal: null,
+      processStartTime: null,
+      processGroupId: null,
     };
   }
 
@@ -602,10 +680,82 @@ export class RealExecutor implements RunnerExecutor {
     }
   }
 
+  private async beginJournal(
+    session: RealSession,
+    payload: ExecutionStartMessage['payload'],
+  ): Promise<void> {
+    if (!this.recovery) return;
+    try {
+      await this.recovery.journal.begin({
+        version: 1,
+        executionId: session.executionId,
+        runtime: session.runtime,
+        projectId: payload.projectId,
+        pid: null,
+        processStartTime: null,
+        processGroupId: null,
+        worktreePath: session.worktree?.path ?? null,
+        branchName: session.worktree?.branchName ?? null,
+        baseCommit: session.worktree?.baseCommit ?? null,
+        phase: session.phase,
+        status: 'active',
+        lastSequence: session.lastSeq,
+        startedAt: session.startedAt,
+        updatedAt: new Date().toISOString(),
+        finishedAt: null,
+      });
+    } catch (error) {
+      this.log(
+        session,
+        'system',
+        'warning',
+        `Recovery journal could not be written: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  private persistJournal(
+    session: RealSession,
+    patch: ExecutionJournalPatch,
+    immediate: boolean,
+  ): Promise<void> {
+    if (!this.recovery || session.finished) return Promise.resolve();
+    return this.recovery.journal
+      .update(session.executionId, patch, { immediate })
+      .catch(() => undefined);
+  }
+
+  private async finishJournal(
+    session: RealSession,
+    outcome: 'completed' | 'failed' | 'cancelled',
+  ): Promise<void> {
+    if (!this.recovery) return;
+    try {
+      await this.recovery.journal.finish(
+        session.executionId,
+        outcome,
+        outcome,
+        session.lastSeq,
+      );
+    } catch {
+      // Recovery metadata is best-effort; the terminal protocol event is the
+      // authoritative outcome.
+    }
+  }
+
   private describeError(error: unknown): string {
     if (error instanceof GitWorktreeError || error instanceof RunnerFailure) {
       return error.message.slice(0, 2000);
     }
     return `RUNNER_ERROR: ${errorMessage(error)}`.slice(0, 2000);
   }
+}
+
+async function waitFor(condition: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return true;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  return condition();
 }

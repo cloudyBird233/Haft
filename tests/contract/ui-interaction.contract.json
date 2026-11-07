@@ -168,7 +168,18 @@
     "execution.logEntry": { "testId": "execution-log-entry" },
     "execution.logEmpty": { "testId": "execution-log-empty" },
     "execution.logError": { "testId": "execution-log-error", "role": "alert" },
-    "execution.logLiveStatus": { "testId": "execution-log-live-status" }
+    "execution.logLiveStatus": { "testId": "execution-log-live-status" },
+    "execution.logsTab": { "testId": "execution-logs-tab", "role": "tab", "name": "Logs" },
+    "execution.changesTab": { "testId": "execution-changes-tab", "role": "tab", "name": "Changes" },
+    "execution.changedFiles": { "testId": "execution-changed-files" },
+    "execution.changedFile": { "testId": "execution-changed-file" },
+    "execution.diffPanel": { "testId": "execution-diff-panel" },
+    "execution.diffFile": { "testId": "execution-diff-file" },
+    "execution.diffContent": { "testId": "execution-diff-content" },
+    "execution.diffTruncated": { "testId": "execution-diff-truncated" },
+    "execution.diffBinary": { "testId": "execution-diff-binary" },
+    "execution.diffEmpty": { "testId": "execution-diff-empty" },
+    "execution.diffRefresh": { "testId": "execution-diff-refresh-button", "role": "button", "name": "Refresh diff" }
   },
   "requiredTestIds": [
     "agent-create-button",
@@ -180,7 +191,13 @@
     "task-detail-panel",
     "execution-start-button",
     "execution-stop-button",
-    "execution-log"
+    "execution-log",
+    "execution-changes-tab",
+    "execution-changed-files",
+    "execution-diff-panel",
+    "execution-diff-file",
+    "execution-diff-content",
+    "execution-diff-truncated"
   ],
   "taskLanes": {
     "todo": ["todo"],
@@ -232,6 +249,16 @@
       "click.execution.stopConfirm",
       "expect.execution.statusBanner.cancelled",
       "expect.execution.cancelReason"
+    ],
+    "inspectExecutionChanges": [
+      "navigate.execution",
+      "expect.execution.page",
+      "click.execution.changesTab",
+      "expect.execution.diffPanel",
+      "expect.execution.changedFiles",
+      "expect.execution.diffFile",
+      "expect.execution.diffContent",
+      "expect.execution.diffTruncated"
     ]
   },
   "testApi": {

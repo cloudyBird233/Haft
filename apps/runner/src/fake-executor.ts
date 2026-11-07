@@ -7,7 +7,7 @@ import type {
   RunnerRuntimeType,
 } from '@raft-lite/contracts';
 import type { RunnerConfig } from './config';
-import type { ExecutorCallbacks, RunnerExecutor } from './executor';
+import type { ExecutorCallbacks, RunnerExecutor, ShutdownResult } from './executor';
 
 export type { CancelledPayload, CompletedPayload, ExecutorCallbacks, FailedPayload } from './executor';
 
@@ -187,10 +187,17 @@ export class FakeExecutor implements RunnerExecutor {
     return [...this.sessions.keys()];
   }
 
-  shutdown(reason = 'Runner shutting down'): void {
-    for (const session of [...this.sessions.values()]) {
-      this.cancel(session.executionId, reason);
+  async shutdown(reason = 'Runner shutting down'): Promise<ShutdownResult> {
+    const initial = [...this.sessions.keys()];
+    for (const executionId of initial) {
+      this.cancel(executionId, reason);
     }
+    const clean = await waitFor(() => this.sessions.size === 0, 3000);
+    return {
+      clean,
+      remainingExecutionIds: [...this.sessions.keys()],
+      forced: false,
+    };
   }
 
   private createSession(payload: ExecutionStartMessage['payload']): FakeSession {
@@ -272,16 +279,46 @@ export class FakeExecutor implements RunnerExecutor {
       branchName: `haft/${sanitize(executionId)}`,
       baseCommit: '0'.repeat(40),
       headCommit: 'f'.repeat(40),
-      changedFiles: 3,
+      changedFiles: 2,
       diffStat:
         ' packages/example/src/feature.ts | 42 ++++++++++++++++++++++++++++++++----\n' +
         ' packages/example/test/feature.spec.ts | 18 ++++++++++++++++++\n' +
         ' 2 files changed, 56 insertions(+), 4 deletions(-)',
-      gitStatus: 'working tree clean (simulated)',
+      gitStatus:
+        ' M packages/example/src/feature.ts\n?? packages/example/test/feature.spec.ts',
+      diff: [
+        'diff --git a/packages/example/src/feature.ts b/packages/example/src/feature.ts',
+        'index 1111111..2222222 100644',
+        '--- a/packages/example/src/feature.ts',
+        '+++ b/packages/example/src/feature.ts',
+        '@@ -1,3 +1,4 @@',
+        ' export function feature() {',
+        '-  return "old";',
+        '+  return "simulated";',
+        ' }',
+        'diff --git a/packages/example/test/feature.spec.ts b/packages/example/test/feature.spec.ts',
+        'new file mode 100644',
+        'index 0000000..3333333',
+        '--- /dev/null',
+        '+++ b/packages/example/test/feature.spec.ts',
+        '@@ -0,0 +1,2 @@',
+        '+import { feature } from "../src/feature";',
+        '+// simulated test',
+      ].join('\n'),
+      diffTruncated: false,
     };
   }
 }
 
 function sanitize(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]/g, '-').slice(0, 80);
+}
+
+async function waitFor(condition: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (condition()) return true;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  return condition();
 }

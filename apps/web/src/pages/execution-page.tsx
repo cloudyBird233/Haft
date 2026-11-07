@@ -1,9 +1,9 @@
 import { useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, Ban, Clock3, RefreshCw, Terminal } from 'lucide-react';
+import { ArrowLeft, Ban, Clock3, FileDiff, RefreshCw, Terminal } from 'lucide-react';
 import { RUNTIME_LABELS, type AgentRuntimeType } from '@raft-lite/contracts';
-import { useExecution, useExecutionLogs } from '../hooks/use-raft-data';
+import { useExecution, useExecutionDiff, useExecutionLogs } from '../hooks/use-raft-data';
 import { useSocketStatus } from '../providers/socket-provider';
 import { useToast } from '../providers/toast-provider';
 import { api, ApiError } from '../services/api';
@@ -15,6 +15,7 @@ import { ErrorState, InlineAlert, Skeleton } from '../components/ui/feedback';
 import { Avatar } from '../components/ui/avatar';
 import { ExecutionStatusBadge, TaskStatusBadge } from '../components/ui/status-badge';
 import { LogPanel } from '../features/executions/log-panel';
+import { ChangesPanel } from '../features/executions/changes-panel';
 
 export function ExecutionPage(): JSX.Element {
   const { id } = useParams<{ id: string }>();
@@ -22,6 +23,8 @@ export function ExecutionPage(): JSX.Element {
   const execution = executionQuery.data;
   const isRunning = execution?.status === 'running';
   const logsQuery = useExecutionLogs(id, Boolean(isRunning));
+  const [activeTab, setActiveTab] = useState<'logs' | 'changes'>('logs');
+  const diffQuery = useExecutionDiff(id, activeTab === 'changes');
   const socketStatus = useSocketStatus();
   const queryClient = useQueryClient();
   const { toast } = useToast();
@@ -325,15 +328,84 @@ export function ExecutionPage(): JSX.Element {
         </div>
       </div>
 
-      <div className="mt-4">
-        <LogPanel
-          logs={logsQuery.data?.items ?? []}
-          loading={logsQuery.isLoading}
-          live={Boolean(isRunning)}
-          socketStatus={socketStatus}
-          error={logsQuery.isError}
-          onRetry={() => void logsQuery.refetch()}
-        />
+      <div className="mt-4" data-testid="execution-views">
+        <div
+          className="mb-3 inline-flex rounded-xl border border-line bg-[#f8f6f1] p-1"
+          role="tablist"
+          aria-label="Execution detail views"
+        >
+          <button
+            type="button"
+            role="tab"
+            id="execution-logs-tab"
+            aria-selected={activeTab === 'logs'}
+            aria-controls="execution-logs-panel"
+            className={`rounded-lg px-3 py-1.5 text-[11px] font-semibold transition-colors focus-ring ${
+              activeTab === 'logs' ? 'bg-surface text-ink shadow-sm' : 'text-muted hover:text-ink'
+            }`}
+            onClick={() => setActiveTab('logs')}
+            data-testid="execution-logs-tab"
+          >
+            <span className="inline-flex items-center gap-1.5">
+              <Terminal size={12} aria-hidden="true" />
+              Logs
+            </span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            id="execution-changes-tab"
+            aria-selected={activeTab === 'changes'}
+            aria-controls="execution-changes-panel"
+            className={`rounded-lg px-3 py-1.5 text-[11px] font-semibold transition-colors focus-ring ${
+              activeTab === 'changes' ? 'bg-surface text-ink shadow-sm' : 'text-muted hover:text-ink'
+            }`}
+            onClick={() => setActiveTab('changes')}
+            data-testid="execution-changes-tab"
+          >
+            <span className="inline-flex items-center gap-1.5">
+              <FileDiff size={12} aria-hidden="true" />
+              Changes
+              {execution.changedFiles > 0 ? (
+                <span className="rounded-full border border-line bg-surface px-1.5 text-[9px] text-muted">
+                  {execution.changedFiles}
+                </span>
+              ) : null}
+            </span>
+          </button>
+        </div>
+
+        {activeTab === 'logs' ? (
+          <div
+            role="tabpanel"
+            id="execution-logs-panel"
+            aria-labelledby="execution-logs-tab"
+            data-testid="execution-logs-panel"
+          >
+            <LogPanel
+              logs={logsQuery.data?.items ?? []}
+              loading={logsQuery.isLoading}
+              live={Boolean(isRunning)}
+              socketStatus={socketStatus}
+              error={logsQuery.isError}
+              onRetry={() => void logsQuery.refetch()}
+            />
+          </div>
+        ) : (
+          <div
+            role="tabpanel"
+            id="execution-changes-panel"
+            aria-labelledby="execution-changes-tab"
+            data-testid="execution-changes-panel"
+          >
+            <ChangesPanel
+              diff={diffQuery.data}
+              loading={diffQuery.isLoading || (diffQuery.isFetching && !diffQuery.data)}
+              error={diffQuery.isError}
+              onRetry={() => void diffQuery.refetch()}
+            />
+          </div>
+        )}
       </div>
 
       <ConfirmDialog

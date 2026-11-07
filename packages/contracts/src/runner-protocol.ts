@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   AGENT_RUNTIMES,
+  EXECUTION_DIFF_MAX_BYTES,
   EXECUTION_PHASES,
   LOG_LEVELS,
   LOG_STREAMS,
@@ -104,6 +105,8 @@ export const gitExecutionResultSchema = z
     changedFiles: z.number().int().min(0),
     diffStat: z.string().max(20000),
     gitStatus: z.string().max(20000),
+    diff: z.string().max(EXECUTION_DIFF_MAX_BYTES),
+    diffTruncated: z.boolean(),
   })
   .strict();
 

@@ -6,6 +6,7 @@ import type {
   AgentSummaryDto,
   ComputerDto,
   ExecutionDto,
+  ExecutionDiffDto,
   ExecutionLogDto,
   ExecutionSummaryDto,
   ProjectDto,
@@ -288,6 +289,10 @@ export function toExecutionDto(execution: ExecutionWithRelations): ExecutionDto 
     branchName: execution.branchName,
     baseCommit: execution.baseCommit,
     headCommit: execution.headCommit,
+    changedFiles: execution.changedFiles,
+    diffStat: execution.diffStat,
+    gitStatus: execution.gitStatus,
+    diffTruncated: execution.diffTruncated,
     lastRunnerSeq: execution.lastRunnerSeq,
     startedAt: iso(execution.startedAt),
     endedAt: isoOrNull(execution.endedAt),
@@ -300,8 +305,39 @@ export function toExecutionDto(execution: ExecutionWithRelations): ExecutionDto 
   };
 }
 
-export function toExecutionLogDto(log: Prisma.ExecutionLogGetPayload<object>): ExecutionLogDto {
+export function toExecutionDiffDto(
+  execution: Pick<
+    Prisma.ExecutionGetPayload<object>,
+    | 'id'
+    | 'branchName'
+    | 'baseCommit'
+    | 'headCommit'
+    | 'changedFiles'
+    | 'diffStat'
+    | 'gitStatus'
+    | 'diffTruncated'
+  >,
+  artifact: Pick<
+    Prisma.ExecutionArtifactGetPayload<object>,
+    'content' | 'byteSize' | 'truncated' | 'createdAt'
+  > | null,
+): ExecutionDiffDto {
   return {
+    executionId: execution.id,
+    available: Boolean(artifact),
+    branchName: execution.branchName,
+    baseCommit: execution.baseCommit,
+    headCommit: execution.headCommit,
+    changedFiles: execution.changedFiles,
+    diffStat: execution.diffStat,
+    gitStatus: execution.gitStatus,
+    diff: artifact?.content ?? '',
+    diffTruncated: Boolean(artifact?.truncated ?? execution.diffTruncated),
+    createdAt: artifact ? iso(artifact.createdAt) : null,
+  };
+}
+
+export function toExecutionLogDto(log: Prisma.ExecutionLogGetPayload<object>): ExecutionLogDto {  return {
     id: log.id,
     executionId: log.executionId,
     seq: log.seq,

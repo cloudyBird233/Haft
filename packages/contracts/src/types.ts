@@ -204,6 +204,10 @@ export interface ExecutionDto {
   branchName: string | null;
   baseCommit: string | null;
   headCommit: string | null;
+  changedFiles: number;
+  diffStat: string;
+  gitStatus: string;
+  diffTruncated: boolean;
   lastRunnerSeq: number;
   startedAt: string;
   endedAt: string | null;
@@ -234,6 +238,31 @@ export interface GitExecutionResultDto {
   changedFiles: number;
   diffStat: string;
   gitStatus: string;
+  diff: string;
+  diffTruncated: boolean;
+}
+
+/**
+ * Response of `GET /api/executions/:id/diff`.
+ *
+ * The patch is intentionally stored and fetched separately from the execution
+ * list so a large unified diff never inflates every execution response.
+ * `available` is false when the runtime did not produce a Git artifact (for
+ * example a mock execution, a start failure, or a runner that crashed before
+ * collecting the result).
+ */
+export interface ExecutionDiffDto {
+  executionId: string;
+  available: boolean;
+  branchName: string | null;
+  baseCommit: string | null;
+  headCommit: string | null;
+  changedFiles: number;
+  diffStat: string;
+  gitStatus: string;
+  diff: string;
+  diffTruncated: boolean;
+  createdAt: string | null;
 }
 
 export interface AgentDetailDto extends AgentDto {

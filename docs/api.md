@@ -293,6 +293,7 @@ Cancel body is optional `{ "reason": "..." }`. The reason defaults to
 | `GET`  | `/api/executions`            | List executions                  |
 | `GET`  | `/api/executions/:id`        | One execution                    |
 | `GET`  | `/api/executions/:id/logs`   | Logs in ascending sequence order |
+| `GET`  | `/api/executions/:id/diff`   | Persisted unified Git diff       |
 | `POST` | `/api/executions/:id/cancel` | Cancel a running execution       |
 
 List query parameters: `taskId`, `agentId`, `status`, `limit` (1–100, default
@@ -332,6 +333,10 @@ cancelled; otherwise `409 EXECUTION_NOT_RUNNING`.
   "baseCommit": "...",
   "headCommit": "...",
   "lastRunnerSeq": 42,
+  "changedFiles": 2,
+  "diffStat": "2 files changed, 20 insertions(+)",
+  "gitStatus": " M src/feature.ts\n?? test/feature.spec.ts",
+  "diffTruncated": false,
   "startedAt": "...",
   "endedAt": "...",
   "failureReason": null,
@@ -343,6 +348,48 @@ cancelled; otherwise `409 EXECUTION_NOT_RUNNING`.
 `cancelled`). `phase` adds the finer stage (`queued`, `preparing`, `running`,
 `finalizing`, or a terminal outcome) and is safe to use for progress copy while a
 run is active.
+
+`ExecutionDto` carries Git **metadata** only. The patch itself is never embedded
+in list/detail responses; it is stored as a separate `ExecutionArtifact` of kind
+`diff` and loaded lazily by the Changes view.
+
+#### Execution diff
+
+`GET /api/executions/:id/diff` returns the persisted `ExecutionDiffDto`:
+
+```json
+{
+  "executionId": "cm...",
+  "available": true,
+  "branchName": "haft/cm...",
+  "baseCommit": "abc...",
+  "headCommit": "abc...",
+  "changedFiles": 2,
+  "diffStat": "2 files changed, 20 insertions(+)",
+  "gitStatus": " M src/feature.ts\n?? test/feature.spec.ts",
+  "diff": "diff --git a/src/feature.ts b/src/feature.ts\n...",
+  "diffTruncated": false,
+  "createdAt": "2026-11-07T12:00:00.000Z"
+}
+```
+
+- `available` is `false` when no Git result was reported (for example a mock
+  execution or a failure before the worktree existed); `diff` is then `""` and
+  the metadata fields are `null`/`0`.
+- The patch is capped at `EXECUTION_DIFF_MAX_BYTES` (1 MiB). Larger patches are
+  cut at a UTF-8 boundary and `diffTruncated` becomes `true`; the UI shows an
+  explicit truncation badge.
+- Modified, added, deleted, renamed, untracked, and binary files are all
+  represented in the unified patch. Binary files produce Git's binary notice,
+  not a textual body.
+- Untracked files are diffed with `git diff --no-index -- /dev/null <path>`, so
+  the runner never stages, commits, pushes, or merges anything.
+- The artifact is written only from the owning runner's terminal
+  `execution.completed`/`execution.failed`/`execution.cancelled` message.
+  Duplicate terminal messages are idempotent; a different runner cannot submit
+  Git results for an execution it does not own.
+- The web client cannot submit a worktree path or patch. Only the runner process
+  can report Git evidence.
 
 ### Runtimes
 
@@ -539,6 +586,9 @@ curl -X POST http://127.0.0.1:3001/api/tasks/task_log_viewer/start
 
 # Read logs after sequence 2
 curl "http://127.0.0.1:3001/api/executions/<id>/logs?afterSeq=2&limit=100"
+
+# Read the persisted unified diff
+curl "http://127.0.0.1:3001/api/executions/<id>/diff"
 
 # Cancel
 curl -X POST http://127.0.0.1:3001/api/executions/<id>/cancel \

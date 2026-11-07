@@ -24,5 +24,6 @@ export const queryKeys = {
     all: ['executions'] as const,
     detail: (id: string) => ['executions', 'detail', id] as const,
     logs: (id: string) => ['executions', 'logs', id] as const,
+    diff: (id: string) => ['executions', 'diff', id] as const,
   },
 };

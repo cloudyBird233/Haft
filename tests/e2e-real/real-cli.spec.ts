@@ -136,7 +136,8 @@ test.describe('Real CLI execution (opt-in)', () => {
       'Set HAFT_REAL_CLI_E2E=1 to run real CLI tests against installed and authenticated CLIs.',
     );
     test.skip(
-      process.env.HAFT_REAL_E2E_OPENCODE !== '1',
+      process.env.HAFT_REAL_E2E_OPENCODE !== '1' ||
+        !process.env.HAFT_REAL_OPENCODE_MODEL,
       'Set HAFT_REAL_E2E_OPENCODE=1 and HAFT_REAL_OPENCODE_MODEL=<provider/model> to enable the OpenCode test.',
     );
     await runRealCli(request, 'opencode', 'HAFT_REAL_OPENCODE_E2E.md');

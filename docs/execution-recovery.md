@@ -65,9 +65,13 @@ while the server still has a live connection entry for that runner.
 On every connect the runner:
 
 1. Sends `runner.register` with its current capabilities.
-2. Sends `runner.snapshot` describing every execution it still holds in memory,
-   including phase and last log sequence.
-3. Replays unacknowledged log entries.
+2. Reports executions found in the recovery journal from a previous runner
+   process **before** the snapshot: replays their spooled logs and sends
+   `execution.failed` with `RUNNER_INTERRUPTED: ...`.
+3. Sends `runner.snapshot` describing only genuine in-memory sessions, including
+   phase and last log sequence.
+4. Replays unacknowledged log entries from both the durable spool and the
+   in-memory pending buffer, deduplicated by runner sequence.
 
 The server compares the snapshot with its `running` rows for that runner:
 
@@ -109,17 +113,91 @@ durable session. An API restart while a mock execution is running leaves a stale
 `runnerId`. This is a known limitation of the demo. Reset or cancel the stale row
 from the UI/API after restart; do not treat it as a successful run.
 
-## Runner restart
+## Runner restart and durable recovery
 
-The runner keeps active sessions only in memory. A runner process restart loses
-them. On reconnect, its snapshot omits those executions, so the server fails them
-with `RUNNER_RESTARTED`. The runner does not resume a process tree across
-restarts and never starts a replacement execution on its own.
+The runner keeps live sessions in memory, but every in-flight real execution also
+has durable evidence on disk. The default root is
+`HAFT_RUNNER_RECOVERY_ROOT` (default `~/.haft/recovery/<runnerId>`):
 
-Any real CLI process that survived the runner crash is no longer supervised.
-Check the host for orphaned `codex`/`opencode` processes and terminate them
-manually before re-running the task. Worktrees from the failed execution remain
-for inspection (when `HAFT_RUNNER_KEEP_WORKTREES=1`, the default).
+```text
+<recoveryRoot>/
+  <executionId>.json          atomic journal
+  logs/<executionId>.ndjson   durable append-only log spool
+```
+
+### Execution journal
+
+The journal is written **before** the CLI is spawned and updated while the
+execution runs. Each record contains:
+
+| Field              | Meaning                                               |
+| ------------------ | ----------------------------------------------------- |
+| `executionId`      | Server execution id                                   |
+| `runtime`          | `codex` or `opencode`                                 |
+| `projectId`        | Project mapping id                                    |
+| `pid`              | CLI process id once spawned                           |
+| `processStartTime` | Platform-native start marker used to detect PID reuse |
+| `processGroupId`   | POSIX process group (Windows: process id)             |
+| `worktreePath`     | Isolated worktree path                                |
+| `branchName`       | `haft/<executionId>`                                  |
+| `baseCommit`       | Repository `HEAD` at worktree creation                |
+| `phase`            | Last execution phase                                  |
+| `status`           | `active`, `completed`, `failed`, `cancelled`, `interrupted` |
+| `lastSequence`     | Last runner log sequence                              |
+| `startedAt` / `updatedAt` / `finishedAt` | Timestamps                               |
+
+Writes go to a same-directory temporary file and are atomically renamed over the
+target. A crash leaves either the previous complete record or the new complete
+record, never a half-written JSON document. Corrupt files are quarantined.
+Non-critical sequence/phase updates are coalesced by 100 ms; phase transitions,
+PID identity, and terminal status are written immediately.
+
+### Durable log spool
+
+Every log entry is appended to `logs/<executionId>.ndjson` **before** it is sent
+to the server. The server acknowledges the highest persisted runner sequence with
+`execution.log.ack`; acknowledged entries are removed by an atomic rewrite. The
+spool:
+
+- deduplicates by runner `sequence`;
+- tolerates a partial final line left by a crash;
+- survives runner restarts and reconnects;
+- is bounded at 10,000 entries / 8 MiB per execution, keeping the newest tail;
+- replays at most 200 entries per message.
+
+### Startup scan
+
+`ExecutionRecovery.scan()` runs once at runner startup, before the socket
+connects. For each `active` journal it verifies the recorded process identity:
+
+1. Inspect the PID (Windows `Win32_Process`, Linux `/proc`, otherwise `ps`).
+2. If no process exists, report `RUNNER_INTERRUPTED` and preserve the worktree and
+   logs.
+3. If the live start marker differs from `processStartTime`, the PID was reused;
+   leave it untouched and report `RUNNER_INTERRUPTED` with the PID-reuse detail.
+4. If the command line / process group does not belong to the execution, leave it
+   untouched and report an ownership mismatch.
+5. Only when identity and ownership match, terminate the whole process tree
+   (`taskkill /T /F` on Windows, process-group signal on POSIX) and wait for the
+   actual exit. If it is still alive, report it as not confirmed terminated.
+6. Mark the journal `interrupted`, keep the spool, prune terminal journals after
+   seven days.
+
+The runner **never** starts a replacement execution. Recovery reports are sent
+after registration and before the snapshot, so the server marks the execution
+failed with `RUNNER_INTERRUPTED` instead of interpreting it as still running.
+The snapshot then contains only sessions that genuinely exist in the current
+process.
+
+### Shutdown
+
+`RunnerExecutor.shutdown()` returns
+`{ clean, remainingExecutionIds, forced }`. It cancels every session, waits for
+real process termination up to `HAFT_RUNNER_SHUTDOWN_GRACE_MS` (default 10 s),
+escalates to a force tree kill, waits again, and reports any sessions that remain.
+`RunnerClient.stop()` awaits this result, flushes the spool and journal, logs
+`runner.shutdown_incomplete` when cleanup cannot be confirmed, and only then
+disconnects. It no longer assumes a fixed 150 ms sleep equals termination.
 
 ## Cancellation
 
@@ -163,11 +241,15 @@ still require manual cleanup.
 - `(executionId, eventId)` and `(executionId, runnerSeq)` are unique; retries
   are ignored.
 - Inbound envelopes are deduplicated by `messageId` for 10 minutes.
-- After reconnect, the runner replays pending entries. The server acks the
-  highest applied runner sequence, and the runner drops acknowledged entries.
-- The pending buffer is bounded at 10,000 entries per session, and replay sends
-  at most 200 entries per message. A very long disconnect can lose the older
-  tail. The execution log is durable once persisted on the server.
+- Entries are appended to the durable NDJSON spool before being sent. The server
+  acks the highest applied runner sequence, and the runner removes acknowledged
+  entries from both the spool and the in-memory buffer.
+- After reconnect, the runner merges spooled and in-memory entries, deduplicates
+  by sequence, and replays at most 200 per message.
+- The spool holds at most 10,000 entries / 8 MiB per execution. A very long
+  disconnect can lose the older tail. Logs already persisted on the server are
+  durable; a server-side unique `(executionId, runnerSeq)` constraint makes the
+  replay idempotent.
 
 ## Recovery reason catalogue
 
@@ -175,6 +257,7 @@ still require manual cleanup.
 | ------------------------ | --------------------------------------------------- |
 | `RUNNER_DISCONNECTED`    | Runner did not reconnect within the grace window    |
 | `RUNNER_RESTARTED`       | Runner reconnected but no longer owns the execution |
+| `RUNNER_INTERRUPTED`     | Startup journal found a previous in-flight execution |
 | `CLI_TIMEOUT`            | CLI exceeded its execution timeout                  |
 | `CLI_EXIT_CODE`          | CLI exited non-zero                                 |
 | `PROJECT_NOT_MAPPED`     | Project id not configured on the runner             |
@@ -194,21 +277,26 @@ and included in the `execution.failed` activity metadata.
 
 ## Manual recovery playbook
 
-1. **Inspect the execution** with `GET /api/executions/:id` and
-   `GET /api/executions/:id/logs`; note `status`, `phase`, `runnerId`,
-   `failureReason`, and the last log lines.
+1. **Inspect the execution** with `GET /api/executions/:id`,
+   `GET /api/executions/:id/logs`, and `GET /api/executions/:id/diff`; note
+   `status`, `phase`, `runnerId`, `failureReason`, the last log lines, and any
+   persisted Git evidence.
 2. **Check the runner** with `GET /api/runners` and its health endpoint. If it is
    online, a reconnect will reconcile automatically.
-3. **Wait for the grace window** after a disconnect. Do not cancel immediately;
+3. **Inspect the recovery journal** under `HAFT_RUNNER_RECOVERY_ROOT` after a
+   runner crash. `*.json` describes the interrupted execution and the process
+   identity; `logs/*.ndjson` preserves its last log tail. Do not delete either
+   before reviewing the worktree.
+4. **Wait for the grace window** after a disconnect. Do not cancel immediately;
    a reconnect may legitimately resume ownership.
-4. **If the execution is stale** (runner restarted, process gone), let
+5. **If the execution is stale** (runner restarted, process gone), let
    reconciliation fail it. If it remains `running` with no runner, use the UI
    cancel action once the runner is back, or reset the task through the test API
    only in a test environment.
-5. **Clean up worktrees/branches** after reviewing the diff:
+6. **Clean up worktrees/branches** after reviewing the diff:
    `git -C <repo> worktree remove --force <path>`, `git worktree prune`, then
    delete `haft/<executionId>` if it is no longer needed.
-6. **Re-run explicitly** only after the failure is understood. The system will
+7. **Re-run explicitly** only after the failure is understood. The system will
    not do it for you.
 
 ## Guarantees and non-guarantees
@@ -217,14 +305,24 @@ Guaranteed:
 
 - No automatic re-run after API or runner restart.
 - No terminal success from a cancel request alone.
+- An in-flight execution leaves an atomic journal and a durable log spool.
+- Startup recovery reports the interruption to the server before the snapshot.
+- Orphan CLI processes are terminated only after PID start-time and ownership
+  verification; reused PIDs and unrelated processes are left untouched.
+- Worktrees and logs are preserved for inspection, never deleted by recovery.
+- Shutdown waits for actual process termination and reports incomplete cleanup.
 - Logs persisted on the server survive reconnects and restarts.
 - Runner events are accepted only from the runner that owns the execution.
 - A failed start restores the task and agent to their pre-start state.
 
 Not guaranteed:
 
-- Survival of an in-flight CLI across a runner crash.
+- Survival of an in-flight CLI across a runner crash (it is identified and
+  terminated, not resumed).
 - Recovery of in-memory mock executions across an API restart.
-- Re-delivery of log entries older than the runner's bounded pending buffer.
+- Re-delivery of log entries older than the spool cap or the bounded pending
+  buffer.
+- Cleanup of an orphan when the OS denies inspection/termination; the runner
+  reports that it could not confirm termination.
 - OS-level isolation from a malicious CLI; a worktree is not a sandbox.
 - Automatic cleanup of kept worktrees or branches.

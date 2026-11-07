@@ -139,6 +139,20 @@ Worktrees are kept by default so a reviewer can inspect the diff and run tests.
 The real CLI E2E suite explicitly keeps them to assert file output. The branch
 is never deleted automatically; retention is an operator decision.
 
+### Crash recovery storage
+
+| Variable                        | Default                            | Behavior |
+| ------------------------------- | ---------------------------------- | -------- |
+| `HAFT_RUNNER_RECOVERY_ROOT`     | `~/.haft/recovery/<runnerId>`      | Atomic journals plus `logs/*.ndjson` spool. |
+| `HAFT_RUNNER_SHUTDOWN_GRACE_MS` | `10000` (1 s–120 s)                | How long shutdown waits for real process termination before force-killing. |
+
+The runner writes `<executionId>.json` before spawning a CLI and appends each log
+entry to the spool before sending it. On startup it scans active journals, verifies
+PID start time/ownership, terminates only a verified orphan CLI tree, preserves the
+worktree and logs, reports `RUNNER_INTERRUPTED` to the server, and never re-runs
+the task. Keep this directory on durable local storage; it is evidence, not
+scheduler state.
+
 ### CLI paths and models
 
 | Variable              | Purpose                                                     |
@@ -228,6 +242,8 @@ To enable only one runtime, use `HAFT_RUNNER_MODE=codex` or
 | `HAFT_RUNNER_WORKTREE_ROOT`      | real | `~/.haft/worktrees`        | Root for per-execution worktrees.                    |
 | `HAFT_GIT_BIN`                   | real | `git`                      | Git executable.                                      |
 | `HAFT_RUNNER_KEEP_WORKTREES`     | real | `1`                        | `0` removes worktrees after collection.              |
+| `HAFT_RUNNER_RECOVERY_ROOT`      | real | `~/.haft/recovery/<runnerId>` | Journal and log-spool root.                       |
+| `HAFT_RUNNER_SHUTDOWN_GRACE_MS`  | both | `10000`                    | Wait for real termination before force-kill.         |
 | `HAFT_RUNNER_CLI_TIMEOUT_MS`     | real | `1800000`                  | CLI timeout in milliseconds.                         |
 | `HAFT_RUNNER_ALLOW_AUTO_APPROVE` | real | unset                      | `1` adds `--auto` to OpenCode.                       |
 | `HAFT_RUNNER_STEP_MS`            | fake | `250`                      | Fake step delay.                                     |
@@ -312,6 +328,7 @@ their child processes.
 | Cancellation returns `RUNNER_OFFLINE`        | The runner disconnected before receiving the cancel. Reconnect it; the execution is still running.          |
 | Cancellation returns `RUNNER_CANCEL_TIMEOUT` | The process did not stop within 30 s. Inspect the runner and the process tree; the execution stays running. |
 | Worktrees consume too much disk              | Review diffs, then remove worktrees/branches; set `HAFT_RUNNER_KEEP_WORKTREES=0` for automatic cleanup.     |
+| Runner restarted after a crash               | Check `HAFT_RUNNER_RECOVERY_ROOT` for `<executionId>.json` and `logs/*.ndjson`; the next start reports `RUNNER_INTERRUPTED` and terminates only a verified orphan. |
 
 ## Security checklist
 

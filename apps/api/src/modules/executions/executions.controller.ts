@@ -47,6 +47,12 @@ export class ExecutionsController {
     return this.executions.logs(id, query);
   }
 
+  @Get(':id/diff')
+  @ApiOperation({ summary: 'Read the stored unified Git diff for an execution' })
+  diff(@Param('id') id: string) {
+    return this.executions.diff(id);
+  }
+
   @Post(':id/cancel')
   @HttpCode(200)
   @ApiOperation({ summary: 'Cancel a running execution' })

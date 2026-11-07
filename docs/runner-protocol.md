@@ -286,18 +286,25 @@ finish `determinate` at 100%.
     "headCommit": "def...",
     "changedFiles": 2,
     "diffStat": "2 files changed, 20 insertions(+)",
-    "gitStatus": " M src/feature.ts\n?? test/feature.spec.ts"
+    "gitStatus": " M src/feature.ts\n?? test/feature.spec.ts",
+    "diff": "diff --git a/src/feature.ts b/src/feature.ts\n...",
+    "diffTruncated": false
   }
 }
 ```
 
 `execution.completed` uses the shape above. `execution.failed` adds
 `reason` (required, max 2,000 chars). `execution.cancelled` adds an optional
-`reason`. `git` may be `null` if no worktree existed or collection failed.
+`reason`. `git` may be `null` if no worktree existed or collection failed. The
+`diff` patch is capped at 1 MiB; `diffTruncated` reports whether it was cut. The
+runner is the only producer of this field and the API persists it as a separate
+artifact.
 
 ### `runner.snapshot`
 
-Sent on every connect after registration.
+Sent on every connect after registration and after any crash-recovery reports
+(log replay + `execution.failed` with `RUNNER_INTERRUPTED`). Recovery reports must
+arrive first so the snapshot contains only genuinely live sessions.
 
 ```json
 {
