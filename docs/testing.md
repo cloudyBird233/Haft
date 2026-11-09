@@ -494,12 +494,12 @@ pins Node.js `22.14.0` and pnpm `11.5.2`; pnpm 11 requires Node.js `>=22.13`.
 
 ### Pull request / main workflow (`ci.yml`)
 
-| Property    | Value                                                                    |
-| ----------- | ------------------------------------------------------------------------ |
-| Triggers    | `pull_request`, push to `main`, `workflow_dispatch`                      |
-| Never       | `pull_request_target`, hosted fallback for real CLI, `continue-on-error` |
-| Permissions | `contents: read`                                                         |
-| Concurrency | Superseded pull-request runs are cancelled                               |
+| Property    | Value                                                                     |
+| ----------- | ------------------------------------------------------------------------- |
+| Triggers    | PR `opened`/`synchronize`/`reopened`, push to `main`, `workflow_dispatch` |
+| Never       | `pull_request_target`, hosted fallback for real CLI, `continue-on-error`  |
+| Permissions | `contents: read`                                                          |
+| Concurrency | Superseded pull-request runs are cancelled                                |
 
 Jobs:
 
