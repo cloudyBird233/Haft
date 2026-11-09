@@ -1,10 +1,6 @@
+import { HttpStatus, Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import {
-  HttpStatus,
-  Injectable,
-  type OnModuleDestroy,
-  type OnModuleInit,
-} from '@nestjs/common';
-import {
+  ERROR_CODES,
   EXECUTION_DIFF_MAX_BYTES,
   type AgentDto,
   type AgentRuntimeType,
@@ -148,6 +144,12 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     const runtimeType = task.assignee.runtime as AgentRuntimeType;
     const requiresRunner = runtimeType !== 'mock';
     let runnerId: string | null = null;
+    let repositoryBinding: {
+      id: string;
+      bindingVersion: number;
+      validatedBindingVersion: number | null;
+      status: string;
+    } | null = null;
     if (requiresRunner) {
       if (!task.assignee.computerId || !task.assignee.computer) {
         throw new AppException(
@@ -161,6 +163,47 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
           'COMPUTER_OFFLINE',
           'The assigned computer is offline',
           HttpStatus.CONFLICT,
+        );
+      }
+      repositoryBinding = await this.prisma.projectRepositoryBinding.findUnique({
+        where: {
+          projectId_computerId: {
+            projectId: task.projectId,
+            computerId: task.assignee.computerId,
+          },
+        },
+        select: {
+          id: true,
+          bindingVersion: true,
+          validatedBindingVersion: true,
+          status: true,
+        },
+      });
+      if (!repositoryBinding) {
+        throw new AppException(
+          ERROR_CODES.PROJECT_BINDING_MISSING,
+          'This project has no repository binding for the assigned computer',
+          HttpStatus.CONFLICT,
+          {
+            projectId: task.projectId,
+            computerId: task.assignee.computerId,
+          },
+        );
+      }
+      if (
+        repositoryBinding.status !== 'ready' ||
+        repositoryBinding.validatedBindingVersion !== repositoryBinding.bindingVersion
+      ) {
+        throw new AppException(
+          ERROR_CODES.PROJECT_BINDING_NOT_READY,
+          'The repository binding must be validated before a real execution can start',
+          HttpStatus.CONFLICT,
+          {
+            bindingId: repositoryBinding.id,
+            bindingStatus: repositoryBinding.status,
+            bindingVersion: repositoryBinding.bindingVersion,
+            validatedBindingVersion: repositoryBinding.validatedBindingVersion,
+          },
         );
       }
       const availability = await this.runtimes.getAvailability(
@@ -187,6 +230,10 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
           taskId,
           agentId: assigneeAgentId,
           runnerId,
+          repositoryProjectId: requiresRunner ? task.projectId : null,
+          repositoryBindingId: repositoryBinding?.id ?? null,
+          repositoryBindingVersion: repositoryBinding?.bindingVersion ?? null,
+          repositoryDefaultBranch: requiresRunner ? task.project.defaultBranch : null,
           runtime: runtimeType,
           status: 'running',
           phase: requiresRunner ? 'queued' : 'running',
@@ -998,9 +1045,9 @@ function runtimeUnavailable(
 function isUniqueConstraintError(error: unknown): boolean {
   return Boolean(
     error &&
-      typeof error === 'object' &&
-      'code' in error &&
-      (error as { code?: unknown }).code === 'P2002',
+    typeof error === 'object' &&
+    'code' in error &&
+    (error as { code?: unknown }).code === 'P2002',
   );
 }
 

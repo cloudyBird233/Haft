@@ -1,0 +1,309 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import request from 'supertest';
+import type { INestApplication } from '@nestjs/common';
+import type {
+  ListDto,
+  ProjectBindingDto,
+  ProjectDetailDto,
+  ProjectDto,
+  TaskDto,
+} from '@raft-lite/contracts';
+import { createTestApp, type ApiSuccessBody } from './test-app';
+import { PrismaService } from '../src/common/prisma/prisma.service';
+
+describe('Projects and repository bindings API', () => {
+  let app: INestApplication;
+  let server: Parameters<typeof request>[0];
+  let prisma: PrismaService;
+
+  beforeAll(async () => {
+    app = await createTestApp();
+    server = app.getHttpServer() as Parameters<typeof request>[0];
+    prisma = app.get(PrismaService);
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(async () => {
+    const response = await request(server).post('/__test__/reset').send({});
+    expect(response.status).toBe(200);
+  });
+
+  async function createProject(body: Record<string, unknown>): Promise<ProjectDto> {
+    const response = await request(server).post('/api/projects').send(body).expect(201);
+    return (response.body as ApiSuccessBody<ProjectDto>).data;
+  }
+
+  it('creates, lists, updates, archives, and deletes projects with counts', async () => {
+    const project = await createProject({
+      key: 'haft',
+      name: 'Haft Platform',
+      description: 'Phase 2 project management',
+      repoUrl: 'git@github.com:org/haft.git',
+      defaultBranch: 'develop',
+    });
+    expect(project).toMatchObject({
+      workspaceId: 'ws_demo',
+      key: 'HAFT',
+      name: 'Haft Platform',
+      repoUrl: 'git@github.com:org/haft.git',
+      defaultBranch: 'develop',
+      archivedAt: null,
+      taskCount: 0,
+      executionCount: 0,
+      bindingCount: 0,
+    });
+    expect(project.updatedAt).toBeTruthy();
+
+    const duplicate = await request(server)
+      .post('/api/projects')
+      .send({ key: 'Haft', name: 'Duplicate' })
+      .expect(409);
+    expect(duplicate.body.error.code).toBe('PROJECT_KEY_CONFLICT');
+
+    const task = await request(server)
+      .post('/api/tasks')
+      .send({ title: 'Belongs to the new project', projectId: project.id })
+      .expect(201);
+    expect((task.body as ApiSuccessBody<TaskDto>).data.projectId).toBe(project.id);
+
+    const list = await request(server).get('/api/projects').expect(200);
+    const items = (list.body as ApiSuccessBody<ListDto<ProjectDto>>).data.items;
+    expect(items.find((item) => item.id === project.id)).toMatchObject({
+      taskCount: 1,
+      executionCount: 0,
+      bindingCount: 0,
+    });
+
+    const detail = await request(server).get(`/api/projects/${project.id}`).expect(200);
+    expect((detail.body as ApiSuccessBody<ProjectDetailDto>).data.bindings).toEqual([]);
+
+    const updated = await request(server)
+      .patch(`/api/projects/${project.id}`)
+      .send({
+        name: 'Haft Platform v2',
+        description: '',
+        repoUrl: null,
+        defaultBranch: 'release/2026',
+      })
+      .expect(200);
+    expect((updated.body as ApiSuccessBody<ProjectDetailDto>).data).toMatchObject({
+      name: 'Haft Platform v2',
+      description: '',
+      repoUrl: null,
+      defaultBranch: 'release/2026',
+    });
+
+    const keyChange = await request(server)
+      .patch(`/api/projects/${project.id}`)
+      .send({ key: 'OTHER' })
+      .expect(400);
+    expect(keyChange.body.error.code).toBe('VALIDATION_ERROR');
+
+    const archived = await request(server)
+      .patch(`/api/projects/${project.id}`)
+      .send({ archived: true })
+      .expect(200);
+    expect((archived.body as ApiSuccessBody<ProjectDetailDto>).data.archivedAt).toBeTruthy();
+
+    const blocked = await request(server)
+      .post('/api/tasks')
+      .send({ title: 'Archived project must reject tasks', projectId: project.id })
+      .expect(409);
+    expect(blocked.body.error.code).toBe('PROJECT_ARCHIVED');
+
+    const restored = await request(server)
+      .patch(`/api/projects/${project.id}`)
+      .send({ archived: false })
+      .expect(200);
+    expect((restored.body as ApiSuccessBody<ProjectDetailDto>).data.archivedAt).toBeNull();
+
+    const withTasks = await request(server).delete(`/api/projects/${project.id}`).expect(409);
+    expect(withTasks.body.error.code).toBe('PROJECT_HAS_TASKS');
+
+    const empty = await createProject({ key: 'EMPTY', name: 'Empty Project' });
+    await request(server).delete(`/api/projects/${empty.id}`).expect(200);
+    await request(server).get(`/api/projects/${empty.id}`).expect(404);
+  });
+
+  it('validates project input and rejects unknown fields', async () => {
+    for (const body of [
+      { key: '1BAD', name: 'Invalid key' },
+      { key: 'OK', name: 'x' },
+      { key: 'OK', name: 'Valid name', repoUrl: 'file:///tmp/repo' },
+      { key: 'OK', name: 'Valid name', defaultBranch: 'release 1' },
+      { key: 'OK', name: 'Valid name', color: 'red' },
+      { key: 'OK', name: 'Valid name', archivedAt: null },
+    ]) {
+      const response = await request(server).post('/api/projects').send(body).expect(400);
+      expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    }
+
+    const project = await createProject({ key: 'VALID', name: 'Valid project' });
+    await request(server).patch(`/api/projects/${project.id}`).send({}).expect(400);
+    await request(server)
+      .patch(`/api/projects/${project.id}`)
+      .send({ archivedAt: null })
+      .expect(400);
+    await request(server).get('/api/projects/project_missing').expect(404);
+  });
+
+  it('manages bindings with raw paths, stable hashes, and immutable fields', async () => {
+    const project = await createProject({ key: 'BIND', name: 'Binding Project' });
+    const otherProject = await createProject({ key: 'OTHER', name: 'Other Project' });
+    await prisma.computer.upsert({
+      where: { id: 'computer_projects_extra' },
+      update: {},
+      create: {
+        id: 'computer_projects_extra',
+        name: 'Secondary Workstation',
+        hostname: 'secondary',
+        status: 'online',
+      },
+    });
+
+    const rawPath = 'C:\\Work\\Repos\\Haft Repo';
+    const created = await request(server)
+      .post(`/api/projects/${project.id}/bindings`)
+      .send({ computerId: 'computer_local', path: rawPath })
+      .expect(201);
+    const binding = (created.body as ApiSuccessBody<ProjectBindingDto>).data;
+    expect(binding).toMatchObject({
+      projectId: project.id,
+      computerId: 'computer_local',
+      path: rawPath,
+      bindingVersion: 1,
+      status: 'unverified',
+      canonicalPath: null,
+      headCommit: null,
+      lastValidatedAt: null,
+      validatedByRunnerId: null,
+      validatedBindingVersion: null,
+    });
+    expect(binding.pathHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(binding.computer?.id).toBe('computer_local');
+
+    const duplicate = await request(server)
+      .post(`/api/projects/${project.id}/bindings`)
+      .send({ computerId: 'computer_local', path: '/srv/other' })
+      .expect(409);
+    expect(duplicate.body.error.code).toBe('BINDING_DUPLICATE_COMPUTER');
+
+    const second = await request(server)
+      .post(`/api/projects/${project.id}/bindings`)
+      .send({ computerId: 'computer_projects_extra', path: rawPath })
+      .expect(201);
+    const secondBinding = (second.body as ApiSuccessBody<ProjectBindingDto>).data;
+    expect(secondBinding.pathHash).toBe(binding.pathHash);
+
+    const changedPath = 'C:\\Work\\Repos\\Renamed';
+    const updated = await request(server)
+      .patch(`/api/projects/${project.id}/bindings/${binding.id}`)
+      .send({ path: changedPath })
+      .expect(200);
+    const changed = (updated.body as ApiSuccessBody<ProjectBindingDto>).data;
+    expect(changed).toMatchObject({
+      path: changedPath,
+      bindingVersion: 2,
+      status: 'unverified',
+    });
+    expect(changed.pathHash).not.toBe(binding.pathHash);
+
+    const unchanged = await request(server)
+      .patch(`/api/projects/${project.id}/bindings/${binding.id}`)
+      .send({ path: changedPath })
+      .expect(200);
+    expect((unchanged.body as ApiSuccessBody<ProjectBindingDto>).data.bindingVersion).toBe(2);
+
+    for (const body of [
+      { defaultBranch: 'main' },
+      { status: 'ready' },
+      { computerId: 'computer_projects_extra' },
+      { pathHash: 'forged' },
+      { canonicalPath: '/fake' },
+      { id: 'forged' },
+    ]) {
+      const response = await request(server)
+        .patch(`/api/projects/${project.id}/bindings/${binding.id}`)
+        .send(body)
+        .expect(400);
+      expect(response.body.error.code).toBe('BINDING_FIELD_IMMUTABLE');
+    }
+
+    const unknown = await request(server)
+      .patch(`/api/projects/${project.id}/bindings/${binding.id}`)
+      .send({ paths: '/typo' })
+      .expect(400);
+    expect(unknown.body.error.code).toBe('VALIDATION_ERROR');
+
+    const wrongProject = await request(server)
+      .patch(`/api/projects/${otherProject.id}/bindings/${binding.id}`)
+      .send({ path: '/srv/repo' })
+      .expect(404);
+    expect(wrongProject.body.error.code).toBe('BINDING_NOT_FOUND');
+    await request(server)
+      .delete(`/api/projects/${otherProject.id}/bindings/${binding.id}`)
+      .expect(404);
+    await request(server)
+      .post(`/api/projects/${otherProject.id}/bindings/${binding.id}/validate`)
+      .expect(404);
+
+    const list = await request(server).get(`/api/projects/${project.id}/bindings`).expect(200);
+    expect((list.body as ApiSuccessBody<ListDto<ProjectBindingDto>>).data.total).toBe(2);
+
+    await request(server)
+      .delete(`/api/projects/${project.id}/bindings/${secondBinding.id}`)
+      .expect(200);
+    const after = await request(server).get(`/api/projects/${project.id}/bindings`).expect(200);
+    expect((after.body as ApiSuccessBody<ListDto<ProjectBindingDto>>).data.total).toBe(1);
+    const detail = await request(server).get(`/api/projects/${project.id}`).expect(200);
+    expect((detail.body as ApiSuccessBody<ProjectDetailDto>).data.bindingCount).toBe(1);
+  });
+
+  it('returns a typed conflict when validation has no connected runner', async () => {
+    const project = await createProject({ key: 'NORUN', name: 'No Runner Project' });
+    const created = await request(server)
+      .post(`/api/projects/${project.id}/bindings`)
+      .send({ computerId: 'computer_local', path: '/srv/repo' })
+      .expect(201);
+    const binding = (created.body as ApiSuccessBody<ProjectBindingDto>).data;
+
+    const response = await request(server)
+      .post(`/api/projects/${project.id}/bindings/${binding.id}/validate`)
+      .expect(409);
+    expect(response.body.error.code).toBe('RUNNER_OFFLINE');
+  });
+
+  it('hides projects that belong to another workspace', async () => {
+    await prisma.workspace.upsert({
+      where: { id: 'ws_other' },
+      update: {},
+      create: { id: 'ws_other', name: 'Other', slug: 'other' },
+    });
+    const foreign = await prisma.project.create({
+      data: {
+        id: 'project_foreign',
+        workspaceId: 'ws_other',
+        key: 'FOREIGN',
+        name: 'Foreign Project',
+      },
+    });
+
+    for (const path of [`/api/projects/${foreign.id}`, `/api/projects/${foreign.id}/bindings`]) {
+      const response = await request(server).get(path).expect(404);
+      expect(response.body.error.code).toBe('PROJECT_NOT_FOUND');
+    }
+    const patched = await request(server)
+      .patch(`/api/projects/${foreign.id}`)
+      .send({ name: 'Hijacked' })
+      .expect(404);
+    expect(patched.body.error.code).toBe('PROJECT_NOT_FOUND');
+    await request(server).delete(`/api/projects/${foreign.id}`).expect(404);
+    await request(server)
+      .post(`/api/projects/${foreign.id}/bindings`)
+      .send({ computerId: 'computer_local', path: '/srv/repo' })
+      .expect(404);
+  });
+});

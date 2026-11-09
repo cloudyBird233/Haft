@@ -117,6 +117,87 @@ empty `204`, keeping the envelope consistent.
 `recentTasks` is the six most recently updated tasks; `recentActivities` is the
 eight newest activity rows.
 
+### Projects and repository bindings
+
+| Method   | Path                                             | Description                                            |
+| -------- | ------------------------------------------------ | ------------------------------------------------------ |
+| `GET`    | `/api/projects`                                  | List projects with task, execution, and binding counts |
+| `POST`   | `/api/projects`                                  | Create a project                                       |
+| `GET`    | `/api/projects/:id`                              | Project detail plus bindings                           |
+| `PATCH`  | `/api/projects/:id`                              | Update fields or archive/restore                       |
+| `DELETE` | `/api/projects/:id`                              | Delete a project that has no tasks                     |
+| `GET`    | `/api/projects/:id/bindings`                     | List repository bindings                               |
+| `POST`   | `/api/projects/:id/bindings`                     | Create an `unverified` binding                         |
+| `PATCH`  | `/api/projects/:id/bindings/:bindingId`          | Change only `path`                                     |
+| `DELETE` | `/api/projects/:id/bindings/:bindingId`          | Delete a binding                                       |
+| `POST`   | `/api/projects/:id/bindings/:bindingId/validate` | Validate through the connected runner                  |
+
+Create a project:
+
+```json
+{
+  "key": "HAFT",
+  "name": "Haft Platform",
+  "description": "Phase 2 project management",
+  "color": "#6f6a60",
+  "repoUrl": "git@github.com:org/haft.git",
+  "defaultBranch": "main"
+}
+```
+
+`key` is trimmed and upper-cased; duplicates return `409 PROJECT_KEY_CONFLICT`.
+`repoUrl` accepts `http(s)`, `ssh`, `git`, and `git@host:path`, or `null`.
+`defaultBranch` is the only authoritative branch; bindings do not have one.
+
+Create a binding:
+
+```json
+{
+  "computerId": "computer_local",
+  "path": "D:\\code\\haft-work"
+}
+```
+
+The response starts at `status: "unverified"`, `bindingVersion: 1`. The API stores
+`path` verbatim and a stable SHA-256 `pathHash`; it does not normalize Windows or
+POSIX paths. `PATCH` accepts only `path`; any other field (including
+`defaultBranch`, `status`, `bindingVersion`, `policyVersion`, and
+`canonicalPath`) returns `400 BINDING_FIELD_IMMUTABLE`. A changed path increments
+the version, resets the status, and clears all validation metadata. A same-value
+PATCH does nothing.
+
+`POST .../validate` dispatches `repository.validate` to the Runner and applies
+the matching `repository.validation` response:
+
+```json
+{
+  "status": "ready",
+  "canonicalPath": "D:\\code\\haft-work",
+  "platform": "win32",
+  "headCommit": "74ebaa2...",
+  "policyVersion": "3f5c...",
+  "lastValidatedAt": "2026-11-09T12:29:00.000Z",
+  "validatedByRunnerId": "runner_e2e",
+  "validatedBindingVersion": 1
+}
+```
+
+A runner path failure returns `422 PROJECT_BINDING_INVALID` with
+`details.errorCode` (for example `REPO_PATH_NOT_FOUND`, `REPO_NOT_GIT_ROOT`, or
+`REPO_PATH_OUTSIDE_ALLOWED_ROOTS`) and the updated binding under
+`details.binding`. The API never reads the runner filesystem and cannot set
+`ready` locally. Offline runners return `409 RUNNER_OFFLINE`; missing runner
+features return `409 PROJECT_BINDING_UNSUPPORTED`; timeouts return
+`504 REPOSITORY_VALIDATION_TIMEOUT` without changing the previous status.
+
+Real executions require a `ready` binding whose `validatedBindingVersion`
+matches `bindingVersion` for the task project and the assigned computer. The
+execution records `repositoryProjectId`, `repositoryBindingId`,
+`repositoryBindingVersion`, and `repositoryDefaultBranch` as a snapshot.
+
+See [p2-01-project-repository-binding.md](p2-01-project-repository-binding.md)
+for the full state machine, validation sequence, path policy, and error table.
+
 ### Agents
 
 | Method   | Path              | Description                                       |
@@ -473,42 +554,56 @@ Computers are read-only in this phase; the seed registers `computer_local`.
 
 ## Error codes
 
-| HTTP | Code                        | Typical cause                                                        |
-| ---- | --------------------------- | -------------------------------------------------------------------- |
-| 400  | `VALIDATION_ERROR`          | Zod parse failure                                                    |
-| 400  | `PROJECT_NOT_FOUND`         | Unknown project on task create/update                                |
-| 400  | `COMPUTER_NOT_FOUND`        | Unknown computer on agent create/update                              |
-| 400  | `AGENT_NOT_FOUND`           | Unknown assignee on task create/assign                               |
-| 404  | `AGENT_NOT_FOUND`           | Agent route id not found                                             |
-| 404  | `TASK_NOT_FOUND`            | Task route id not found                                              |
-| 404  | `EXECUTION_NOT_FOUND`       | Execution route/logs id not found                                    |
-| 404  | `WORKSPACE_NOT_FOUND`       | Default workspace not seeded                                         |
-| 404  | `NOT_FOUND`                 | Prisma `P2025` fallback                                              |
-| 409  | `CONFLICT`                  | Prisma `P2002` fallback                                              |
-| 409  | `AGENT_BUSY`                | Agent running, or manual busy status                                 |
-| 409  | `AGENT_STATUS_MANAGED`      | Attempt to set agent status to `busy`                                |
-| 409  | `AGENT_OFFLINE`             | Start with an offline agent                                          |
-| 409  | `AGENT_ERROR`               | Start with an agent in error state                                   |
-| 409  | `TASK_EXECUTION_ACTIVE`     | Edit status/assign/delete while running                              |
-| 409  | `TASK_TERMINAL`             | Cancel done task or assign terminal task                             |
-| 409  | `TASK_NOT_STARTABLE`        | Start from review/done/stopped                                       |
-| 409  | `TASK_UNASSIGNED`           | Start without an assignee                                            |
-| 409  | `INVALID_TASK_TRANSITION`   | Illegal state-machine move                                           |
-| 409  | `EXECUTION_ALREADY_RUNNING` | Second concurrent run for a task                                     |
-| 409  | `EXECUTION_NOT_RUNNING`     | Cancel an already terminal execution                                 |
-| 401  | `RUNNER_ADMIN_FORBIDDEN`    | Missing/invalid runner admin token                                   |
-| 403  | `RUNNER_ADMIN_FORBIDDEN`    | Runner management requested from a non-loopback client               |
-| 409  | `COMPUTER_NOT_ASSIGNED`     | Runner runtime with no computer on the agent                         |
-| 409  | `COMPUTER_OFFLINE`          | Computer marked offline                                              |
-| 409  | `RUNNER_NOT_REGISTERED`     | No runner paired for the computer                                    |
-| 409  | `RUNNER_OFFLINE`            | Runner not connected, or cancellation dispatched while offline       |
-| 409  | `RUNNER_CANCEL_TIMEOUT`     | Runner did not confirm process termination before the timeout        |
-| 422  | `CLI_NOT_INSTALLED`         | Runner reports the CLI missing                                       |
-| 422  | `CLI_NOT_AUTHENTICATED`     | Runner reports the CLI has no credentials                            |
-| 422  | `PROJECT_NOT_MAPPED`        | Project id not in the runner's configured project map                |
-| 422  | `RUNTIME_NOT_AVAILABLE`     | Unknown runtime or no availability descriptor                        |
-| 500  | `RUNTIME_START_FAILED`      | Runtime/runner rejected a start; execution failed and state restored |
-| 500  | `INTERNAL_ERROR`            | Unexpected exception (details not leaked)                            |
+| HTTP | Code                            | Typical cause                                                        |
+| ---- | ------------------------------- | -------------------------------------------------------------------- |
+| 400  | `VALIDATION_ERROR`              | Zod parse failure                                                    |
+| 400  | `PROJECT_NOT_FOUND`             | Unknown project on task create/update                                |
+| 404  | `PROJECT_NOT_FOUND`             | Unknown project, or project in another workspace                     |
+| 404  | `BINDING_NOT_FOUND`             | Unknown binding, or binding owned by another project                 |
+| 409  | `PROJECT_KEY_CONFLICT`          | Duplicate project key in the workspace                               |
+| 409  | `PROJECT_HAS_TASKS`             | Delete a project that still has tasks                                |
+| 409  | `PROJECT_ARCHIVED`              | Create a task for an archived project                                |
+| 409  | `BINDING_DUPLICATE_COMPUTER`    | Project already has a binding for this computer                      |
+| 400  | `BINDING_FIELD_IMMUTABLE`       | Binding PATCH contains a field other than `path`                     |
+| 400  | `BINDING_PATH_INVALID`          | Binding path is empty, too long, or contains NUL                     |
+| 409  | `PROJECT_BINDING_MISSING`       | Real execution has no binding for project + computer                 |
+| 409  | `PROJECT_BINDING_NOT_READY`     | Real execution binding is not `ready`                                |
+| 422  | `PROJECT_BINDING_INVALID`       | Runner rejected the repository path; see `details.errorCode`         |
+| 409  | `PROJECT_BINDING_UNSUPPORTED`   | Runner lacks repository validation/path-policy features              |
+| 409  | `STALE_REPOSITORY_VALIDATION`   | Concurrent or stale validation result                                |
+| 504  | `REPOSITORY_VALIDATION_TIMEOUT` | Runner did not answer validation before the timeout                  |
+| 400  | `COMPUTER_NOT_FOUND`            | Unknown computer on agent create/update                              |
+| 400  | `AGENT_NOT_FOUND`               | Unknown assignee on task create/assign                               |
+| 404  | `AGENT_NOT_FOUND`               | Agent route id not found                                             |
+| 404  | `TASK_NOT_FOUND`                | Task route id not found                                              |
+| 404  | `EXECUTION_NOT_FOUND`           | Execution route/logs id not found                                    |
+| 404  | `WORKSPACE_NOT_FOUND`           | Default workspace not seeded                                         |
+| 404  | `NOT_FOUND`                     | Prisma `P2025` fallback                                              |
+| 409  | `CONFLICT`                      | Prisma `P2002` fallback                                              |
+| 409  | `AGENT_BUSY`                    | Agent running, or manual busy status                                 |
+| 409  | `AGENT_STATUS_MANAGED`          | Attempt to set agent status to `busy`                                |
+| 409  | `AGENT_OFFLINE`                 | Start with an offline agent                                          |
+| 409  | `AGENT_ERROR`                   | Start with an agent in error state                                   |
+| 409  | `TASK_EXECUTION_ACTIVE`         | Edit status/assign/delete while running                              |
+| 409  | `TASK_TERMINAL`                 | Cancel done task or assign terminal task                             |
+| 409  | `TASK_NOT_STARTABLE`            | Start from review/done/stopped                                       |
+| 409  | `TASK_UNASSIGNED`               | Start without an assignee                                            |
+| 409  | `INVALID_TASK_TRANSITION`       | Illegal state-machine move                                           |
+| 409  | `EXECUTION_ALREADY_RUNNING`     | Second concurrent run for a task                                     |
+| 409  | `EXECUTION_NOT_RUNNING`         | Cancel an already terminal execution                                 |
+| 401  | `RUNNER_ADMIN_FORBIDDEN`        | Missing/invalid runner admin token                                   |
+| 403  | `RUNNER_ADMIN_FORBIDDEN`        | Runner management requested from a non-loopback client               |
+| 409  | `COMPUTER_NOT_ASSIGNED`         | Runner runtime with no computer on the agent                         |
+| 409  | `COMPUTER_OFFLINE`              | Computer marked offline                                              |
+| 409  | `RUNNER_NOT_REGISTERED`         | No runner paired for the computer                                    |
+| 409  | `RUNNER_OFFLINE`                | Runner not connected, or cancellation dispatched while offline       |
+| 409  | `RUNNER_CANCEL_TIMEOUT`         | Runner did not confirm process termination before the timeout        |
+| 422  | `CLI_NOT_INSTALLED`             | Runner reports the CLI missing                                       |
+| 422  | `CLI_NOT_AUTHENTICATED`         | Runner reports the CLI has no credentials                            |
+| 422  | `PROJECT_NOT_MAPPED`            | Project id not in the runner's configured project map                |
+| 422  | `RUNTIME_NOT_AVAILABLE`         | Unknown runtime or no availability descriptor                        |
+| 500  | `RUNTIME_START_FAILED`          | Runtime/runner rejected a start; execution failed and state restored |
+| 500  | `INTERNAL_ERROR`                | Unexpected exception (details not leaked)                            |
 
 Test-control codes such as `RUNTIME_SESSION_NOT_FOUND` and
 `RUNTIME_NOT_RUNNING` are only reachable when the test API is enabled.

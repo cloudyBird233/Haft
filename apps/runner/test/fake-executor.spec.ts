@@ -42,6 +42,7 @@ function makeConfig(overrides: Partial<RunnerConfig> = {}): RunnerConfig {
     cliTimeoutMs: 60_000,
     allowAutoApprove: false,
     projectPaths: { project_demo: process.cwd() },
+    allowedRepositoryRoots: [],
     stepMs: 15,
     healthPort: 0,
     maxConcurrentExecutions: 1,

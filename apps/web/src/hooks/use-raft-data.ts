@@ -22,10 +22,7 @@ export function useComputers() {
   });
 }
 
-export function useRuntimes(
-  params: RunnerRuntimeAvailabilityQuery = {},
-  enabled = true,
-) {
+export function useRuntimes(params: RunnerRuntimeAvailabilityQuery = {}, enabled = true) {
   return useQuery({
     queryKey: queryKeys.runtimes(params),
     queryFn: () => api.listRuntimes(params),
@@ -39,6 +36,23 @@ export function useWorkspace() {
     queryKey: queryKeys.workspace,
     queryFn: api.getWorkspace,
     staleTime: 60_000,
+  });
+}
+
+export function useProjects(enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.projects.list(),
+    queryFn: api.listProjects,
+    enabled,
+    staleTime: 15_000,
+  });
+}
+
+export function useProject(id: string | null | undefined, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.projects.detail(id ?? 'none'),
+    queryFn: () => api.getProject(id as string),
+    enabled: Boolean(id) && enabled,
   });
 }
 
@@ -80,8 +94,7 @@ export function useExecution(id: string | undefined) {
     queryKey: queryKeys.executions.detail(id ?? 'none'),
     queryFn: () => api.getExecution(id as string),
     enabled: Boolean(id),
-    refetchInterval: (query) =>
-      query.state.data?.status === 'running' ? 1500 : false,
+    refetchInterval: (query) => (query.state.data?.status === 'running' ? 1500 : false),
   });
 }
 

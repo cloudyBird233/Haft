@@ -51,6 +51,20 @@ export type ProgressMode = (typeof PROGRESS_MODES)[number];
 export const RUNNER_STATUSES = ['online', 'offline', 'busy', 'degraded'] as const;
 export type RunnerStatus = (typeof RUNNER_STATUSES)[number];
 
+/**
+ * Repository binding validation state. Only a successful runner validation may
+ * move a binding to `ready`; client input can never set this field directly.
+ */
+export const PROJECT_BINDING_STATUSES = ['unverified', 'ready', 'missing', 'error'] as const;
+export type ProjectBindingStatus = (typeof PROJECT_BINDING_STATUSES)[number];
+
+export const PROJECT_BINDING_STATUS_LABELS: Record<ProjectBindingStatus, string> = {
+  unverified: 'Unverified',
+  ready: 'Ready',
+  missing: 'Path missing',
+  error: 'Validation failed',
+};
+
 export const RUNNER_PROTOCOL_VERSION = 1 as const;
 
 /**
@@ -115,6 +129,7 @@ export const ERROR_CODES = {
   BINDING_PATH_INVALID: 'BINDING_PATH_INVALID',
   PROJECT_BINDING_MISSING: 'PROJECT_BINDING_MISSING',
   PROJECT_BINDING_NOT_READY: 'PROJECT_BINDING_NOT_READY',
+  PROJECT_BINDING_INVALID: 'PROJECT_BINDING_INVALID',
 
   // P2-02 repository validation, path policy and handshake
   PROJECT_BINDING_UNSUPPORTED: 'PROJECT_BINDING_UNSUPPORTED',

@@ -152,10 +152,40 @@ Deterministic failure triggers:
 The Fake Runner is covered by three E2E tests in
 `tests/e2e/functional/runner-execution.spec.ts`: successful execution through the
 protocol and task completion, cancellation waiting for a runner confirmation,
-and deterministic failure propagation to task/agent state and logs. API-level
-protocol tests in `apps/api/test/runner.integration.spec.ts` cover pairing,
-dispatch, stale-runner reconciliation, duplicate log handling, diff persistence,
-diff idempotency, and rejection of Git results from a non-owning runner.
+and deterministic failure propagation to task/agent state and logs. Each of
+these tests now creates and validates a `project_demo` repository binding first;
+without a `ready` binding the API deliberately rejects the real execution. The
+Fake Runner is configured with `HAFT_RUNNER_ALLOWED_ROOTS` pointing at the
+disposable `test-results/e2e-repository` main worktree. API-level protocol tests
+in `apps/api/test/runner.integration.spec.ts` cover pairing, dispatch,
+stale-runner reconciliation, duplicate log handling, diff persistence, diff
+idempotency, and rejection of Git results from a non-owning runner.
+
+### Project and repository binding coverage
+
+- `packages/contracts/test/project-binding.test.ts` covers project
+  key/name/repoUrl/defaultBranch and binding path schemas, DTO/status constants,
+  and immutable-field vocabulary.
+- `apps/api/test/projects.integration.spec.ts` covers project CRUD and counts,
+  duplicate keys, archive/restore and archived-project task rejection, delete
+  conflict, cross-workspace 404, binding create/duplicate/path-versioning,
+  immutable-field rejection, project/binding ownership, and runner-offline
+  validation. `apps/api/test/runner.integration.spec.ts` also covers the real
+  execution gate: missing binding, unverified binding, and a `ready` binding
+  whose validated version no longer matches the current binding version.
+- `apps/runner/test/repository-policy.spec.ts` covers fail-closed allowed roots,
+  relative/traversal/UNC/device paths, prefix-escape rejection, missing/plain/bare
+  repositories, subdirectories, linked worktrees, submodules, quarantine roots,
+  symlink/junction escapes, and canonical path/HEAD/policy-version output.
+- Web component tests cover the Projects page, project form, project detail
+  drawer, binding form/status/validation states, and task-project selection.
+- `tests/e2e/functional/projects-bindings.spec.ts` is the full deterministic
+  loop: create a project in the UI → bind a Computer path → validate through the
+  real Fake Runner protocol → observe `ready`/canonical path/HEAD → create a Task
+  against that project → run the Fake Runner → inspect logs/result → reload and
+  verify Project/Binding/Task/Execution counts and persistence.
+- Visual E2E regenerates the Projects list, validated binding drawer, and create
+  project dialog screenshots under `docs/screenshots/`.
 
 ### Git diff coverage
 
@@ -226,9 +256,16 @@ It uses:
 | Project       | disposable Git repo at `test-results/real-e2e/workspace` |
 | Worktrees     | `test-results/real-e2e/worktrees` (kept for assertions)  |
 | Recovery      | `test-results/real-e2e/recovery`                         |
+| Allowed roots | `test-results/real-e2e/workspace` only                   |
 | Mode          | `real`, runtimes `codex,opencode`, timeout 600 s         |
 
-`tests/e2e-real/prepare-project.mjs` creates the disposable repository.
+`tests/e2e-real/prepare-project.mjs` creates the disposable repository and
+`tests/support/repository.ts` creates/validates the `project_demo` binding at
+that path through the public API before a real task starts. The real runner is
+started with `HAFT_RUNNER_ALLOWED_ROOTS` set to the disposable workspace; the
+legacy `HAFT_RUNNER_PROJECTS` mapping remains only for P2-01 execution routing
+and is removed by P2-02.
+
 `tests/e2e-real/real-cli.spec.ts` starts a real task through the API and
 `tests/e2e-real/real-ui.spec.ts` drives the real browser UI end to end:
 
@@ -266,14 +303,21 @@ acceptance must be recorded in [REPORT.md](REPORT.md).
 - `resetSeed`: auto-used fixture that resets the default seed before each test.
 
 `tests/fixtures/test-data-factory.ts` creates ordinary domain data through the
-public REST API — never by writing SQLite directly. It covers agents, tasks,
-assignment, executions, logs, runtime mode, advance/finish, and unique names:
+public REST API — never by writing SQLite directly. It covers projects,
+repository bindings and validation, agents, tasks, assignment, executions, logs,
+runtime mode, advance/finish, and unique names:
 
 ```ts
 const agent = await factory.createAgent({ role: 'Release Steward' });
-const task = await factory.createTask({ assigneeAgentId: agent.id });
-const { execution } = await factory.createRunningExecution({
-  task: { title: 'Capture the execution gallery' },
+const project = await factory.createProject({ key: 'REL', name: 'Release' });
+const binding = await factory.createProjectBinding(project.id, {
+  computerId: 'computer_local',
+  path: process.cwd(),
+});
+await factory.validateProjectBinding(project.id, binding.id);
+const task = await factory.createTask({
+  assigneeAgentId: agent.id,
+  projectId: project.id,
 });
 ```
 

@@ -10,6 +10,8 @@
   "routes": {
     "dashboard": "/",
     "agents": "/agents",
+    "projects": "/projects",
+    "projectDetail": "/projects?project={projectId}",
     "tasks": "/tasks",
     "taskDetail": "/tasks?task={taskId}",
     "execution": "/executions/{executionId}"
@@ -19,6 +21,7 @@
     "shell.sidebar": { "testId": "sidebar", "role": "complementary", "name": "Primary navigation" },
     "shell.navOverview": { "testId": "nav-overview", "role": "link", "name": "Overview" },
     "shell.navAgents": { "testId": "nav-agents", "role": "link", "name": "Agents" },
+    "shell.navProjects": { "testId": "nav-projects", "role": "link", "name": "Projects" },
     "shell.navTasks": { "testId": "nav-tasks", "role": "link", "name": "Tasks" },
     "shell.socketStatus": { "testId": "socket-status", "role": "status" },
     "shell.offlineBanner": { "testId": "app-offline-banner", "role": "alert" },
@@ -26,8 +29,16 @@
     "dialog.close": { "testId": "dialog-close-button", "role": "button", "name": "Close dialog" },
 
     "dashboard.page": { "testId": "dashboard-page" },
-    "dashboard.refresh": { "testId": "dashboard-refresh-button", "role": "button", "name": "Refresh overview" },
-    "dashboard.newTask": { "testId": "dashboard-new-task-button", "role": "link", "name": "New task" },
+    "dashboard.refresh": {
+      "testId": "dashboard-refresh-button",
+      "role": "button",
+      "name": "Refresh overview"
+    },
+    "dashboard.newTask": {
+      "testId": "dashboard-new-task-button",
+      "role": "link",
+      "name": "New task"
+    },
     "dashboard.statAgents": { "testId": "dashboard-stat-agents" },
     "dashboard.statOnline": { "testId": "dashboard-stat-online" },
     "dashboard.statRunning": { "testId": "dashboard-stat-running" },
@@ -42,15 +53,31 @@
     "dashboard.runtimeCard": { "testId": "dashboard-runtime-card" },
     "dashboard.loading": { "testId": "dashboard-loading" },
     "dashboard.error": { "testId": "dashboard-error" },
-    "dashboard.retry": { "testId": "dashboard-retry-button", "role": "button", "name": "Try again" },
+    "dashboard.retry": {
+      "testId": "dashboard-retry-button",
+      "role": "button",
+      "name": "Try again"
+    },
     "dashboard.tasksEmpty": { "testId": "dashboard-tasks-empty" },
     "dashboard.activityEmpty": { "testId": "dashboard-activity-empty" },
 
     "agents.page": { "testId": "agents-page" },
     "agents.create": { "testId": "agent-create-button", "role": "button", "name": "New agent" },
-    "agents.search": { "testId": "agent-search-input", "role": "searchbox", "name": "Search agents" },
-    "agents.statusFilter": { "testId": "agent-status-filter", "role": "combobox", "name": "Status" },
-    "agents.clearFilters": { "testId": "agent-clear-filters-button", "role": "button", "name": "Clear" },
+    "agents.search": {
+      "testId": "agent-search-input",
+      "role": "searchbox",
+      "name": "Search agents"
+    },
+    "agents.statusFilter": {
+      "testId": "agent-status-filter",
+      "role": "combobox",
+      "name": "Status"
+    },
+    "agents.clearFilters": {
+      "testId": "agent-clear-filters-button",
+      "role": "button",
+      "name": "Clear"
+    },
     "agents.count": { "testId": "agents-count" },
     "agents.list": { "testId": "agent-list", "role": "list" },
     "agents.card": { "testId": "agent-card", "role": "button", "namePattern": "View agent {name}" },
@@ -58,7 +85,11 @@
     "agents.error": { "testId": "agents-error" },
     "agents.retry": { "testId": "agents-retry-button", "role": "button" },
     "agents.empty": { "testId": "agents-empty" },
-    "agents.emptyCreate": { "testId": "agents-empty-create-button", "role": "button", "name": "Create agent" },
+    "agents.emptyCreate": {
+      "testId": "agents-empty-create-button",
+      "role": "button",
+      "name": "Create agent"
+    },
     "agents.filterEmpty": { "testId": "agents-filter-empty" },
 
     "agentForm.dialog": { "testId": "agent-form-dialog", "role": "dialog" },
@@ -66,94 +97,367 @@
     "agentForm.error": { "testId": "agent-form-error", "role": "alert" },
     "agentForm.name": { "testId": "agent-name-input", "role": "textbox", "name": "Name" },
     "agentForm.role": { "testId": "agent-role-input", "role": "textbox", "name": "Role" },
-    "agentForm.description": { "testId": "agent-description-input", "role": "textbox", "name": "Description" },
-    "agentForm.runtime": { "testId": "agent-runtime-select", "role": "combobox", "name": "Runtime" },
-    "agentForm.computer": { "testId": "agent-computer-select", "role": "combobox", "name": "Computer" },
+    "agentForm.description": {
+      "testId": "agent-description-input",
+      "role": "textbox",
+      "name": "Description"
+    },
+    "agentForm.runtime": {
+      "testId": "agent-runtime-select",
+      "role": "combobox",
+      "name": "Runtime"
+    },
+    "agentForm.computer": {
+      "testId": "agent-computer-select",
+      "role": "combobox",
+      "name": "Computer"
+    },
     "agentForm.status": { "testId": "agent-status-select", "role": "combobox", "name": "Status" },
     "agentForm.cancel": { "testId": "agent-cancel-button", "role": "button", "name": "Cancel" },
-    "agentForm.submit": { "testId": "agent-submit-button", "role": "button", "name": "Create agent" },
-    "agentForm.close": { "testId": "dialog-close-button", "role": "button", "name": "Close dialog" },
+    "agentForm.submit": {
+      "testId": "agent-submit-button",
+      "role": "button",
+      "name": "Create agent"
+    },
+    "agentForm.close": {
+      "testId": "dialog-close-button",
+      "role": "button",
+      "name": "Close dialog"
+    },
 
     "agentDetail.panel": { "testId": "agent-detail-panel", "role": "dialog" },
-    "agentDetail.edit": { "testId": "agent-detail-edit-button", "role": "button", "name": "Edit agent" },
+    "agentDetail.edit": {
+      "testId": "agent-detail-edit-button",
+      "role": "button",
+      "name": "Edit agent"
+    },
     "agentDetail.delete": { "testId": "agent-delete-button", "role": "button", "name": "Delete" },
     "agentDetail.currentTask": { "testId": "agent-current-task" },
     "agentDetail.executionHistory": { "testId": "agent-execution-history" },
     "agentDetail.executionRow": { "testId": "agent-execution-row" },
     "agentDetail.executionEmpty": { "testId": "agent-execution-empty" },
     "agentDelete.dialog": { "testId": "agent-delete-dialog", "role": "alertdialog" },
-    "agentDelete.confirm": { "testId": "agent-delete-confirm-button", "role": "button", "name": "Delete agent" },
-    "agentDelete.cancel": { "testId": "agent-delete-cancel-button", "role": "button", "name": "Cancel" },
+    "agentDelete.confirm": {
+      "testId": "agent-delete-confirm-button",
+      "role": "button",
+      "name": "Delete agent"
+    },
+    "agentDelete.cancel": {
+      "testId": "agent-delete-cancel-button",
+      "role": "button",
+      "name": "Cancel"
+    },
+
+    "projects.page": { "testId": "projects-page" },
+    "projects.create": {
+      "testId": "project-create-button",
+      "role": "button",
+      "name": "New project"
+    },
+    "projects.search": {
+      "testId": "project-search-input",
+      "role": "searchbox",
+      "name": "Search projects"
+    },
+    "projects.count": { "testId": "projects-count" },
+    "projects.list": { "testId": "project-list", "role": "list", "name": "Project list" },
+    "projects.card": {
+      "testId": "project-card",
+      "role": "button",
+      "namePattern": "View project {name}"
+    },
+    "projects.taskCount": { "testId": "project-task-count" },
+    "projects.executionCount": { "testId": "project-execution-count" },
+    "projects.archivedBadge": { "testId": "project-archived-badge" },
+    "projects.loading": {
+      "testId": "projects-loading",
+      "role": "status",
+      "name": "Loading projects"
+    },
+    "projects.error": { "testId": "projects-error" },
+    "projects.retry": { "testId": "projects-retry-button", "role": "button" },
+    "projects.empty": { "testId": "projects-empty" },
+    "projects.emptyCreate": {
+      "testId": "projects-empty-create-button",
+      "role": "button",
+      "name": "Create project"
+    },
+    "projects.filterEmpty": { "testId": "projects-filter-empty" },
+
+    "projectForm.dialog": { "testId": "project-form-dialog", "role": "dialog" },
+    "projectForm.form": { "testId": "project-form" },
+    "projectForm.error": { "testId": "project-form-error", "role": "alert" },
+    "projectForm.key": { "testId": "project-key-input", "role": "textbox", "name": "Key" },
+    "projectForm.name": { "testId": "project-name-input", "role": "textbox", "name": "Name" },
+    "projectForm.description": {
+      "testId": "project-description-input",
+      "role": "textbox",
+      "name": "Description"
+    },
+    "projectForm.repoUrl": {
+      "testId": "project-repo-url-input",
+      "role": "textbox",
+      "name": "Repository URL"
+    },
+    "projectForm.defaultBranch": {
+      "testId": "project-default-branch-input",
+      "role": "textbox",
+      "name": "Default branch"
+    },
+    "projectForm.color": { "testId": "project-color-input" },
+    "projectForm.cancel": { "testId": "project-cancel-button", "role": "button", "name": "Cancel" },
+    "projectForm.submit": { "testId": "project-submit-button", "role": "button" },
+    "projectForm.close": {
+      "testId": "dialog-close-button",
+      "role": "button",
+      "name": "Close dialog"
+    },
+
+    "projectDetail.panel": { "testId": "project-detail-panel", "role": "dialog" },
+    "projectDetail.archived": { "testId": "project-detail-archived" },
+    "projectDetail.edit": {
+      "testId": "project-edit-button",
+      "role": "button",
+      "name": "Edit project"
+    },
+    "projectDetail.archive": { "testId": "project-archive-button", "role": "button" },
+    "projectDetail.archiveDialog": { "testId": "project-archive-dialog", "role": "alertdialog" },
+    "projectDetail.archiveConfirm": {
+      "testId": "project-archive-confirm-button",
+      "role": "button"
+    },
+    "projectDetail.delete": {
+      "testId": "project-delete-button",
+      "role": "button",
+      "name": "Delete"
+    },
+    "projectDetail.deleteDialog": { "testId": "project-delete-dialog", "role": "alertdialog" },
+    "projectDetail.deleteConfirm": {
+      "testId": "project-delete-confirm-button",
+      "role": "button",
+      "name": "Delete project"
+    },
+    "projectBindings.empty": { "testId": "project-bindings-empty" },
+    "projectBindings.list": { "testId": "project-bindings" },
+    "projectBindings.create": {
+      "testId": "project-binding-create-button",
+      "role": "button",
+      "name": "Bind"
+    },
+    "projectBindings.row": { "testId": "project-binding-row" },
+    "projectBindings.validationError": { "testId": "binding-validation-error", "role": "alert" },
+    "projectBindings.validate": { "testId": "binding-validate-button", "role": "button" },
+    "projectBindings.edit": {
+      "testId": "binding-edit-button",
+      "role": "button",
+      "name": "Change path"
+    },
+    "projectBindings.delete": {
+      "testId": "binding-delete-button",
+      "role": "button",
+      "name": "Delete"
+    },
+    "projectBindings.deleteDialog": { "testId": "binding-delete-dialog", "role": "alertdialog" },
+    "projectBindings.deleteConfirm": {
+      "testId": "binding-delete-confirm-button",
+      "role": "button",
+      "name": "Delete binding"
+    },
+
+    "bindingForm.dialog": { "testId": "binding-form-dialog", "role": "dialog" },
+    "bindingForm.form": { "testId": "binding-form" },
+    "bindingForm.error": { "testId": "binding-form-error", "role": "alert" },
+    "bindingForm.computer": {
+      "testId": "binding-computer-select",
+      "role": "combobox",
+      "name": "Computer"
+    },
+    "bindingForm.path": {
+      "testId": "binding-path-input",
+      "role": "textbox",
+      "name": "Absolute repository path"
+    },
+    "bindingForm.cancel": { "testId": "binding-cancel-button", "role": "button", "name": "Cancel" },
+    "bindingForm.submit": { "testId": "binding-submit-button", "role": "button" },
+    "bindingForm.close": {
+      "testId": "dialog-close-button",
+      "role": "button",
+      "name": "Close dialog"
+    },
 
     "tasks.page": { "testId": "tasks-page" },
     "tasks.create": { "testId": "task-create-button", "role": "button", "name": "New task" },
     "tasks.search": { "testId": "task-search-input", "role": "searchbox", "name": "Search tasks" },
-    "tasks.statusFilter": { "testId": "task-status-filter", "role": "combobox", "name": "Status filter" },
-    "tasks.priorityFilter": { "testId": "task-priority-filter", "role": "combobox", "name": "Priority filter" },
-    "tasks.assigneeFilter": { "testId": "task-assignee-filter", "role": "combobox", "name": "Assignee filter" },
-    "tasks.projectFilter": { "testId": "task-project-filter", "role": "combobox", "name": "Project filter" },
-    "tasks.clearFilters": { "testId": "task-clear-filters-button", "role": "button", "name": "Clear" },
+    "tasks.statusFilter": {
+      "testId": "task-status-filter",
+      "role": "combobox",
+      "name": "Status filter"
+    },
+    "tasks.priorityFilter": {
+      "testId": "task-priority-filter",
+      "role": "combobox",
+      "name": "Priority filter"
+    },
+    "tasks.assigneeFilter": {
+      "testId": "task-assignee-filter",
+      "role": "combobox",
+      "name": "Assignee filter"
+    },
+    "tasks.projectFilter": {
+      "testId": "task-project-filter",
+      "role": "combobox",
+      "name": "Project filter"
+    },
+    "tasks.clearFilters": {
+      "testId": "task-clear-filters-button",
+      "role": "button",
+      "name": "Clear"
+    },
     "tasks.count": { "testId": "tasks-count" },
     "tasks.loading": { "testId": "tasks-loading", "role": "status" },
     "tasks.error": { "testId": "tasks-error" },
     "tasks.retry": { "testId": "tasks-retry-button", "role": "button" },
     "tasks.empty": { "testId": "tasks-empty" },
-    "tasks.emptyCreate": { "testId": "tasks-empty-create-button", "role": "button", "name": "Create task" },
+    "tasks.emptyCreate": {
+      "testId": "tasks-empty-create-button",
+      "role": "button",
+      "name": "Create task"
+    },
     "tasks.filterEmpty": { "testId": "tasks-filter-empty" },
 
     "taskBoard.root": { "testId": "task-board" },
     "taskBoard.lane": { "testIdPattern": "task-lane-{lane}" },
     "taskBoard.laneCount": { "testIdPattern": "task-lane-{lane}-count" },
     "taskBoard.laneEmpty": { "testIdPattern": "task-lane-{lane}-empty" },
-    "taskBoard.card": { "testId": "task-card", "role": "button", "namePattern": "Open task {title}" },
+    "taskBoard.card": {
+      "testId": "task-card",
+      "role": "button",
+      "namePattern": "Open task {title}"
+    },
 
     "taskForm.dialog": { "testId": "task-form-dialog", "role": "dialog" },
     "taskForm.form": { "testId": "task-form" },
     "taskForm.error": { "testId": "task-form-error", "role": "alert" },
     "taskForm.title": { "testId": "task-title-input", "role": "textbox", "name": "Title" },
-    "taskForm.description": { "testId": "task-description-input", "role": "textbox", "name": "Description" },
+    "taskForm.description": {
+      "testId": "task-description-input",
+      "role": "textbox",
+      "name": "Description"
+    },
     "taskForm.project": { "testId": "task-project-select", "role": "combobox", "name": "Project" },
-    "taskForm.assignee": { "testId": "task-assignee-select", "role": "combobox", "name": "Assignee" },
-    "taskForm.priority": { "testId": "task-priority-select", "role": "combobox", "name": "Priority" },
+    "taskForm.assignee": {
+      "testId": "task-assignee-select",
+      "role": "combobox",
+      "name": "Assignee"
+    },
+    "taskForm.priority": {
+      "testId": "task-priority-select",
+      "role": "combobox",
+      "name": "Priority"
+    },
     "taskForm.cancel": { "testId": "task-cancel-button", "role": "button", "name": "Cancel" },
     "taskForm.submit": { "testId": "task-submit-button", "role": "button", "name": "Create task" },
     "taskForm.close": { "testId": "dialog-close-button", "role": "button", "name": "Close dialog" },
 
     "taskDetail.panel": { "testId": "task-detail-panel", "role": "dialog" },
-    "taskDetail.statusSelect": { "testId": "task-status-select", "role": "combobox", "name": "Task status" },
-    "taskDetail.statusUpdate": { "testId": "task-status-update-button", "role": "button", "name": "Update status" },
-    "taskDetail.assigneeSelect": { "testId": "task-assignee-detail-select", "role": "combobox", "name": "Assigned agent" },
+    "taskDetail.statusSelect": {
+      "testId": "task-status-select",
+      "role": "combobox",
+      "name": "Task status"
+    },
+    "taskDetail.statusUpdate": {
+      "testId": "task-status-update-button",
+      "role": "button",
+      "name": "Update status"
+    },
+    "taskDetail.assigneeSelect": {
+      "testId": "task-assignee-detail-select",
+      "role": "combobox",
+      "name": "Assigned agent"
+    },
     "taskDetail.assign": { "testId": "task-assign-button", "role": "button", "name": "Save" },
-    "taskDetail.cancelTask": { "testId": "task-cancel-button", "role": "button", "name": "Cancel task" },
+    "taskDetail.cancelTask": {
+      "testId": "task-cancel-button",
+      "role": "button",
+      "name": "Cancel task"
+    },
     "taskDetail.edit": { "testId": "task-edit-button", "role": "button", "name": "Edit" },
-    "taskDetail.delete": { "testId": "task-delete-button", "role": "button", "name": "Delete task" },
-    "taskDetail.latestExecution": { "testId": "task-execution-link", "role": "link", "name": "Open run" },
+    "taskDetail.delete": {
+      "testId": "task-delete-button",
+      "role": "button",
+      "name": "Delete task"
+    },
+    "taskDetail.latestExecution": {
+      "testId": "task-execution-link",
+      "role": "link",
+      "name": "Open run"
+    },
     "taskDetail.executionHistory": { "testId": "task-execution-history" },
     "taskDetail.executionRow": { "testId": "task-execution-row" },
     "taskDetail.executionEmpty": { "testId": "task-execution-empty" },
-    "taskDetail.start": { "testId": "execution-start-button", "role": "button", "name": "Start execution" },
+    "taskDetail.start": {
+      "testId": "execution-start-button",
+      "role": "button",
+      "name": "Start execution"
+    },
     "taskDetail.startHint": { "testId": "execution-start-hint" },
     "taskDetail.error": { "testId": "task-detail-error" },
     "taskDetail.retry": { "testId": "task-detail-retry-button", "role": "button" },
     "taskDetail.notFound": { "testId": "task-detail-not-found" },
     "taskCancel.dialog": { "testId": "task-cancel-dialog", "role": "alertdialog" },
-    "taskCancel.confirm": { "testId": "task-cancel-confirm-button", "role": "button", "name": "Cancel task" },
-    "taskCancel.dismiss": { "testId": "task-cancel-dismiss-button", "role": "button", "name": "Keep task" },
+    "taskCancel.confirm": {
+      "testId": "task-cancel-confirm-button",
+      "role": "button",
+      "name": "Cancel task"
+    },
+    "taskCancel.dismiss": {
+      "testId": "task-cancel-dismiss-button",
+      "role": "button",
+      "name": "Keep task"
+    },
     "taskDelete.dialog": { "testId": "task-delete-dialog", "role": "alertdialog" },
-    "taskDelete.confirm": { "testId": "task-delete-confirm-button", "role": "button", "name": "Delete task" },
-    "taskDelete.dismiss": { "testId": "task-delete-dismiss-button", "role": "button", "name": "Cancel" },
+    "taskDelete.confirm": {
+      "testId": "task-delete-confirm-button",
+      "role": "button",
+      "name": "Delete task"
+    },
+    "taskDelete.dismiss": {
+      "testId": "task-delete-dismiss-button",
+      "role": "button",
+      "name": "Cancel"
+    },
 
     "execution.page": { "testId": "execution-page" },
     "execution.back": { "testId": "execution-back-link", "role": "link", "name": "Back to tasks" },
-    "execution.refresh": { "testId": "execution-refresh-button", "role": "button", "name": "Refresh execution" },
-    "execution.stop": { "testId": "execution-stop-button", "role": "button", "name": "Cancel execution" },
+    "execution.refresh": {
+      "testId": "execution-refresh-button",
+      "role": "button",
+      "name": "Refresh execution"
+    },
+    "execution.stop": {
+      "testId": "execution-stop-button",
+      "role": "button",
+      "name": "Cancel execution"
+    },
     "execution.stopDialog": { "testId": "execution-stop-dialog", "role": "alertdialog" },
-    "execution.stopConfirm": { "testId": "execution-stop-confirm-button", "role": "button", "name": "Cancel execution" },
-    "execution.stopDismiss": { "testId": "execution-stop-dismiss-button", "role": "button", "name": "Keep running" },
+    "execution.stopConfirm": {
+      "testId": "execution-stop-confirm-button",
+      "role": "button",
+      "name": "Cancel execution"
+    },
+    "execution.stopDismiss": {
+      "testId": "execution-stop-dismiss-button",
+      "role": "button",
+      "name": "Keep running"
+    },
     "execution.statusBanner": { "testId": "execution-status-banner", "role": "status" },
     "execution.progressPanel": { "testId": "execution-progress-panel" },
     "execution.progressValue": { "testId": "execution-progress-value" },
-    "execution.progress": { "testId": "execution-progress", "role": "progressbar", "name": "Execution progress" },
+    "execution.progress": {
+      "testId": "execution-progress",
+      "role": "progressbar",
+      "name": "Execution progress"
+    },
     "execution.taskCard": { "testId": "execution-task-card" },
     "execution.taskLink": { "testId": "execution-task-link", "role": "link", "name": "Open task" },
     "execution.agentCard": { "testId": "execution-agent-card" },
@@ -179,12 +483,21 @@
     "execution.diffTruncated": { "testId": "execution-diff-truncated" },
     "execution.diffBinary": { "testId": "execution-diff-binary" },
     "execution.diffEmpty": { "testId": "execution-diff-empty" },
-    "execution.diffRefresh": { "testId": "execution-diff-refresh-button", "role": "button", "name": "Refresh diff" }
+    "execution.diffRefresh": {
+      "testId": "execution-diff-refresh-button",
+      "role": "button",
+      "name": "Refresh diff"
+    }
   },
   "requiredTestIds": [
     "agent-create-button",
     "agent-list",
     "agent-card",
+    "project-create-button",
+    "project-card",
+    "project-detail-panel",
+    "project-binding-create-button",
+    "binding-validate-button",
     "task-create-button",
     "task-board",
     "task-card",
@@ -213,6 +526,30 @@
     "task": ["todo", "claimed", "in_progress", "in_review", "done", "failed", "cancelled"]
   },
   "flows": {
+    "createProject": [
+      "navigate.projects",
+      "click.projects.create",
+      "fill.projectForm.key",
+      "fill.projectForm.name",
+      "fill.projectForm.repoUrl",
+      "fill.projectForm.defaultBranch",
+      "click.projectForm.submit",
+      "expect.toast",
+      "expect.projects.card"
+    ],
+    "bindRepository": [
+      "expect.projectDetail.panel",
+      "click.projectBindings.create",
+      "select.bindingForm.computer",
+      "fill.bindingForm.path",
+      "click.bindingForm.submit",
+      "expect.projectBindings.row"
+    ],
+    "validateRepositoryBinding": [
+      "click.projectBindings.validate",
+      "expect.toast",
+      "expect.projectBindings.row[data-binding-status=ready]"
+    ],
     "createAgent": [
       "navigate.agents",
       "click.agents.create",
@@ -268,18 +605,39 @@
     },
     "enabledWhen": "E2E_TEST_MODE=true and NODE_ENV!=production",
     "endpoints": {
-      "reset": { "method": "POST", "path": "/__test__/reset", "body": { "preset": "default|empty" } },
+      "reset": {
+        "method": "POST",
+        "path": "/__test__/reset",
+        "body": { "preset": "default|empty" }
+      },
       "seed": { "method": "POST", "path": "/__test__/seed", "body": { "preset": "default|empty" } },
-      "runtimeMode": { "method": "POST", "path": "/__test__/runtime/mode", "body": { "mode": "auto|manual" } },
-      "advanceExecution": { "method": "POST", "path": "/__test__/executions/{executionId}/advance", "body": { "steps": "1..20" } },
-      "finishExecution": { "method": "POST", "path": "/__test__/executions/{executionId}/finish", "body": { "outcome": "success|failure", "reason": "optional" } }
+      "runtimeMode": {
+        "method": "POST",
+        "path": "/__test__/runtime/mode",
+        "body": { "mode": "auto|manual" }
+      },
+      "advanceExecution": {
+        "method": "POST",
+        "path": "/__test__/executions/{executionId}/advance",
+        "body": { "steps": "1..20" }
+      },
+      "finishExecution": {
+        "method": "POST",
+        "path": "/__test__/executions/{executionId}/finish",
+        "body": { "outcome": "success|failure", "reason": "optional" }
+      }
     }
   },
   "deterministicSeed": {
     "workspaceId": "ws_demo",
     "projectId": "project_demo",
     "agents": ["agent_architect", "agent_developer", "agent_qa"],
-    "tasks": ["task_workspace_shell", "task_arch_review", "task_log_viewer", "task_activity_contract"],
+    "tasks": [
+      "task_workspace_shell",
+      "task_arch_review",
+      "task_log_viewer",
+      "task_activity_contract"
+    ],
     "completedExecutionId": "execution_seed_completed"
   }
 }

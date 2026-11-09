@@ -20,53 +20,93 @@ model Workspace {
 }
 
 model Project {
-  id          String   @id @default(cuid())
-  workspaceId String
-  key         String
-  name        String
-  description String   @default("")
-  color       String   @default("#6b7280")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  tasks       Task[]
+  id                 String                     @id @default(cuid())
+  workspaceId        String
+  key                String
+  name               String
+  description        String                     @default("")
+  color              String                     @default("#6b7280")
+  repoUrl            String?
+  defaultBranch      String                     @default("main")
+  archivedAt         DateTime?
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+  workspace          Workspace                  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  tasks              Task[]
+  repositoryBindings ProjectRepositoryBinding[]
 
   @@unique([workspaceId, key])
   @@index([workspaceId])
+  @@index([workspaceId, archivedAt])
+}
+
+/// A Project's repository path on one Computer. The path is opaque user input;
+/// only a runner response may move the binding out of `unverified`.
+model ProjectRepositoryBinding {
+  id                      String      @id @default(cuid())
+  projectId               String
+  computerId              String
+  path                    String
+  pathHash                String
+  bindingVersion          Int         @default(1)
+  platform                String?
+  status                  String      @default("unverified")
+  validationRequestId     String?
+  canonicalPath           String?
+  headCommit              String?
+  validationErrorCode     String?
+  validationError         String?
+  lastValidatedAt         DateTime?
+  validatedByRunnerId     String?
+  validatedBindingVersion Int?
+  policyVersion           String?
+  createdAt               DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
+  project                 Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  computer                Computer    @relation(fields: [computerId], references: [id], onDelete: Cascade)
+  validatedByRunner       Runner?     @relation(fields: [validatedByRunnerId], references: [id], onDelete: SetNull)
+  executions              Execution[]
+
+  @@unique([projectId, computerId])
+  @@index([projectId, status])
+  @@index([computerId])
+  @@index([validatedByRunnerId])
 }
 
 model Computer {
-  id         String   @id @default(cuid())
-  name       String
-  hostname   String
-  status     String   @default("online")
-  lastSeenAt DateTime?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-  agents     Agent[]
-  runner     Runner?
+  id                 String                     @id @default(cuid())
+  name               String
+  hostname           String
+  status             String                     @default("online")
+  lastSeenAt         DateTime?
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+  agents             Agent[]
+  runner             Runner?
+  repositoryBindings ProjectRepositoryBinding[]
 }
 
 /// A Haft Agent Runner process registered against one Computer.
 /// Token material is stored as a one-way hash only.
 model Runner {
-  id                      String      @id @default(cuid())
-  computerId              String      @unique
+  id                      String                     @id @default(cuid())
+  computerId              String                     @unique
   tokenHash               String
-  protocolVersion         Int         @default(1)
-  runnerVersion           String      @default("")
-  platform                String      @default("")
-  architecture            String      @default("")
-  status                  String      @default("offline")
-  capabilitiesJson        String      @default("{}")
-  maxConcurrentExecutions Int         @default(1)
+  protocolVersion         Int                        @default(1)
+  runnerVersion           String                     @default("")
+  platform                String                     @default("")
+  architecture            String                     @default("")
+  status                  String                     @default("offline")
+  capabilitiesJson        String                     @default("{}")
+  maxConcurrentExecutions Int                        @default(1)
   lastHeartbeatAt         DateTime?
   connectedAt             DateTime?
   disconnectedAt          DateTime?
-  createdAt               DateTime    @default(now())
-  updatedAt               DateTime    @updatedAt
-  computer                Computer    @relation(fields: [computerId], references: [id], onDelete: Cascade)
+  createdAt               DateTime                   @default(now())
+  updatedAt               DateTime                   @updatedAt
+  computer                Computer                   @relation(fields: [computerId], references: [id], onDelete: Cascade)
   executions              Execution[]
+  validatedBindings       ProjectRepositoryBinding[]
 
   @@index([status])
   @@index([lastHeartbeatAt])
@@ -117,41 +157,47 @@ model Task {
 }
 
 model Execution {
-  id            String         @id @default(cuid())
-  taskId        String
-  agentId       String
-  runnerId      String?
-  runtime       String         @default("mock")
-  status        String         @default("running")
-  phase         String         @default("running")
-  progress      Int            @default(0)
-  progressMode  String         @default("determinate")
-  exitCode      Int?
-  summary       String?
-  branchName    String?
-  baseCommit    String?
-  headCommit    String?
-  changedFiles  Int            @default(0)
-  diffStat      String         @default("")
-  gitStatus     String         @default("")
-  diffTruncated Boolean        @default(false)
-  lastRunnerSeq Int            @default(0)
-  startedAt     DateTime       @default(now())
-  endedAt       DateTime?
-  failureReason String?
-  cancelReason  String?
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
-  task          Task           @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  agent         Agent          @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  runner        Runner?        @relation(fields: [runnerId], references: [id], onDelete: SetNull)
-  logs          ExecutionLog[]
-  artifacts     ExecutionArtifact[]
-  activities    Activity[]
+  id                       String                    @id @default(cuid())
+  taskId                   String
+  agentId                  String
+  runnerId                 String?
+  repositoryProjectId      String?
+  repositoryBindingId      String?
+  repositoryBindingVersion Int?
+  repositoryDefaultBranch  String?
+  runtime                  String                    @default("mock")
+  status                   String                    @default("running")
+  phase                    String                    @default("running")
+  progress                 Int                       @default(0)
+  progressMode             String                    @default("determinate")
+  exitCode                 Int?
+  summary                  String?
+  branchName               String?
+  baseCommit               String?
+  headCommit               String?
+  changedFiles             Int                       @default(0)
+  diffStat                 String                    @default("")
+  gitStatus                String                    @default("")
+  diffTruncated            Boolean                   @default(false)
+  lastRunnerSeq            Int                       @default(0)
+  startedAt                DateTime                  @default(now())
+  endedAt                  DateTime?
+  failureReason            String?
+  cancelReason             String?
+  createdAt                DateTime                  @default(now())
+  updatedAt                DateTime                  @updatedAt
+  task                     Task                      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  agent                    Agent                     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  runner                   Runner?                   @relation(fields: [runnerId], references: [id], onDelete: SetNull)
+  repositoryBinding        ProjectRepositoryBinding? @relation(fields: [repositoryBindingId], references: [id], onDelete: SetNull)
+  logs                     ExecutionLog[]
+  artifacts                ExecutionArtifact[]
+  activities               Activity[]
 
   @@index([taskId])
   @@index([agentId])
   @@index([runnerId])
+  @@index([repositoryBindingId])
   @@index([status])
   @@index([phase])
 }

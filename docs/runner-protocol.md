@@ -68,6 +68,7 @@ Every application message is a strict envelope:
 | --------------------- | -------------------------------------------- |
 | `runner.welcome`      | Connection accepted; token/timeouts issued   |
 | `runner.error`        | Protocol or application error                |
+| `repository.validate` | Validate a ProjectRepositoryBinding path     |
 | `execution.start`     | Start a codex/opencode execution             |
 | `execution.cancel`    | Request process-tree cancellation            |
 | `execution.reconcile` | Ask the runner to reconcile given executions |
@@ -87,6 +88,52 @@ Every application message is a strict envelope:
 
 `issuedToken` is present only after a bootstrap pairing. The runner updates its
 heartbeat interval from this message.
+
+### `repository.validate`
+
+P2-01 adds this server→runner request for a binding path. It is sent only when
+the connected runner advertises `repository-validation-v1` and
+`repository-path-policy-v1`.
+
+```json
+{
+  "requestId": "6d2a...",
+  "projectId": "project_demo",
+  "computerId": "computer_local",
+  "bindingId": "cm...",
+  "bindingVersion": 1,
+  "path": "D:\\code\\haft-work"
+}
+```
+
+The runner validates the path against its `allowedRepositoryRoots` policy,
+resolves `realpath`, verifies that it is an existing Git main-worktree root, and
+replies with `repository.validation`. `requestId` and `bindingVersion` are
+echoed; the API uses them to discard stale results. The runner replays a cached
+result for the same `requestId` for five minutes.
+
+```json
+{
+  "requestId": "6d2a...",
+  "projectId": "project_demo",
+  "computerId": "computer_local",
+  "bindingId": "cm...",
+  "bindingVersion": 1,
+  "ok": true,
+  "platform": "win32",
+  "policyVersion": "3f5c...",
+  "canonicalPath": "D:\\code\\haft-work",
+  "headCommit": "74ebaa2..."
+}
+```
+
+On failure `ok` is `false` and the payload carries `errorCode` (a `REPO_*`
+code) and `message`. The API sets Binding `status = missing` only for
+`REPO_PATH_NOT_FOUND`; all other failures become `error`.
+
+This message is **not** the P2-02 execution handshake. `execution.repository`,
+`execution.repository.accepted`, `execution.repository.rejected`, and
+`execution.start.rejected` remain out of scope for P2-01.
 
 ### `execution.start`
 
@@ -163,18 +210,19 @@ Acknowledges that the server persisted runner log sequences up to
 
 ## Runner → server
 
-| Type                  | Purpose                                      |
-| --------------------- | -------------------------------------------- |
-| `runner.register`     | Identity, version, platform, capabilities    |
-| `runner.heartbeat`    | Liveness and active execution ids            |
-| `execution.accepted`  | Start acknowledgement                        |
-| `execution.phase`     | `queued`/`preparing`/`running`/`finalizing`  |
-| `execution.log`       | One or more structured log entries           |
-| `execution.progress`  | Progress 0–100 and determinate/indeterminate |
-| `execution.completed` | Successful terminal event                    |
-| `execution.failed`    | Failure terminal event                       |
-| `execution.cancelled` | Cancellation confirmed                       |
-| `runner.snapshot`     | Local active executions and pending logs     |
+| Type                    | Purpose                                      |
+| ----------------------- | -------------------------------------------- |
+| `runner.register`       | Identity, version, platform, capabilities    |
+| `runner.heartbeat`      | Liveness and active execution ids            |
+| `repository.validation` | Result for a `repository.validate` request   |
+| `execution.accepted`    | Start acknowledgement                        |
+| `execution.phase`       | `queued`/`preparing`/`running`/`finalizing`  |
+| `execution.log`         | One or more structured log entries           |
+| `execution.progress`    | Progress 0–100 and determinate/indeterminate |
+| `execution.completed`   | Successful terminal event                    |
+| `execution.failed`      | Failure terminal event                       |
+| `execution.cancelled`   | Cancellation confirmed                       |
+| `runner.snapshot`       | Local active executions and pending logs     |
 
 ### `runner.register`
 
@@ -197,10 +245,16 @@ Sent on every connect, after `runner.welcome`.
       }
     ],
     "projectIds": ["project_demo"],
-    "maxConcurrentExecutions": 1
+    "maxConcurrentExecutions": 1,
+    "features": ["project-binding-v1", "repository-validation-v1", "repository-path-policy-v1"]
   }
 }
 ```
+
+`features` is an additive P2-00 capability list. Missing features, including an
+omitted array from an older runner, are treated as unsupported; consumers must
+fail closed. A P2-01 runner advertises the three features above but not
+`repository-handshake-v1`.
 
 ### `runner.heartbeat`
 
@@ -215,6 +269,29 @@ Sent on every connect, after `runner.welcome`.
 Heartbeats update `Runner.lastHeartbeatAt` and status. Missing heartbeats for the
 configured timeout (default 45 s) make the server mark the runner offline and
 start the reconnect grace timer.
+
+### `repository.validation`
+
+```json
+{
+  "requestId": "6d2a...",
+  "projectId": "project_demo",
+  "computerId": "computer_local",
+  "bindingId": "cm...",
+  "bindingVersion": 1,
+  "ok": true,
+  "platform": "win32",
+  "policyVersion": "3f5c...",
+  "canonicalPath": "D:\\code\\haft-work",
+  "headCommit": "74ebaa2..."
+}
+```
+
+The server matches `runnerId` plus `requestId` and verifies that `projectId`,
+`computerId`, `bindingId`, and `bindingVersion` equal the pending request. A
+response that does not match is discarded and logged; it never changes a
+binding. Successful payloads must include `canonicalPath` and `headCommit`;
+failure payloads carry `errorCode` and `message`.
 
 ### `execution.accepted`
 
@@ -366,6 +443,25 @@ Fatal errors close the connection. Common codes:
 | `RUNNER_REPLACED`          | A newer connection replaced this one (fatal) |
 | `RUNNER_MESSAGE_INVALID`   | Envelope or payload failed schema validation |
 | `RUNNER_MESSAGE_FAILED`    | Message could not be applied                 |
+
+Repository validation failures use typed `REPO_*` codes in
+`repository.validation`:
+
+| Code                                | Meaning                                           |
+| ----------------------------------- | ------------------------------------------------- |
+| `REPOSITORY_POLICY_NOT_CONFIGURED`  | No `allowedRepositoryRoots` on the runner         |
+| `REPO_PATH_INVALID`                 | Empty input, NUL, device path, or not a directory |
+| `REPO_PATH_NOT_ABSOLUTE`            | Relative path                                     |
+| `REPO_PATH_TRAVERSAL`               | Path contains a `..` segment                      |
+| `REPO_UNC_NOT_ALLOWED`              | UNC path                                          |
+| `REPO_PATH_OUTSIDE_ALLOWED_ROOTS`   | Realpath is outside every allowed root            |
+| `REPO_PATH_NOT_FOUND`               | Target does not exist (maps to Binding `missing`) |
+| `REPO_NOT_GIT_ROOT`                 | Not a Git worktree root                           |
+| `REPO_BARE_UNSUPPORTED`             | Bare repository                                   |
+| `REPO_PATH_IS_WORKTREE`             | Linked worktree or submodule                      |
+| `REPO_PATH_NESTED_IN_WORKTREE_ROOT` | Path inside the worktree/recovery quarantine      |
+| `REPO_DEFAULT_BRANCH_NOT_FOUND`     | Reserved for the P2-02 execution handshake        |
+| `REPO_VALIDATION_FAILED`            | Other Git/read/stat failure                       |
 
 Application-level failures during execution are reported with
 `execution.failed` and a human-readable `reason` such as

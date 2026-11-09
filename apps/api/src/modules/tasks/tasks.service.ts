@@ -129,7 +129,7 @@ export class TasksService {
     if (!existing) {
       throw new AppException('TASK_NOT_FOUND', 'Task not found', HttpStatus.NOT_FOUND);
     }
-    if (input.projectId) {
+    if (input.projectId && input.projectId !== existing.projectId) {
       await this.assertProject(input.projectId);
     }
     if (input.status && input.status !== existing.status) {
@@ -293,6 +293,14 @@ export class TasksService {
         'PROJECT_NOT_FOUND',
         'Selected project does not exist',
         HttpStatus.BAD_REQUEST,
+      );
+    }
+    if (project.archivedAt) {
+      throw new AppException(
+        'PROJECT_ARCHIVED',
+        'Archived projects cannot receive new tasks',
+        HttpStatus.CONFLICT,
+        { projectId: project.id, archivedAt: project.archivedAt.toISOString() },
       );
     }
   }

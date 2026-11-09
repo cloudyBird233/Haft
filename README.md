@@ -6,6 +6,13 @@ The repository is a complete, runnable product slice rather than a static protot
 
 ![Raft Lite dashboard](docs/screenshots/dashboard-1440x900.png)
 
+Projects carry repository metadata and per-computer repository bindings. A real
+execution only starts after the connected Runner has validated the binding:
+
+![Projects and repository bindings](docs/screenshots/projects-1440x900.png)
+
+![Validated repository binding](docs/screenshots/project-detail-1440x900.png)
+
 ## What it does
 
 - **Agents**: create, edit, filter, inspect, and delete AI workers. Agent details show runtime configuration, current task, and execution history.
@@ -101,6 +108,7 @@ paired Haft Agent Runner on the same machine (or on a reachable trusted host).
    HAFT_RUNNER_ID=runner_local \
    HAFT_RUNNER_COMPUTER_ID=computer_local \
    HAFT_RUNNER_MODE=fake \
+   HAFT_RUNNER_ALLOWED_ROOTS='["/home/me/src"]' \
    pnpm --filter @raft-lite/runner start
    ```
 
@@ -111,12 +119,19 @@ paired Haft Agent Runner on the same machine (or on a reachable trusted host).
    $env:HAFT_RUNNER_ID = "runner_local"
    $env:HAFT_RUNNER_COMPUTER_ID = "computer_local"
    $env:HAFT_RUNNER_MODE = "fake"
+   $env:HAFT_RUNNER_ALLOWED_ROOTS = '["D:\\code"]'
    pnpm --filter @raft-lite/runner start
    ```
 
-3. Create an agent with runtime `Codex CLI` or `OpenCode CLI`, assign it to
-   `computer_local`, and start a task. The task detail drawer shows runtime
-   availability and the reason when a runtime cannot be used.
+3. Open **Projects**, create a project, bind its repository path on
+   `computer_local`, and press **Validate**. The binding becomes `ready` only
+   after the Runner confirms a Git main-worktree root inside an allowed root; a
+   missing, escaped, bare, linked-worktree, or submodule path is rejected.
+
+4. Create an agent with runtime `Codex CLI` or `OpenCode CLI`, assign it to
+   `computer_local`, create a task in the project, and start it. The task detail
+   drawer shows runtime availability, the repository binding status, and the
+   reason when execution is blocked.
 
 For real CLI execution, configure the runner's project allowlist, worktree root,
 CLI paths/models, and authentication once per host. See
@@ -164,10 +179,11 @@ The seed is deterministic and uses fixed IDs and timestamps:
 Suggested tour:
 
 1. Open **Overview** and note the seeded metrics and activity.
-2. Open **Agents** and inspect Developer's execution history.
-3. Open **Tasks**, start an execution on a claimed task, and follow the live progress and logs.
-4. Cancel a running execution from its detail page.
-5. Return to **Overview** to see the updated metrics and activity.
+2. Open **Projects** and inspect the seeded project, default branch, and bindings.
+3. Open **Agents** and inspect Developer's execution history.
+4. Open **Tasks**, start an execution on a claimed task, and follow the live progress and logs.
+5. Cancel a running execution from its detail page.
+6. Return to **Overview** to see the updated metrics and activity.
 
 ## Testing and selectors
 
@@ -274,6 +290,7 @@ artifacts, troubleshooting, and the real CLI isolation contract.
 - [Architecture](docs/architecture.md)
 - [Data model](docs/data-model.md)
 - [API design](docs/api.md)
+- [P2-01 projects and repository bindings](docs/p2-01-project-repository-binding.md)
 - [Testing strategy and selectors](docs/testing.md)
 - [Runner architecture](docs/runner-architecture.md)
 - [Runner protocol v1](docs/runner-protocol.md)

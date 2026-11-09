@@ -10,6 +10,7 @@ import {
   waitForAgentList,
   waitForBoard,
 } from '../../support/app';
+import { E2E_REPOSITORY_PATH, waitForFakeRunner } from '../../support/repository';
 import { byTestId } from '../../support/ui-contract';
 
 const SCREENSHOT_DIR = join(process.cwd(), 'docs', 'screenshots');
@@ -49,10 +50,7 @@ test.describe('visual layout and screenshot gallery', () => {
     await resetDefault(request);
     await gotoRoute(page, 'dashboard');
     await expect(byTestId(page, 'dashboard.statAgents')).toBeVisible();
-    await expect(byTestId(page, 'shell.socketStatus')).toHaveAttribute(
-      'data-status',
-      'connected',
-    );
+    await expect(byTestId(page, 'shell.socketStatus')).toHaveAttribute('data-status', 'connected');
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await expectNoPageOverflow(page);
@@ -150,5 +148,47 @@ test.describe('visual layout and screenshot gallery', () => {
     await expect(byTestId(page, 'execution.logLiveStatus')).toContainText('Stream complete');
     await expectNoPageOverflow(page);
     await capture(page, 'execution-completed-1440x900.png');
+  });
+
+  test('project list, validated binding, and project form are captured', async ({
+    page,
+    request,
+  }) => {
+    const factory = await resetDefault(request);
+    await waitForFakeRunner(factory);
+
+    const project = await factory.createProject({
+      key: 'VIS',
+      name: 'Visual Repository Project',
+      description: 'A project with one runner-validated repository binding.',
+      repoUrl: 'git@github.com:org/visual-repository.git',
+      defaultBranch: 'main',
+    });
+    const binding = await factory.createProjectBinding(project.id, {
+      computerId: 'computer_local',
+      path: E2E_REPOSITORY_PATH,
+    });
+    await factory.validateProjectBinding(project.id, binding.id);
+
+    await gotoRoute(page, 'projects');
+    await expect(byTestId(page, 'projects.page')).toBeVisible();
+    await expect(byTestId(page, 'projects.card')).toHaveCount(2);
+    await expectNoPageOverflow(page);
+    await capture(page, 'projects-1440x900.png');
+
+    await gotoPath(page, `/projects?project=${project.id}`);
+    await expect(byTestId(page, 'projectDetail.panel')).toBeVisible();
+    await expect(byTestId(page, 'projectBindings.row')).toHaveAttribute(
+      'data-binding-status',
+      'ready',
+    );
+    await expect(byTestId(page, 'projectBindings.row')).toContainText('Last checked');
+    await expectNoPageOverflow(page);
+    await capture(page, 'project-detail-1440x900.png');
+
+    await page.keyboard.press('Escape');
+    await byTestId(page, 'projects.create').click();
+    await expect(byTestId(page, 'projectForm.dialog')).toBeVisible();
+    await capture(page, 'create-project-dialog-1440x900.png');
   });
 });

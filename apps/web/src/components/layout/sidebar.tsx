@@ -2,6 +2,7 @@ import { NavLink } from 'react-router-dom';
 import {
   Bot,
   ExternalLink,
+  FolderGit2,
   LayoutDashboard,
   ListChecks,
   Radio,
@@ -15,6 +16,7 @@ import { cn } from '../../lib/utils';
 const navItems = [
   { to: '/', label: 'Overview', icon: LayoutDashboard, end: true, testId: 'nav-overview' },
   { to: '/agents', label: 'Agents', icon: Bot, end: false, testId: 'nav-agents' },
+  { to: '/projects', label: 'Projects', icon: FolderGit2, end: false, testId: 'nav-projects' },
   { to: '/tasks', label: 'Tasks', icon: ListChecks, end: false, testId: 'nav-tasks' },
 ] as const;
 
@@ -24,7 +26,14 @@ function LogoMark(): JSX.Element {
       <rect width="28" height="28" rx="8" fill="#24221e" />
       <path d="M7 17.5h14M8.5 20.5h11" stroke="#f4f1e9" strokeWidth="1.4" strokeLinecap="round" />
       <path d="M14 8v7" stroke="#f4f1e9" strokeWidth="1.4" strokeLinecap="round" />
-      <path d="M10.5 10.5 14 8l3.5 2.5" fill="none" stroke="#f4f1e9" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      <path
+        d="M10.5 10.5 14 8l3.5 2.5"
+        fill="none"
+        stroke="#f4f1e9"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }
@@ -45,7 +54,9 @@ function SocketIndicator(): JSX.Element {
       ) : (
         <WifiOff size={12} className="text-faint" aria-hidden="true" />
       )}
-      <span>{isLive ? 'Live updates' : status === 'connecting' ? 'Connecting…' : 'Reconnecting…'}</span>
+      <span>
+        {isLive ? 'Live updates' : status === 'connecting' ? 'Connecting…' : 'Reconnecting…'}
+      </span>
     </div>
   );
 }

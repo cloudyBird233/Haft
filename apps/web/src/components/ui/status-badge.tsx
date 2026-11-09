@@ -1,7 +1,14 @@
-import type { AgentStatus, ExecutionStatus, TaskPriority, TaskStatus } from '@raft-lite/contracts';
+import type {
+  AgentStatus,
+  ExecutionStatus,
+  ProjectBindingStatus,
+  TaskPriority,
+  TaskStatus,
+} from '@raft-lite/contracts';
 import {
   AGENT_STATUS_LABELS,
   EXECUTION_STATUS_LABELS,
+  PROJECT_BINDING_STATUS_LABELS,
   TASK_PRIORITY_LABELS,
   TASK_STATUS_LABELS,
 } from '@raft-lite/contracts';
@@ -38,16 +45,19 @@ const priorityTone: Record<TaskPriority, string> = {
   urgent: 'text-[#a64736]',
 };
 
+const bindingTone: Record<ProjectBindingStatus, string> = {
+  unverified: 'border-[#eadfc7] bg-[#faf4e8] text-[#8a641e]',
+  ready: 'border-[#cfe0d6] bg-[#e9f3ed] text-[#336248]',
+  missing: 'border-[#ecd8d2] bg-[#fbf1ee] text-[#a64736]',
+  error: 'border-[#ecd8d2] bg-[#fbf1ee] text-[#a64736]',
+};
+
 const base =
   'inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10.5px] font-semibold tracking-[0.015em] whitespace-nowrap';
 
 function Dot({ tone = 'currentColor' }: { tone?: string }): JSX.Element {
   return (
-    <span
-      aria-hidden="true"
-      className="size-1.5 rounded-full"
-      style={{ backgroundColor: tone }}
-    />
+    <span aria-hidden="true" className="size-1.5 rounded-full" style={{ backgroundColor: tone }} />
   );
 }
 
@@ -103,14 +113,30 @@ export function ExecutionStatusBadge({
       data-status={status}
     >
       <span
-        className={cn(
-          'size-1.5 rounded-full',
-          status === 'running' && 'animate-pulse',
-        )}
+        className={cn('size-1.5 rounded-full', status === 'running' && 'animate-pulse')}
         style={{ backgroundColor: 'currentColor' }}
         aria-hidden="true"
       />
       {EXECUTION_STATUS_LABELS[status]}
+    </span>
+  );
+}
+
+export function ProjectBindingStatusBadge({
+  status,
+  className,
+}: {
+  status: ProjectBindingStatus;
+  className?: string;
+}): JSX.Element {
+  return (
+    <span
+      className={cn(base, bindingTone[status], className)}
+      data-testid="binding-status-badge"
+      data-status={status}
+    >
+      <Dot />
+      {PROJECT_BINDING_STATUS_LABELS[status]}
     </span>
   );
 }
@@ -135,7 +161,12 @@ export function PriorityBadge({
       data-priority={priority}
     >
       <svg viewBox="0 0 10 10" className="size-2.5" aria-hidden="true">
-        <path d="M2 8V2.5M2 2.5h5L5.6 4 7 5.5H2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+        <path
+          d="M2 8V2.5M2 2.5h5L5.6 4 7 5.5H2"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.3"
+        />
       </svg>
       {showLabel ? TASK_PRIORITY_LABELS[priority] : null}
     </span>

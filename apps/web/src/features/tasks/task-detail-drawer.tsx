@@ -3,38 +3,30 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import type { AgentDto, TaskDetailDto, TaskStatus } from '@raft-lite/contracts';
 import {
+  PROJECT_BINDING_STATUS_LABELS,
   RUNTIME_LABELS,
   TASK_STATUS_LABELS,
   TASK_STATUS_TRANSITIONS,
   isTerminalTaskStatus,
 } from '@raft-lite/contracts';
-import {
-  ArrowUpRight,
-  Ban,
-  Clock3,
-  Play,
-  RotateCcw,
-  Trash2,
-  UserRound,
-} from 'lucide-react';
+import { ArrowUpRight, Ban, Clock3, Play, RotateCcw, Trash2, UserRound } from 'lucide-react';
 import { api, ApiError } from '../../services/api';
 import { queryKeys } from '../../services/query-keys';
-import { useRuntimes, useTask } from '../../hooks/use-raft-data';
+import { useProject, useRuntimes, useTask } from '../../hooks/use-raft-data';
 import { useToast } from '../../providers/toast-provider';
 import { formatDate, formatDuration, formatShortDateTime } from '../../lib/utils';
 import { Avatar } from '../../components/ui/avatar';
 import { Button } from '../../components/ui/button';
 import { ConfirmDialog } from '../../components/ui/confirm-dialog';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from '../../components/ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '../../components/ui/dialog';
 import { EmptyState, ErrorState } from '../../components/ui/feedback';
 import { Label } from '../../components/ui/field';
 import { Select } from '../../components/ui/input';
-import { ExecutionStatusBadge, PriorityBadge, TaskStatusBadge } from '../../components/ui/status-badge';
+import {
+  ExecutionStatusBadge,
+  PriorityBadge,
+  TaskStatusBadge,
+} from '../../components/ui/status-badge';
 
 type PendingAction = 'status' | 'assign' | 'start' | 'cancel' | 'delete' | null;
 
@@ -94,6 +86,23 @@ export function TaskDetailDrawer({
   );
   const runtimeAvailability =
     runtimesQuery.data?.items.find((item) => item.runtime === assignee?.runtime) ?? null;
+  const projectQuery = useProject(task?.projectId ?? null, open && requiresRunner && Boolean(task));
+  const repositoryBinding =
+    projectQuery.data?.bindings.find((binding) => binding.computerId === assignee?.computerId) ??
+    null;
+  const bindingBlockedReason = !requiresRunner
+    ? null
+    : projectQuery.isLoading
+      ? 'Checking the repository binding…'
+      : projectQuery.isError
+        ? 'The repository binding could not be checked'
+        : !repositoryBinding
+          ? 'This project has no repository binding on the assigned computer'
+          : repositoryBinding.status !== 'ready'
+            ? `Repository binding: ${PROJECT_BINDING_STATUS_LABELS[repositoryBinding.status]}. Validate it in Projects before starting a real execution`
+            : repositoryBinding.validatedBindingVersion !== repositoryBinding.bindingVersion
+              ? 'The repository binding changed after validation. Validate it again in Projects'
+              : null;
   const runtimeBlockedReason = !requiresRunner
     ? null
     : runtimesQuery.isLoading
@@ -114,6 +123,7 @@ export function TaskDetailDrawer({
     assignee.status === 'offline' ||
     assignee.status === 'error' ||
     assignee.status === 'busy' ||
+    bindingBlockedReason !== null ||
     runtimeBlockedReason !== null;
 
   const startBlockedReason = !task
@@ -122,7 +132,8 @@ export function TaskDetailDrawer({
       ? 'An execution is already running for this task'
       : !assignee
         ? 'Assign an agent before starting execution'
-        : isTerminalTaskStatus(task.status) || !['todo', 'claimed', 'in_progress'].includes(task.status)
+        : isTerminalTaskStatus(task.status) ||
+            !['todo', 'claimed', 'in_progress'].includes(task.status)
           ? 'Only todo, claimed, or in-progress tasks can start'
           : assignee.status === 'offline'
             ? 'The assigned agent is offline'
@@ -130,7 +141,7 @@ export function TaskDetailDrawer({
               ? 'Reset the assigned agent to Idle first'
               : assignee.status === 'busy'
                 ? 'The assigned agent is busy'
-                : runtimeBlockedReason;
+                : (bindingBlockedReason ?? runtimeBlockedReason);
 
   function invalidate(): void {
     void queryClient.invalidateQueries({ queryKey: queryKeys.tasks.all });
@@ -168,7 +179,9 @@ export function TaskDetailDrawer({
       await api.assignTask(task.id, { agentId: assigneeId || null });
       toast({
         title: 'Assignment saved',
-        description: assigneeId ? 'The agent is now responsible for this task.' : 'The task is now unassigned.',
+        description: assigneeId
+          ? 'The agent is now responsible for this task.'
+          : 'The task is now unassigned.',
         variant: 'success',
       });
       invalidate();
@@ -193,7 +206,11 @@ export function TaskDetailDrawer({
       });
       navigate(`/executions/${execution.id}`);
     } catch (error) {
-      toast({ title: 'Execution could not start', description: actionError(error), variant: 'error' });
+      toast({
+        title: 'Execution could not start',
+        description: actionError(error),
+        variant: 'error',
+      });
     } finally {
       setPending(null);
     }
@@ -208,7 +225,11 @@ export function TaskDetailDrawer({
       toast({ title: 'Task cancelled', variant: 'success' });
       invalidate();
     } catch (error) {
-      toast({ title: 'Task could not be cancelled', description: actionError(error), variant: 'error' });
+      toast({
+        title: 'Task could not be cancelled',
+        description: actionError(error),
+        variant: 'error',
+      });
     } finally {
       setPending(null);
     }
@@ -225,7 +246,11 @@ export function TaskDetailDrawer({
       toast({ title: 'Task deleted', variant: 'success' });
       invalidate();
     } catch (error) {
-      toast({ title: 'Task could not be deleted', description: actionError(error), variant: 'error' });
+      toast({
+        title: 'Task could not be deleted',
+        description: actionError(error),
+        variant: 'error',
+      });
     } finally {
       setPending(null);
     }
@@ -243,7 +268,9 @@ export function TaskDetailDrawer({
           <div className="flex-1 overflow-y-auto">
             <div className="border-b border-line bg-[#fbfaf7] px-5 pb-4 pt-5 pr-14">
               <p className="mb-2 text-[9.5px] font-semibold uppercase tracking-[0.15em] text-faint">
-                {task ? `${task.project.key} · Task ${task.id.slice(-6).toUpperCase()}` : 'Task detail'}
+                {task
+                  ? `${task.project.key} · Task ${task.id.slice(-6).toUpperCase()}`
+                  : 'Task detail'}
               </p>
               {task ? (
                 <>
@@ -263,7 +290,9 @@ export function TaskDetailDrawer({
                 </>
               ) : (
                 <>
-                  <DialogTitle className="text-[18px] font-semibold text-ink">Task details</DialogTitle>
+                  <DialogTitle className="text-[18px] font-semibold text-ink">
+                    Task details
+                  </DialogTitle>
                   <DialogDescription className="sr-only">Loading task details.</DialogDescription>
                 </>
               )}
@@ -285,7 +314,9 @@ export function TaskDetailDrawer({
               <div className="p-5">
                 <ErrorState
                   title="Task could not be loaded"
-                  description={query.error instanceof Error ? query.error.message : 'Please try again.'}
+                  description={
+                    query.error instanceof Error ? query.error.message : 'Please try again.'
+                  }
                   onRetry={() => void query.refetch()}
                   testId="task-detail-error"
                   retryTestId="task-detail-retry-button"
@@ -326,7 +357,9 @@ export function TaskDetailDrawer({
                     </div>
                     <div>
                       <dt className="text-faint">Updated</dt>
-                      <dd className="mt-0.5 font-medium text-ink">{formatShortDateTime(task.updatedAt)}</dd>
+                      <dd className="mt-0.5 font-medium text-ink">
+                        {formatShortDateTime(task.updatedAt)}
+                      </dd>
                     </div>
                     <div>
                       <dt className="text-faint">Executions</dt>
@@ -341,7 +374,8 @@ export function TaskDetailDrawer({
                   </h3>
                   {activeExecution ? (
                     <p className="mt-2.5 rounded-lg bg-accent-soft px-2.5 py-2 text-[11px] leading-4 text-[#456454]">
-                      Workflow state is being managed by the active execution. Cancel the run to stop it.
+                      Workflow state is being managed by the active execution. Cancel the run to
+                      stop it.
                     </p>
                   ) : allowedTransitions.length > 0 ? (
                     <div className="mt-3 space-y-2.5">
@@ -472,7 +506,10 @@ export function TaskDetailDrawer({
                       <div className="mt-2 flex items-center gap-3 text-[10px] text-faint">
                         <span className="inline-flex items-center gap-1">
                           <Clock3 size={10} aria-hidden="true" />
-                          {formatDuration(task.latestExecution.startedAt, task.latestExecution.endedAt)}
+                          {formatDuration(
+                            task.latestExecution.startedAt,
+                            task.latestExecution.endedAt,
+                          )}
                         </span>
                         <span>Started {formatShortDateTime(task.latestExecution.startedAt)}</span>
                       </div>
@@ -501,7 +538,10 @@ export function TaskDetailDrawer({
                       Start execution
                     </Button>
                     {startBlockedReason ? (
-                      <p className="mt-2 text-center text-[10.5px] text-faint" data-testid="execution-start-hint">
+                      <p
+                        className="mt-2 text-center text-[10.5px] text-faint"
+                        data-testid="execution-start-hint"
+                      >
                         {startBlockedReason}
                       </p>
                     ) : (
@@ -511,6 +551,18 @@ export function TaskDetailDrawer({
                           : `Runs on ${RUNTIME_LABELS[assignee?.runtime ?? 'mock']} through the assigned runner.`}
                       </p>
                     )}
+                    {bindingBlockedReason && task ? (
+                      <p className="mt-1 text-center">
+                        <Link
+                          to={`/projects?project=${encodeURIComponent(task.projectId)}`}
+                          onClick={() => onOpenChange(false)}
+                          data-testid="task-project-binding-link"
+                          className="rounded text-[10.5px] font-semibold text-muted underline-offset-2 hover:text-ink hover:underline focus-ring"
+                        >
+                          Open project bindings
+                        </Link>
+                      </p>
+                    ) : null}
                   </div>
                 </section>
 
@@ -519,7 +571,10 @@ export function TaskDetailDrawer({
                     Execution history
                   </h3>
                   {task.executions.length > 0 ? (
-                    <div className="mt-2 divide-y divide-line rounded-xl border border-line" data-testid="task-execution-history">
+                    <div
+                      className="mt-2 divide-y divide-line rounded-xl border border-line"
+                      data-testid="task-execution-history"
+                    >
                       {task.executions.map((execution) => (
                         <Link
                           key={execution.id}
@@ -596,8 +651,8 @@ export function TaskDetailDrawer({
         title="Cancel this task?"
         description={
           <>
-            “{task?.title}” will move to <strong>Cancelled</strong>. Any active Mock execution
-            will stop and the assigned agent will return to Idle.
+            “{task?.title}” will move to <strong>Cancelled</strong>. Any active Mock execution will
+            stop and the assigned agent will return to Idle.
           </>
         }
         confirmLabel="Cancel task"

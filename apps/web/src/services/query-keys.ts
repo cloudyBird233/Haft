@@ -10,6 +10,11 @@ export const queryKeys = {
   computers: ['computers'] as const,
   runtimes: (params: RunnerRuntimeAvailabilityQuery) => ['runtimes', params] as const,
   activities: (limit = 30) => ['activities', limit] as const,
+  projects: {
+    all: ['projects'] as const,
+    list: () => ['projects', 'list'] as const,
+    detail: (id: string) => ['projects', 'detail', id] as const,
+  },
   agents: {
     all: ['agents'] as const,
     list: (filters: AgentListQuery) => ['agents', 'list', filters] as const,

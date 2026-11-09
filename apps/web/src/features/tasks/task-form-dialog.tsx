@@ -1,10 +1,6 @@
 import { useEffect, useState } from 'react';
-import type {
-  AgentDto,
-  CreateTaskInput,
-  ProjectDto,
-  TaskPriority,
-} from '@raft-lite/contracts';
+import { Link } from 'react-router-dom';
+import type { AgentDto, CreateTaskInput, ProjectDto, TaskPriority } from '@raft-lite/contracts';
 import { TASK_PRIORITY_LABELS, createTaskSchema } from '@raft-lite/contracts';
 import { ApiError } from '../../services/api';
 import { Button } from '../../components/ui/button';
@@ -129,7 +125,13 @@ export function TaskFormDialog({
           onSubmit={handleSubmit}
           noValidate
           data-testid="task-form"
-          data-state={submitting ? 'submitting' : formError || Object.keys(errors).length > 0 ? 'error' : 'idle'}
+          data-state={
+            submitting
+              ? 'submitting'
+              : formError || Object.keys(errors).length > 0
+                ? 'error'
+                : 'idle'
+          }
         >
           <DialogBody className="space-y-4">
             {formError ? (
@@ -185,8 +187,31 @@ export function TaskFormDialog({
                     </option>
                   ))}
                 </Select>
+                {projects.length === 0 ? (
+                  <p
+                    className="mt-1.5 text-[11.5px] leading-4 text-faint"
+                    data-testid="task-form-no-projects"
+                  >
+                    No active projects are available.{' '}
+                    <Link
+                      to="/projects"
+                      className="font-semibold text-muted underline-offset-2 hover:text-ink hover:underline"
+                    >
+                      Create a project
+                    </Link>{' '}
+                    before creating a task.
+                  </p>
+                ) : null}
               </Field>
-              <Field label="Assignee" htmlFor="task-assignee" hint={lockAssignment ? 'Assignment is fixed for completed or cancelled tasks.' : 'Optional. Assign now or from task detail.'}>
+              <Field
+                label="Assignee"
+                htmlFor="task-assignee"
+                hint={
+                  lockAssignment
+                    ? 'Assignment is fixed for completed or cancelled tasks.'
+                    : 'Optional. Assign now or from task detail.'
+                }
+              >
                 <Select
                   id="task-assignee"
                   name="assigneeAgentId"

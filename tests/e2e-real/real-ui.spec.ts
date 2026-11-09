@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { expect, test, type APIRequestContext } from '@playwright/test';
 import type { RuntimeAvailabilityDto } from '@raft-lite/contracts';
 import { RaftTestFactory } from '../fixtures/test-data-factory';
+import { ensureReadyRepositoryBinding } from '../support/repository';
 import { gotoPath } from '../support/app';
 import { byTestId } from '../support/ui-contract';
 
@@ -83,6 +84,8 @@ test.describe('Real Codex UI execution (opt-in)', () => {
     );
     if (!capability?.available) return;
 
+    await ensureReadyRepositoryBinding(factory, { path: PROJECT_ROOT });
+
     const baselineHead = git(['rev-parse', 'HEAD']);
     const baselineStatus = git(['status', '--porcelain']);
     const baselineCommits = git(['rev-list', '--count', 'HEAD']);
@@ -103,9 +106,7 @@ test.describe('Real Codex UI execution (opt-in)', () => {
     await byTestId(page, 'agentForm.computer').selectOption(COMPUTER_ID);
     await byTestId(page, 'agentForm.submit').click();
     await expect(byTestId(page, 'agentForm.dialog')).toHaveCount(0);
-    await expect(
-      byTestId(page, 'agents.card').filter({ hasText: agentName }),
-    ).toBeVisible();
+    await expect(byTestId(page, 'agents.card').filter({ hasText: agentName })).toBeVisible();
 
     const agent = (await factory.listAgents()).items.find((item) => item.name === agentName);
     expect(agent, 'The UI must persist the Codex agent').toBeDefined();
@@ -134,9 +135,7 @@ test.describe('Real Codex UI execution (opt-in)', () => {
     const taskCard = byTestId(page, 'taskBoard.card').filter({ hasText: taskTitle });
     await expect(taskCard).toHaveAttribute('data-status', 'todo');
 
-    const createdTask = (await factory.listTasks()).items.find(
-      (item) => item.title === taskTitle,
-    );
+    const createdTask = (await factory.listTasks()).items.find((item) => item.title === taskTitle);
     expect(createdTask, 'The UI must persist the task').toBeDefined();
     if (!createdTask) return;
     expect(createdTask.assignee).toBeNull();
@@ -176,10 +175,7 @@ test.describe('Real Codex UI execution (opt-in)', () => {
     await expect(banner).toHaveAttribute('data-status', 'completed', {
       timeout: 540_000,
     });
-    await expect(byTestId(page, 'execution.progress')).toHaveAttribute(
-      'aria-valuenow',
-      '100',
-    );
+    await expect(byTestId(page, 'execution.progress')).toHaveAttribute('aria-valuenow', '100');
     await expect(byTestId(page, 'execution.stop')).toHaveCount(0);
 
     // 4. Verify the persisted execution, task and agent state through the API.
@@ -220,9 +216,7 @@ test.describe('Real Codex UI execution (opt-in)', () => {
       'data-truncated',
       'false',
     );
-    await expect(page.getByTestId('execution-diff-branch')).toContainText(
-      `haft/${executionId}`,
-    );
+    await expect(page.getByTestId('execution-diff-branch')).toContainText(`haft/${executionId}`);
     await expect(page.getByTestId('execution-diff-base')).toHaveText(baselineHead);
 
     // 6. Prove the worktree has the change and the primary checkout does not.

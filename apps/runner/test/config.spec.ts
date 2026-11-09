@@ -52,6 +52,31 @@ describe('runner configuration', () => {
     expect(() => loadConfig(['--mode', 'shell'], {})).toThrow(/Unsupported runner mode/);
   });
 
+  it('parses allowed repository roots from env JSON and repeated CLI flags', () => {
+    const fromEnv = loadConfig([], {
+      HAFT_RUNNER_ALLOWED_ROOTS: JSON.stringify(['C:/repos', 'D:/work']),
+    });
+    expect(fromEnv.allowedRepositoryRoots).toEqual([resolve('C:/repos'), resolve('D:/work')]);
+
+    const fromCli = loadConfig(
+      ['--allowed-root', 'C:/repos/one', '--allowed-root', 'C:/repos/two'],
+      {},
+    );
+    expect(fromCli.allowedRepositoryRoots).toEqual([
+      resolve('C:/repos/one'),
+      resolve('C:/repos/two'),
+    ]);
+    expect(loadConfig([], {}).allowedRepositoryRoots).toEqual([]);
+
+    expect(() => loadConfig([], { HAFT_RUNNER_ALLOWED_ROOTS: 'not json' })).toThrow(
+      /HAFT_RUNNER_ALLOWED_ROOTS/,
+    );
+    expect(() => loadConfig([], { HAFT_RUNNER_ALLOWED_ROOTS: '[]' })).toThrow(
+      /HAFT_RUNNER_ALLOWED_ROOTS/,
+    );
+    expect(() => loadConfig(['--allowed-root', '  '], {})).toThrow(/allowed-root/);
+  });
+
   it('defaults the fake runtime list to codex and opencode only', () => {
     const config = loadConfig([], {});
     expect(config.fakeRuntimes).toEqual(['codex', 'opencode']);

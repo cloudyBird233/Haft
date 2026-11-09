@@ -38,7 +38,12 @@ export default tseslint.config(
   {
     // Node utility scripts are plain ESM, so they need Node globals rather than
     // the TypeScript project settings above.
-    files: ['apps/api/scripts/**/*.mjs', 'tests/e2e-real/**/*.mjs', 'scripts/**/*.mjs'],
+    files: [
+      'apps/api/scripts/**/*.mjs',
+      'tests/e2e/**/*.mjs',
+      'tests/e2e-real/**/*.mjs',
+      'scripts/**/*.mjs',
+    ],
     languageOptions: {
       globals: {
         ...globals.node,

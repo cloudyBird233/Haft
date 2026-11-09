@@ -1,11 +1,7 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import {
-  HttpStatus,
-  Injectable,
-  type OnModuleDestroy,
-  type OnModuleInit,
-} from '@nestjs/common';
+import { HttpStatus, Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import type {
+  RepositoryValidationPayload,
   RunnerCapabilities,
   RunnerEnvelope,
   RunnerInboundMessage,
@@ -45,10 +41,28 @@ export interface RunnerConnectionInfo {
   connectedAt: Date;
 }
 
+export interface RepositoryValidationRequest {
+  runnerId: string;
+  requestId: string;
+  projectId: string;
+  computerId: string;
+  bindingId: string;
+  bindingVersion: number;
+  path: string;
+}
+
+interface PendingRepositoryValidation {
+  request: RepositoryValidationRequest;
+  resolve: (payload: RepositoryValidationPayload) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000;
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 45_000;
 const START_ACCEPT_TIMEOUT_MS = 20_000;
 const DEFAULT_RECONNECT_GRACE_MS = 60_000;
+const DEFAULT_REPOSITORY_VALIDATION_TIMEOUT_MS = 20_000;
 
 /**
  * Owns runner identity, connection state and the server side of execution
@@ -70,6 +84,7 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
       timer: NodeJS.Timeout;
     }
   >();
+  private readonly pendingValidations = new Map<string, PendingRepositoryValidation>();
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private readonly heartbeatTimeoutMs = Math.max(
     10_000,
@@ -78,6 +93,13 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
   private readonly reconnectGraceMs = Math.max(
     5_000,
     Number(process.env.HAFT_RUNNER_RECONNECT_GRACE_MS ?? DEFAULT_RECONNECT_GRACE_MS),
+  );
+  private readonly repositoryValidationTimeoutMs = Math.max(
+    5_000,
+    Number(
+      process.env.HAFT_RUNNER_REPOSITORY_VALIDATION_TIMEOUT_MS ??
+        DEFAULT_REPOSITORY_VALIDATION_TIMEOUT_MS,
+    ),
   );
 
   constructor(
@@ -135,6 +157,11 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
       pending.reject(new Error('Runner registry is shutting down'));
     }
     this.pendingStarts.clear();
+    for (const pending of this.pendingValidations.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('Runner registry is shutting down'));
+    }
+    this.pendingValidations.clear();
     this.connections.clear();
     this.executionListeners.clear();
   }
@@ -305,9 +332,19 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
       where: { id: runnerId },
       data: { status: 'offline', disconnectedAt: now },
     });
+    this.rejectPendingValidations(
+      runnerId,
+      new AppException(
+        'RUNNER_OFFLINE',
+        'The runner disconnected before it answered the repository validation',
+        HttpStatus.CONFLICT,
+        { runnerId },
+      ),
+    );
     this.logger.warn({
       eventType: 'runner.disconnected',
-      message: 'Runner disconnected; running executions stay alive during the recovery grace window',
+      message:
+        'Runner disconnected; running executions stay alive during the recovery grace window',
       runnerId,
       status: 'offline',
     });
@@ -352,6 +389,7 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
           runtimes: payload.capabilities.runtimes,
           projectIds: payload.capabilities.projectIds,
           maxConcurrentExecutions: maxConcurrent,
+          features: payload.capabilities.features ?? [],
         }),
         maxConcurrentExecutions: maxConcurrent,
         status: 'online',
@@ -418,6 +456,8 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
       await this.heartbeat(runnerId, message.payload);
     } else if (message.type === 'runner.snapshot') {
       await this.reconcileSnapshot(runnerId, message.payload);
+    } else if (message.type === 'repository.validation') {
+      this.handleRepositoryValidation(runnerId, message.payload);
     } else if (message.type === 'execution.accepted') {
       const key = pendingKey(runnerId, message.payload.executionId);
       const pending = this.pendingStarts.get(key);
@@ -613,6 +653,84 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
     );
   }
 
+  /**
+   * Dispatches one repository validation request and waits for the response
+   * carrying the same requestId. The caller owns persistence and must only set
+   * a binding to `ready` from the returned payload.
+   */
+  async dispatchRepositoryValidation(
+    input: RepositoryValidationRequest,
+  ): Promise<RepositoryValidationPayload> {
+    if (!this.isConnected(input.runnerId)) {
+      throw new AppException(
+        'RUNNER_OFFLINE',
+        'The runner is offline; repository validation was not dispatched',
+        HttpStatus.CONFLICT,
+        { runnerId: input.runnerId },
+      );
+    }
+    const key = validationKey(input.runnerId, input.requestId);
+    if (this.pendingValidations.has(key)) {
+      throw new AppException(
+        'STALE_REPOSITORY_VALIDATION',
+        'This repository validation request is already pending',
+        HttpStatus.CONFLICT,
+        { requestId: input.requestId },
+      );
+    }
+
+    const response = new Promise<RepositoryValidationPayload>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingValidations.delete(key);
+        reject(
+          new AppException(
+            'REPOSITORY_VALIDATION_TIMEOUT',
+            'The runner did not answer the repository validation request in time',
+            HttpStatus.GATEWAY_TIMEOUT,
+            {
+              runnerId: input.runnerId,
+              requestId: input.requestId,
+              timeoutMs: this.repositoryValidationTimeoutMs,
+            },
+          ),
+        );
+      }, this.repositoryValidationTimeoutMs);
+      timer.unref();
+      this.pendingValidations.set(key, {
+        request: input,
+        resolve,
+        reject,
+        timer,
+      });
+    });
+
+    const sent = this.transport?.send(
+      input.runnerId,
+      this.envelope(input.runnerId, 'repository.validate', {
+        requestId: input.requestId,
+        projectId: input.projectId,
+        computerId: input.computerId,
+        bindingId: input.bindingId,
+        bindingVersion: input.bindingVersion,
+        path: input.path,
+      }),
+    );
+    if (!sent) {
+      const pending = this.pendingValidations.get(key);
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingValidations.delete(key);
+      }
+      throw new AppException(
+        'RUNNER_OFFLINE',
+        'The runner disconnected before repository validation was sent',
+        HttpStatus.CONFLICT,
+        { runnerId: input.runnerId },
+      );
+    }
+    return response;
+  }
+
   async list(): Promise<ReturnType<typeof toRunnerDto>[]> {
     const runners = await this.prisma.runner.findMany({
       include: { computer: true },
@@ -673,7 +791,8 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
       if (connectedAt && execution.createdAt.getTime() >= connectedAt.getTime()) {
         this.logger.info({
           eventType: 'runner.execution_pending',
-          message: 'Execution started after this runner connection; keeping it while the snapshot settles',
+          message:
+            'Execution started after this runner connection; keeping it while the snapshot settles',
           runnerId,
           executionId: execution.id,
           status: 'running',
@@ -703,6 +822,57 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private handleRepositoryValidation(runnerId: string, payload: RepositoryValidationPayload): void {
+    const key = validationKey(runnerId, payload.requestId);
+    const pending = this.pendingValidations.get(key);
+    if (!pending) {
+      this.logger.warn({
+        eventType: 'runner.validation_unmatched',
+        message: 'Runner sent a repository validation response with no pending request',
+        runnerId,
+        status: 'warning',
+        requestId: payload.requestId,
+      });
+      return;
+    }
+    const request = pending.request;
+    const matches =
+      payload.projectId === request.projectId &&
+      payload.computerId === request.computerId &&
+      payload.bindingId === request.bindingId &&
+      payload.bindingVersion === request.bindingVersion;
+    clearTimeout(pending.timer);
+    this.pendingValidations.delete(key);
+    if (!matches) {
+      this.logger.warn({
+        eventType: 'runner.validation_mismatch',
+        message: 'Runner repository validation response did not match the request',
+        runnerId,
+        status: 'warning',
+        requestId: payload.requestId,
+      });
+      pending.reject(
+        new AppException(
+          'STALE_REPOSITORY_VALIDATION',
+          'Runner repository validation response did not match the request',
+          HttpStatus.CONFLICT,
+          { requestId: payload.requestId },
+        ),
+      );
+      return;
+    }
+    pending.resolve(payload);
+  }
+
+  private rejectPendingValidations(runnerId: string, error: Error): void {
+    for (const [key, pending] of this.pendingValidations) {
+      if (pending.request.runnerId !== runnerId) continue;
+      clearTimeout(pending.timer);
+      this.pendingValidations.delete(key);
+      pending.reject(error);
+    }
+  }
+
   private async ownsExecution(runnerId: string, executionId: string): Promise<boolean> {
     const execution = await this.prisma.execution.findUnique({
       where: { id: executionId },
@@ -726,9 +896,7 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
       where: { id: executionId },
       select: { runnerId: true, status: true },
     });
-    return Boolean(
-      execution && execution.runnerId === runnerId && execution.status === 'running',
-    );
+    return Boolean(execution && execution.runnerId === runnerId && execution.status === 'running');
   }
 
   private scheduleRecoveryTimeout(runnerId: string): void {
@@ -846,6 +1014,10 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
 
 function pendingKey(runnerId: string, executionId: string): string {
   return `${runnerId}:${executionId}`;
+}
+
+function validationKey(runnerId: string, requestId: string): string {
+  return `${runnerId}:validation:${requestId}`;
 }
 
 function hashToken(token: string): string {

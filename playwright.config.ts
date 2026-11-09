@@ -9,6 +9,7 @@ const RUNNER_HEALTH_URL =
   process.env.E2E_RUNNER_HEALTH_URL ?? `http://127.0.0.1:${RUNNER_HEALTH_PORT}`;
 const RUNNER_BOOTSTRAP_TOKEN =
   process.env.E2E_RUNNER_BOOTSTRAP_TOKEN ?? 'e2e-runner-bootstrap-token';
+const E2E_REPOSITORY_ROOT = join(process.cwd(), 'test-results', 'e2e-repository');
 const CI_TEST_REPORT_DIR = process.env.CI_TEST_REPORT_DIR;
 
 /**
@@ -112,7 +113,7 @@ export default defineConfig({
     // Deterministic Fake Runner: proves the Socket.IO protocol, server-side
     // persistence and the UI loop without invoking a real model or CLI.
     {
-      command: 'pnpm --filter @raft-lite/runner start',
+      command: 'node tests/e2e/prepare-repository.mjs && pnpm --filter @raft-lite/runner start',
       url: `${RUNNER_HEALTH_URL}/ready`,
       reuseExistingServer: !process.env.CI,
       timeout: 120_000,
@@ -126,6 +127,7 @@ export default defineConfig({
         HAFT_RUNNER_RECOVERY_ROOT: join(process.cwd(), 'test-results', '.runner', 'recovery'),
         HAFT_RUNNER_MODE: 'fake',
         HAFT_RUNNER_PROJECTS: JSON.stringify({ project_demo: process.cwd() }),
+        HAFT_RUNNER_ALLOWED_ROOTS: JSON.stringify([E2E_REPOSITORY_ROOT]),
         HAFT_RUNNER_HEALTH_PORT: RUNNER_HEALTH_PORT,
       },
     },
