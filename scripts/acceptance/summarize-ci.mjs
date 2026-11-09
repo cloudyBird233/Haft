@@ -48,13 +48,24 @@ function pnpmVersion() {
   }
 }
 
-function commitSha() {
-  if (process.env.GITHUB_SHA) return process.env.GITHUB_SHA;
-  try {
-    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim();
-  } catch {
-    return 'unknown';
+function commitInfo() {
+  let tested = process.env.GITHUB_SHA;
+  if (!tested) {
+    try {
+      tested = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      }).trim();
+    } catch {
+      tested = 'unknown';
+    }
   }
+  return {
+    head: process.env.PR_HEAD_SHA || tested,
+    tested,
+    ref: process.env.GITHUB_REF ?? null,
+    headRef: process.env.PR_HEAD_REF ?? null,
+  };
 }
 
 function countVitestReport(file) {
@@ -239,7 +250,8 @@ if (missing.length > 0) status = 'incomplete';
 else if (layers.some((layer) => layer.success === false || layer.failed > 0)) status = 'failed';
 else if (totals.total === 0) status = 'empty';
 
-const sha = commitSha();
+const commit = commitInfo();
+const sha = commit.head;
 const repository = process.env.GITHUB_REPOSITORY ?? 'cloudyBird233/Haft';
 const serverUrl = process.env.GITHUB_SERVER_URL ?? 'https://github.com';
 const runId = process.env.GITHUB_RUN_ID ?? '';
@@ -251,7 +263,9 @@ const summary = {
   generatedAt,
   commit: {
     sha,
-    ref: process.env.GITHUB_REF ?? null,
+    testedSha: commit.tested,
+    ref: commit.ref,
+    headRef: commit.headRef,
     repository,
   },
   workflow: {
@@ -297,7 +311,9 @@ writeFileSync(
       schemaVersion: 1,
       generatedAt,
       commitSha: sha,
-      ref: process.env.GITHUB_REF ?? null,
+      testedCommitSha: commit.tested,
+      ref: commit.ref,
+      headRef: commit.headRef,
       workflow: summary.workflow,
       environment: summary.environment,
       status,
@@ -319,6 +335,7 @@ const lines = [];
 lines.push('## Haft CI test summary');
 lines.push('');
 lines.push(`- Commit: \`${sha}\``);
+if (commit.tested !== sha) lines.push(`- Tested merge commit: \`${commit.tested}\``);
 if (summary.workflow.url) lines.push(`- Workflow run: ${summary.workflow.url}`);
 lines.push(`- Event: \`${summary.workflow.event ?? 'unknown'}\``);
 lines.push(`- Generated: ${generatedAt}`);

@@ -310,6 +310,9 @@ jobs:
 
       - name: Generate CI report
         if: always()
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: node scripts/acceptance/summarize-ci.mjs --artifacts ci-artifacts
 
       - name: Enforce required jobs

@@ -547,6 +547,8 @@ fails, the job reports `BLOCKED`; it never reports `PASS`.
 - `scripts/acceptance/summarize-ci.mjs` writes `test-summary.json`,
   `test-summary.md`, and `metadata.json`, appends the Markdown to the GitHub job
   summary, and fails when a required layer/platform report is missing or failed.
+  On `pull_request`, `commit.sha` is the PR head and `commit.testedSha` is the
+  merge commit that Actions actually checked out.
 - Artifacts: `unit-<os>`, `e2e-playwright`, `e2e-reports`, `static-report`,
   `security-report`, and `ci-summary`, retained for 14 days and uploaded with
   `if: always()`.
