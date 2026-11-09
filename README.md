@@ -10,8 +10,8 @@ The repository is a complete, runnable product slice rather than a static protot
 
 - **Agents**: create, edit, filter, inspect, and delete AI workers. Agent details show runtime configuration, current task, and execution history.
 - **Tasks**: create, edit, search, filter, assign, transition through a validated state machine, cancel, and delete tasks on a five-lane Kanban board.
-- **Executions**: start a task with one click, watch progress and streamed logs, follow completion or failure, and cancel a running run.
-- **Agent Runner**: a separate Node process pairs with the API over a versioned Socket.IO protocol, owns local CLI processes and Git worktrees, acknowledges and replays logs, confirms cancellations, and reports Git evidence. Fake mode is deterministic; real mode executes Codex or OpenCode.
+- **Executions**: start a task with one click, watch progress and streamed logs, inspect the persisted unified Git diff in a Changes tab, follow completion or failure, and cancel a running run.
+- **Agent Runner**: a separate Node process pairs with the API over a versioned Socket.IO protocol, owns local CLI processes and Git worktrees, acknowledges and replays logs from a durable spool, confirms cancellations, survives crashes with a recovery journal, and reports full Git evidence/diffs. Fake mode is deterministic; real mode executes Codex or OpenCode.
 - **Dashboard**: workspace metrics, recent tasks, activity feed, agent status, and runtime status.
 - **Realtime**: task, agent, execution, log, and activity events are pushed over Socket.IO; TanStack Query caches are invalidated and updated live.
 - **Testability**: stable `data-testid` attributes, a machine-readable UI interaction contract, deterministic seed data, a public API-backed test-data factory, and test-only runtime controls.
@@ -38,10 +38,10 @@ apps/
     src/modules/       agents, tasks, executions, runtime, runners, events, workspace, test
     test/              API integration and runner protocol tests
   runner/              Haft Agent Runner (independent process)
-    src/               protocol client, fake/real executors, CLI parsers, Git worktrees
+    src/               protocol client, fake/real executors, CLI parsers, Git worktrees, recovery journal/spool
   web/                 React/Vite SPA
     src/pages/         dashboard, agents, tasks, execution, not-found
-    src/features/      agent/task forms, drawers, board, log panel
+    src/features/      agent/task forms, drawers, board, log/changes panels
     src/test/          component tests
 packages/
   contracts/           shared Zod schemas, constants, DTOs, runner protocol v1

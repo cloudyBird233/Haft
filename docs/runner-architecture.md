@@ -111,12 +111,14 @@ project allowlist and CLI path are runner configuration.
 - Maintains the Socket.IO connection, heartbeat, and reconnect loop.
 - Registers capabilities after every connect, reports interrupted executions
   found in the journal, then sends a snapshot of genuine in-memory sessions.
-- Appends every log entry to the durable spool before sending it; acks clean up
-  the spool and pending buffer.
+- Awaits the durable spool append before sending each log entry. A per-execution
+  queue keeps logs and terminal events in order; acks clean up the spool and
+  pending buffer.
 - Replays the merged spool + pending entries after reconnect, deduplicated by
   sequence.
 - Dispatches server messages to the executor and sends executor callbacks back.
-- Awaits executor shutdown and flushes recovery evidence before disconnecting.
+- Awaits executor shutdown, drains the protocol event queue, and flushes recovery
+  evidence before disconnecting.
 - Re-pairs once with the bootstrap token if the cached token is rejected.
 
 ### Executors
@@ -153,8 +155,8 @@ interface ShutdownResult {
 6. Build argv, spawn with `shell: false`, write the prompt to stdin.
 7. Attach the child `close` listener, then persist PID, process start marker, and
    process group.
-8. Emit `running`, stream parsed logs and progress; append every log to the
-   spool before sending it and update the journal sequence.
+8. Emit `running`, stream parsed logs and progress; await every durable spool
+   append before sending the log, and update the journal sequence.
 9. On exit, collect the full Git diff and emit `finalizing` → terminal event.
 10. Mark the journal terminal and clean up the worktree if
     `HAFT_RUNNER_KEEP_WORKTREES=0`.
@@ -236,6 +238,8 @@ temp file + atomic rename; corrupt files are quarantined.
 On startup, `ExecutionRecovery.scan()` verifies each `active` journal:
 
 - no live PID → report `RUNNER_INTERRUPTED`, preserve worktree and logs;
+- recorded worktree missing → say so in the report; nothing is deleted or
+  repaired;
 - different start marker → PID reuse, leave the process untouched;
 - command line/process group mismatch → ownership mismatch, leave it untouched;
 - verified identity → terminate the whole tree and wait for the actual exit;
@@ -257,7 +261,7 @@ never starts a replacement execution. See
   files, plus base/head commit, changed-file count, diff stat, and porcelain
   status. Untracked files use `git diff --no-index` so the index is untouched.
   The patch is capped at 1 MiB and marked `diffTruncated` when cut. The API
-  persists the patch as an `ExecutionArtifact` of kind `diff`, separate from
+  persists the patch as an `ExecutionArtifact` of kind `git-diff`, separate from
   `ExecutionDto`, and the browser loads it lazily through
   `GET /api/executions/:id/diff`.
 - **No shell.** CLI and Git calls use `spawn(binary, args, { shell: false })`.

@@ -21,6 +21,7 @@ erDiagram
     AGENT ||--o{ EXECUTION : performs
     RUNNER ||--o{ EXECUTION : executes
     EXECUTION ||--o{ EXECUTION_LOG : emits
+    EXECUTION ||--o{ EXECUTION_ARTIFACT : stores
     TASK ||--o{ ACTIVITY : relates
     AGENT ||--o{ ACTIVITY : relates
     EXECUTION ||--o{ ACTIVITY : relates
@@ -161,6 +162,10 @@ Indexed by `workspaceId`, `status`, and `assigneeAgentId`.
 | `summary`                  | String?      | Final CLI summary or deterministic fake summary                     |
 | `branchName`, `baseCommit` | String?      | Git evidence reported by the runner                                 |
 | `headCommit`               | String?      | Head after the CLI finished; may equal `baseCommit`                 |
+| `changedFiles`             | Int          | Changed-file count from the terminal Git payload                    |
+| `diffStat`                 | String       | `git diff --stat` text plus untracked-file names; default `""`      |
+| `gitStatus`                | String       | Bounded `git status --porcelain=v1` snapshot; default `""`          |
+| `diffTruncated`            | Boolean      | The stored patch was cut at `EXECUTION_DIFF_MAX_BYTES`              |
 | `lastRunnerSeq`            | Int          | Highest runner log sequence applied                                 |
 | `startedAt`                | DateTime     | Default now                                                         |
 | `endedAt`                  | DateTime?    | Set on terminal states                                              |
@@ -204,6 +209,25 @@ The two sequence spaces are deliberate: `runnerSeq` is the runner's monotonic
 sequence (1, 2, 3, ...) and is used only for deduplication and acknowledgement;
 `seq` is assigned by the server so server-generated logs (phase messages,
 failure summaries, cancellation notes) share one ordered stream with CLI output.
+
+### ExecutionArtifact
+
+Large payloads are kept out of `Execution` list/detail responses and stored once
+per `(executionId, kind)`.
+
+| Column        | Type           | Notes                                             |
+| ------------- | -------------- | ------------------------------------------------- |
+| `id`          | String, PK     |                                                   |
+| `executionId` | FK → Execution | Cascade delete                                    |
+| `kind`        | String         | `git-diff` for the unified patch                  |
+| `content`     | String         | Unified diff text, capped at 1 MiB                |
+| `byteSize`    | Int            | UTF-8 byte size of `content`                      |
+| `truncated`   | Boolean        | Whether the patch was cut at the size limit       |
+| `createdAt`, `updatedAt` | DateTime |                                         |
+
+Unique on `(executionId, kind)` and indexed by `executionId`. The artifact is
+written from the owning runner's terminal event; duplicate terminal messages are
+idempotent and another runner cannot attach Git evidence to it.
 
 ### Activity
 
@@ -309,6 +333,9 @@ Runner stays connected across tests.
     (adds `Runner`, execution phase/progress/Git fields, and structured log
     columns; existing executions are copied and terminal statuses are mapped to
     terminal phases).
+  - `apps/api/prisma/migrations/20261107160000_execution_git_diff/migration.sql`
+    (adds `changedFiles`, `diffStat`, `gitStatus`, `diffTruncated`, and the
+    `ExecutionArtifact` table; defaults keep existing rows valid).
 - Development database: `apps/api/prisma/dev.db` (`DATABASE_URL=file:./dev.db`).
 - API test database: `apps/api/prisma/test.db` (`apps/api/.env.test`).
 - E2E database: `apps/api/prisma/e2e.db` (`apps/api/.env.e2e`).

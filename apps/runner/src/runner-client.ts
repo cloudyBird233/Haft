@@ -13,6 +13,7 @@ import { probeRuntimeCapabilities } from './cli-probe';
 import type { ExecutorCallbacks, RunnerExecutor, ShutdownResult } from './executor';
 import { FakeExecutor } from './fake-executor';
 import { log } from './logger';
+import { ProtocolEventQueue } from './protocol-event-queue';
 import { RealExecutor } from './real-executor';
 import { ExecutionRecovery, type RecoveredExecution } from './recovery';
 import { TokenStore } from './token-store';
@@ -46,6 +47,12 @@ export class RunnerClient {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private heartbeatIntervalMs = 10_000;
   private startedAt = Date.now();
+  /**
+   * Per-execution protocol queue. Log events await their durable spool append
+   * before the socket send, and terminal events wait for every preceding log so
+   * the server can never observe delivery ahead of durability.
+   */
+  private readonly events = new ProtocolEventQueue();
 
   constructor(options: RunnerClientOptions) {
     this.config = options.config;
@@ -54,52 +61,64 @@ export class RunnerClient {
     this.recovery = new ExecutionRecovery(this.config.recoveryRoot);
     const callbacks: ExecutorCallbacks = {
       onPhase: (session, phase, message) => {
-        this.send('execution.phase', {
-          executionId: session.executionId,
-          phase,
-          message: message ?? null,
+        this.events.enqueue(session.executionId, () => {
+          this.send('execution.phase', {
+            executionId: session.executionId,
+            phase,
+            message: message ?? null,
+          });
         });
       },
       onLog: (session, entry) => {
-        // Append before sending: a crash between these two calls leaves a
-        // durable spool entry that can be replayed, never a silent gap.
-        void this.recovery.appendLog(session.executionId, entry);
-        this.send('execution.log', {
-          executionId: session.executionId,
-          entries: [entry],
+        // Await the durable append before sending: a crash between these two
+        // steps leaves a spool entry that can be replayed, never a silent gap.
+        this.events.enqueue(session.executionId, async () => {
+          await this.recovery.appendLog(session.executionId, entry);
+          this.send('execution.log', {
+            executionId: session.executionId,
+            entries: [entry],
+          });
         });
       },
       onProgress: (session, progress, step, progressMode) => {
-        this.send('execution.progress', {
-          executionId: session.executionId,
-          progress,
-          step,
-          progressMode: progressMode ?? 'determinate',
+        this.events.enqueue(session.executionId, () => {
+          this.send('execution.progress', {
+            executionId: session.executionId,
+            progress,
+            step,
+            progressMode: progressMode ?? 'determinate',
+          });
         });
       },
       onCompleted: (session, payload) => {
-        this.send('execution.completed', {
-          executionId: session.executionId,
-          exitCode: payload.exitCode,
-          summary: payload.summary,
-          git: payload.git,
+        this.events.enqueue(session.executionId, () => {
+          this.send('execution.completed', {
+            executionId: session.executionId,
+            exitCode: payload.exitCode,
+            summary: payload.summary,
+            git: payload.git,
+          });
         });
       },
       onFailed: (session, payload) => {
-        this.send('execution.failed', {
-          executionId: session.executionId,
-          reason: payload.reason,
-          exitCode: payload.exitCode,
-          summary: payload.summary,
-          git: payload.git,
+        this.events.enqueue(session.executionId, () => {
+          this.send('execution.failed', {
+            executionId: session.executionId,
+            reason: payload.reason,
+            exitCode: payload.exitCode,
+            summary: payload.summary,
+            git: payload.git,
+          });
         });
       },
       onCancelled: (session, payload) => {
-        this.send('execution.cancelled', {
-          executionId: session.executionId,
-          reason: payload.reason,
-          exitCode: payload.exitCode,
-          git: payload.git,
+        this.events.enqueue(session.executionId, () => {
+          this.send('execution.cancelled', {
+            executionId: session.executionId,
+            reason: payload.reason,
+            exitCode: payload.exitCode,
+            git: payload.git,
+          });
         });
       },
     };
@@ -165,8 +184,10 @@ export class RunnerClient {
         forced: result.forced,
       });
     }
-    // Terminal events may still be in the log spool queue when the last
-    // session finalizes; make the recovery evidence durable before exit.
+    // Log appends and the terminal event travel through the per-execution
+    // queue. Drain it so the last log is durable and delivered before the
+    // socket closes.
+    await this.events.drain();
     await this.recovery.spool.flush();
     await this.recovery.journal.flushAll();
     if (this.socket) {

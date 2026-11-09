@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import type {
   ExecutionPhase,
   ExecutionStartMessage,
@@ -30,14 +30,30 @@ import {
   errorMessage,
   resolveExecutable,
   terminateProcess,
+  type ResolvedExecutable,
 } from './process-utils';
-import { inspectProcess } from './process-identity';
+import { inspectProcess, type ProcessIdentity } from './process-identity';
 import type { ExecutionRecovery } from './recovery';
 import type { ExecutionJournalPatch } from './execution-journal';
 
 const MAX_PENDING_LOGS = 10_000;
 const CANCEL_GRACE_MS = 5_000;
 const TERMINAL_FALLBACK_MS = 15_000;
+const SHUTDOWN_FORCE_WAIT_MS = 5_000;
+
+/**
+ * Seams for unit tests. Production always uses the Node process primitives and
+ * the real Git manager; tests can inject a deterministic child process without
+ * starting a CLI or a real worktree.
+ */
+export interface RealExecutorDependencies {
+  resolveExecutable(command: string): Promise<ResolvedExecutable>;
+  spawnProcess(command: string, args: readonly string[], options: SpawnOptions): ChildProcess;
+  inspectProcess(pid: number): Promise<ProcessIdentity | null>;
+  terminateProcess(child: ChildProcess, force?: boolean): Promise<void>;
+  git: Pick<GitWorktreeManager, 'prepare' | 'collect' | 'cleanup'>;
+  shutdownForceWaitMs: number;
+}
 
 interface RealSession extends RunnerSessionView {
   taskTitle: string;
@@ -85,14 +101,26 @@ class RunnerFailure extends Error {
  */
 export class RealExecutor implements RunnerExecutor {
   private readonly sessions = new Map<string, RealSession>();
-  private readonly git: GitWorktreeManager;
+  private readonly git: Pick<GitWorktreeManager, 'prepare' | 'collect' | 'cleanup'>;
+  private readonly resolveExecutable: RealExecutorDependencies['resolveExecutable'];
+  private readonly spawnProcess: RealExecutorDependencies['spawnProcess'];
+  private readonly inspectProcess: RealExecutorDependencies['inspectProcess'];
+  private readonly terminateProcess: RealExecutorDependencies['terminateProcess'];
+  private readonly shutdownForceWaitMs: number;
 
   constructor(
     private readonly config: RunnerConfig,
     private readonly callbacks: ExecutorCallbacks,
     private readonly recovery?: ExecutionRecovery,
+    dependencies: Partial<RealExecutorDependencies> = {},
   ) {
-    this.git = new GitWorktreeManager(config);
+    this.git = dependencies.git ?? new GitWorktreeManager(config);
+    this.resolveExecutable = dependencies.resolveExecutable ?? resolveExecutable;
+    this.spawnProcess = dependencies.spawnProcess ?? spawn;
+    this.inspectProcess = dependencies.inspectProcess ?? inspectProcess;
+    this.terminateProcess = dependencies.terminateProcess ?? terminateProcess;
+    this.shutdownForceWaitMs =
+      dependencies.shutdownForceWaitMs ?? SHUTDOWN_FORCE_WAIT_MS;
   }
 
   start(payload: ExecutionStartMessage['payload']): void {
@@ -157,10 +185,10 @@ export class RealExecutor implements RunnerExecutor {
       return;
     }
 
-    void terminateProcess(child, false);
+    void this.terminateProcess(child, false);
     session.forceKillTimer = setTimeout(() => {
       if (!session.finished) {
-        void terminateProcess(child, true);
+        void this.terminateProcess(child, true);
       }
     }, CANCEL_GRACE_MS);
     this.scheduleTerminalFallback(session, 'cancelled');
@@ -231,7 +259,7 @@ export class RealExecutor implements RunnerExecutor {
           'Graceful shutdown timed out; force-terminating the CLI process tree.',
         );
         if (session.child) {
-          await terminateProcess(session.child, true);
+          await this.terminateProcess(session.child, true);
         } else {
           await this.finalize(session, 'cancelled', {
             reason: `${reason}: the CLI had not started`,
@@ -240,7 +268,7 @@ export class RealExecutor implements RunnerExecutor {
           });
         }
       }
-      clean = await waitFor(() => this.sessions.size === 0, 5000);
+      clean = await waitFor(() => this.sessions.size === 0, this.shutdownForceWaitMs);
     }
 
     return {
@@ -298,7 +326,7 @@ export class RealExecutor implements RunnerExecutor {
     }
 
     const command = this.config.cliPaths[payload.runtime] ?? payload.runtime;
-    const resolved = await resolveExecutable(command);
+    const resolved = await this.resolveExecutable(command);
     if (!resolved.path) {
       throw new RunnerFailure(
         'CLI_NOT_INSTALLED',
@@ -325,7 +353,7 @@ export class RealExecutor implements RunnerExecutor {
 
     let child: ChildProcess;
     try {
-      child = spawn(resolved.path, args, {
+      child = this.spawnProcess(resolved.path, args, {
         cwd: worktree.path,
         env: buildCliEnvironment(),
         shell: false,
@@ -364,7 +392,7 @@ export class RealExecutor implements RunnerExecutor {
 
     const pid = child.pid ?? null;
     if (pid) {
-      const identity = await inspectProcess(pid).catch(() => null);
+      const identity = await this.inspectProcess(pid).catch(() => null);
       session.processStartTime = identity?.startTime ?? null;
       session.processGroupId = identity?.processGroupId ?? pid;
       await this.persistJournal(
@@ -392,7 +420,7 @@ export class RealExecutor implements RunnerExecutor {
         'error',
         `CLI exceeded the ${timeoutMs}ms timeout and will be terminated.`,
       );
-      void terminateProcess(child, true);
+      void this.terminateProcess(child, true);
       this.scheduleTerminalFallback(session, 'timeout');
     }, timeoutMs);
 
@@ -404,7 +432,7 @@ export class RealExecutor implements RunnerExecutor {
     }
 
     if (session.cancelled) {
-      void terminateProcess(child, true);
+      void this.terminateProcess(child, true);
       this.scheduleTerminalFallback(session, 'cancelled');
     }
   }
@@ -563,7 +591,7 @@ export class RealExecutor implements RunnerExecutor {
     session.fallbackTimer = setTimeout(() => {
       if (session.finished) return;
       if (session.child) {
-        void terminateProcess(session.child, true);
+        void this.terminateProcess(session.child, true);
       }
       if (outcome === 'timeout') {
         this.fail(

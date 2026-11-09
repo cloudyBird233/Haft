@@ -337,7 +337,8 @@ export function toExecutionDiffDto(
   };
 }
 
-export function toExecutionLogDto(log: Prisma.ExecutionLogGetPayload<object>): ExecutionLogDto {  return {
+export function toExecutionLogDto(log: Prisma.ExecutionLogGetPayload<object>): ExecutionLogDto {
+  return {
     id: log.id,
     executionId: log.executionId,
     seq: log.seq,

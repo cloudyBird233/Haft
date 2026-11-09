@@ -1014,5 +1014,12 @@ function normalizeDiff(
     return { content: value, truncated };
   }
   const buffer = Buffer.from(value, 'utf8').subarray(0, EXECUTION_DIFF_MAX_BYTES);
-  return { content: buffer.toString('utf8'), truncated: true };
+  let content = buffer.toString('utf8');
+  // A byte cut can split a multi-byte sequence and decoding inserts U+FFFD,
+  // which is 3 bytes again. Remove whole code points until the stored value is
+  // genuinely within the byte cap.
+  while (Buffer.byteLength(content, 'utf8') > EXECUTION_DIFF_MAX_BYTES) {
+    content = content.slice(0, -1);
+  }
+  return { content, truncated: true };
 }

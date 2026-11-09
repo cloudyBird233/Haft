@@ -81,14 +81,33 @@ describe('ExecutionRecovery', () => {
       ownershipMismatch: false,
       orphanTerminated: false,
       orphanStillAlive: false,
+      worktreeExists: true,
     });
     expect(report?.logs.map((entry) => entry.sequence)).toEqual([1]);
     expect(report?.summary).toContain('no surviving CLI process');
+    expect(report?.summary).toContain('worktree preserved');
     expect(deps.terminateProcessTree).not.toHaveBeenCalled();
     expect((await recovery.journal.read(value.executionId))?.status).toBe('interrupted');
     // The archived worktree and spool are evidence; recovery must not delete them.
     expect((await stat(worktree)).isDirectory()).toBe(true);
     expect((await recovery.readLogs(value.executionId)).length).toBe(1);
+  });
+
+  it('reports a worktree that no longer exists and still marks the journal interrupted', async () => {
+    const root = await makeRoot();
+    const missingWorktree = join(root, 'worktree-already-gone');
+    const deps = dependencies();
+    const recovery = new ExecutionRecovery(root, deps);
+    const value = record({ worktreePath: missingWorktree });
+    await recovery.journal.begin(value);
+    await recovery.appendLog(value.executionId, logEntry(1));
+    await recovery.spool.flush();
+
+    const [report] = await recovery.scan();
+    expect(report).toMatchObject({ worktreeExists: false });
+    expect(report?.summary).toContain('could not be found');
+    expect((await recovery.journal.read(value.executionId))?.status).toBe('interrupted');
+    expect(await recovery.readLogs(value.executionId)).toHaveLength(1);
   });
 
   it('verifies PID start time and ownership before terminating an orphan', async () => {

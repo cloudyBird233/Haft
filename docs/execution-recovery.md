@@ -155,9 +155,10 @@ PID identity, and terminal status are written immediately.
 ### Durable log spool
 
 Every log entry is appended to `logs/<executionId>.ndjson` **before** it is sent
-to the server. The server acknowledges the highest persisted runner sequence with
-`execution.log.ack`; acknowledged entries are removed by an atomic rewrite. The
-spool:
+to the server; the runner awaits the durable append and serializes logs/terminal
+events per execution through an in-order queue. The server acknowledges the
+highest persisted runner sequence with `execution.log.ack`; acknowledged entries
+are removed by an atomic rewrite. The spool:
 
 - deduplicates by runner `sequence`;
 - tolerates a partial final line left by a crash;
@@ -171,16 +172,19 @@ spool:
 connects. For each `active` journal it verifies the recorded process identity:
 
 1. Inspect the PID (Windows `Win32_Process`, Linux `/proc`, otherwise `ps`).
-2. If no process exists, report `RUNNER_INTERRUPTED` and preserve the worktree and
+2. Check whether the recorded worktree path still exists and include that in the
+   recovery summary. The check is read-only: recovery never deletes or repairs
+   the path.
+3. If no process exists, report `RUNNER_INTERRUPTED` and preserve the worktree and
    logs.
-3. If the live start marker differs from `processStartTime`, the PID was reused;
+4. If the live start marker differs from `processStartTime`, the PID was reused;
    leave it untouched and report `RUNNER_INTERRUPTED` with the PID-reuse detail.
-4. If the command line / process group does not belong to the execution, leave it
+5. If the command line / process group does not belong to the execution, leave it
    untouched and report an ownership mismatch.
-5. Only when identity and ownership match, terminate the whole process tree
+6. Only when identity and ownership match, terminate the whole process tree
    (`taskkill /T /F` on Windows, process-group signal on POSIX) and wait for the
    actual exit. If it is still alive, report it as not confirmed terminated.
-6. Mark the journal `interrupted`, keep the spool, prune terminal journals after
+7. Mark the journal `interrupted`, keep the spool, prune terminal journals after
    seven days.
 
 The runner **never** starts a replacement execution. Recovery reports are sent
@@ -195,9 +199,11 @@ process.
 `{ clean, remainingExecutionIds, forced }`. It cancels every session, waits for
 real process termination up to `HAFT_RUNNER_SHUTDOWN_GRACE_MS` (default 10 s),
 escalates to a force tree kill, waits again, and reports any sessions that remain.
-`RunnerClient.stop()` awaits this result, flushes the spool and journal, logs
-`runner.shutdown_incomplete` when cleanup cannot be confirmed, and only then
-disconnects. It no longer assumes a fixed 150 ms sleep equals termination.
+`RunnerClient.stop()` awaits this result, drains the per-execution protocol queue
+so the last durable log and terminal event are sent, flushes the spool and
+journal, logs `runner.shutdown_incomplete` when cleanup cannot be confirmed, and
+only then disconnects. It no longer assumes a fixed 150 ms sleep equals
+termination.
 
 ## Cancellation
 

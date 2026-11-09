@@ -134,12 +134,13 @@ Git evidence/diff, and dashboard aggregation.
 - Temp-file + rename writes, 100 ms coalescing for non-critical updates, immediate
   writes for phase/PID/terminal state, corrupt-file quarantine, seven-day
   terminal retention.
-- Durable append-only NDJSON log spool: append-before-send, ACK compaction,
-  reconnect replay, sequence dedupe, partial-line tolerance, 10,000-entry /
-  8 MiB caps.
+- Durable append-only NDJSON log spool: the runner awaits the durable append
+  before sending, ACK compaction, reconnect replay, sequence dedupe, partial-line
+  tolerance, 10,000-entry / 8 MiB caps.
 - Startup scan verifies PID start time, command line/process group ownership;
-  terminates only a verified orphan tree and waits for actual exit; preserves
-  worktrees and logs; marks the journal `interrupted`; never re-runs.
+  terminates only a verified orphan tree and waits for actual exit; reports
+  whether the recorded worktree is still present; preserves worktrees and logs;
+  marks the journal `interrupted`; never re-runs.
 - Recovery reports (`RUNNER_INTERRUPTED`) are sent after register and before the
   snapshot, so the server cannot mistake a dead execution for a live one.
 - `RunnerExecutor.shutdown()` returns `{ clean, remainingExecutionIds, forced }`;
@@ -177,19 +178,22 @@ Git evidence/diff, and dashboard aggregation.
 
 ### Testability and documentation
 
-- 106 deterministic unit/integration/component tests (5 contracts, 26 API,
-  53 runner, 22 web).
+- 114 deterministic unit/integration/component tests (5 contracts, 27 API,
+  60 runner, 22 web).
 - 42 deterministic browser E2E tests, including three Fake Runner scenarios and
   Changes-tab diff assertions.
 - New runner suites for full Git diff collection, atomic journals, durable log
-  spool, crash recovery/orphan handling, process identity, and shutdown waiting.
+  spool, crash recovery/orphan handling, worktree-presence reporting, process
+  identity, and real-executor shutdown waiting/forced termination/incomplete
+  cleanup.
 - 10 new web tests for diff parsing and Changes panel states.
 - Opt-in real CLI Playwright project with its own database, API port, web port,
   runner health port, runner id/token, disposable Git repository, worktree root,
   and recovery root.
-- Real browser UI E2E that creates the Codex agent/task, starts the real CLI,
-  waits for logs/completion, reads the Changes tab, and proves the primary
-  checkout/HEAD/remotes are untouched.
+- Real browser UI E2E that creates the Codex agent, creates an unassigned task,
+  assigns it through task detail, starts the real CLI, waits for logs/completion,
+  reads the Changes tab, and proves the primary checkout/HEAD/remotes are
+  untouched.
 - Test reset preserves `Computer` and `Runner`, so a paired Fake Runner survives
   the suite.
 - New documentation: runner architecture, protocol, setup, runtime integration,
@@ -202,10 +206,10 @@ Git evidence/diff, and dashboard aggregation.
 | ---- | -------------------- |
 | Contracts | `packages/contracts/src/{constants,types,runner-protocol}.ts` |
 | API | `apps/api/prisma/schema.prisma`, migration `20261107160000_execution_git_diff`, `apps/api/src/common/serializers.ts`, `apps/api/src/modules/executions/executions.{service,controller}.ts`, `apps/api/src/modules/runtime/agent-runtime.interface.ts` |
-| Runner | `apps/runner/src/git-worktree.ts`, `execution-journal.ts` (new), `log-spool.ts` (new), `process-identity.ts` (new), `recovery.ts` (new), `real-executor.ts`, `fake-executor.ts`, `executor.ts`, `runner-client.ts`, `config.ts` |
+| Runner | `apps/runner/src/git-worktree.ts`, `execution-journal.ts` (new), `log-spool.ts` (new), `protocol-event-queue.ts` (new), `process-identity.ts` (new), `recovery.ts` (new), `real-executor.ts`, `fake-executor.ts`, `executor.ts`, `runner-client.ts`, `config.ts` |
 | Web | `apps/web/src/features/executions/changes-panel.tsx` (new), `diff-parser.ts` (new), `pages/execution-page.tsx`, `hooks/use-raft-data.ts`, `services/{api,query-keys}.ts`, `apps/web/package.json`, `apps/web/.env.real-e2e` (new) |
-| Tests | `apps/runner/test/{git-worktree,execution-journal,log-spool,recovery,process-identity,fake-executor}.spec.ts`, `apps/api/test/runner.integration.spec.ts`, `apps/web/src/test/{diff-parser.test.ts,changes-panel.test.tsx}`, `tests/e2e/functional/runner-execution.spec.ts`, `tests/e2e-real/{real-cli,real-ui}.spec.ts`, `tests/contract/ui-interaction.contract.json`, `tests/fixtures/test-data-factory.ts`, `playwright.config.ts`, `playwright.real.config.ts` |
-| Documentation | `docs/{REPORT,api,testing,execution-recovery,runner-architecture,runner-protocol,runner-setup}.md` |
+| Tests | `apps/runner/test/{git-worktree,execution-journal,log-spool,recovery,real-executor,protocol-event-queue,process-identity,fake-executor}.spec.ts`, `apps/api/test/runner.integration.spec.ts`, `apps/web/src/test/{diff-parser.test.ts,changes-panel.test.tsx}`, `tests/e2e/functional/runner-execution.spec.ts`, `tests/e2e-real/{real-cli,real-ui}.spec.ts`, `tests/contract/ui-interaction.contract.json`, `tests/fixtures/test-data-factory.ts`, `playwright.config.ts`, `playwright.real.config.ts` |
+| Documentation | `README.md`, `docs/{REPORT,api,testing,data-model,execution-recovery,runner-architecture,runner-protocol,runner-setup}.md` |
 
 ### Git diff structure
 
@@ -213,8 +217,8 @@ Git evidence/diff, and dashboard aggregation.
 interface ExecutionDto {
   // ...existing execution fields
   changedFiles: number;
-  diffStat: string | null;
-  gitStatus: string | null;
+  diffStat: string;
+  gitStatus: string;
   diffTruncated: boolean;
 }
 
@@ -225,8 +229,8 @@ interface ExecutionDiffDto {
   baseCommit: string | null;
   headCommit: string | null;
   changedFiles: number;
-  diffStat: string | null;
-  gitStatus: string | null;
+  diffStat: string;
+  gitStatus: string;
   diff: string;
   diffTruncated: boolean;
   createdAt: string | null;
@@ -262,19 +266,19 @@ states.
 | Preserve Mock Runtime (auto/manual) and Test API        | Done   | existing runtime tests + 42 E2E tests still pass                  |
 | Preserve API/UI contracts and existing behavior         | Done   | original suites pass; counts below                                |
 | Incremental migration without data loss                 | Done   | second migration copies existing execution/log rows               |
-| Fake Runner proven before real CLI                      | Done   | 3 E2E scenarios + 5 API runner integration tests                  |
+| Fake Runner proven before real CLI                      | Done   | 3 E2E scenarios + 6 API runner integration tests                  |
 | Independent real CLI tests                              | Done   | `playwright.real.config.ts`, `tests/e2e-real`                     |
 | `HAFT_REAL_CLI_E2E=1` gate                              | Done   | all real CLI/UI tests skip without it                             |
 | Full unified Git diff collection                        | Done   | tracked/untracked/deleted/rename/binary/truncation tests          |
-| Diff metadata on Execution, patch as artifact           | Done   | migration `20261107160000_execution_git_diff`, service/serializer  |
+| Diff metadata on Execution, patch as artifact           | Done   | migration `20261107160000_execution_git_diff`, service/serializer, API byte-cap test |
 | `GET /api/executions/:id/diff`                          | Done   | controller + `ExecutionDiffDto` + API integration tests           |
 | Changes tab with metadata, files, diff, badges          | Done   | `changes-panel.tsx`, diff parser, UI contract, Fake E2E           |
 | Durable per-execution journal (atomic writes)           | Done   | `execution-journal.ts` + atomic/corrupt recovery tests            |
-| Durable log spool with ACK/replay/dedupe/caps           | Done   | `log-spool.ts` + spool/ACK/reconnect tests                        |
-| Startup scan, PID/start-time/ownership, orphans         | Done   | `recovery.ts`, `process-identity.ts`, recovery tests              |
+| Durable log spool with ACK/replay/dedupe/caps           | Done   | `log-spool.ts`, awaited append in `runner-client.ts`, spool/ACK/reconnect tests |
+| Startup scan, PID/start-time/ownership, orphans         | Done   | `recovery.ts`, `process-identity.ts`, worktree-presence and recovery tests |
 | Preserve worktrees/logs; never auto re-run              | Done   | recovery tests assert retention and terminal-journal skip          |
-| Shutdown waits for real termination, reports leftovers  | Done   | `ShutdownResult`, executor shutdown tests, client flush           |
-| Real browser UI + real Codex UI E2E                     | Done   | `tests/e2e-real/real-ui.spec.ts`, 25.4 s pass                     |
+| Shutdown waits for real termination, reports leftovers  | Done   | `ShutdownResult`, real/fake executor shutdown tests, client queue drain |
+| Real browser UI + real Codex UI E2E                     | Done   | `tests/e2e-real/real-ui.spec.ts`, 34.4 s pass                     |
 | Primary repo untouched, no commit/push/merge            | Done   | UI E2E asserts HEAD/count/status/remotes/branch head              |
 | Documentation set                                       | Done   | README + docs updated for diff, recovery, testing, API, report    |
 | Windows/Linux/macOS portability                         | Done   | platform-aware process identity and tree termination              |
@@ -285,18 +289,31 @@ Validation was run on Windows with Node.js 24 and pnpm 11.
 
 | Command              | Result                                                                        |
 | -------------------- | ----------------------------------------------------------------------------- |
-| `pnpm test`          | Pass — 106 tests: 5 contracts, 26 API, 53 runner, 22 web                      |
-| `pnpm test:e2e`      | Pass — 42 Playwright tests, 1 worker, 1.3 min; 0 `Socket timeout` occurrences |
+| `pnpm test`          | Pass — 114 tests: 5 contracts, 27 API, 60 runner, 22 web                      |
+| `pnpm test:e2e`      | Pass — 42 Playwright tests, 1 worker, 2.4 min; 0 `Socket timeout` occurrences |
 | `pnpm build`         | Pass — contracts, API, web, and runner bundle (Vite >500 kB warning only)      |
 | `pnpm lint`          | Pass — ESLint, zero warnings                                                  |
 | `pnpm typecheck`     | Pass — contracts, API, web, runner                                            |
-| Real CLI E2E (Codex) | Pass — 2 passed, 1 skipped: Codex API 30.3 s + real UI 25.4 s (1.2 min)       |
+| Real CLI E2E (Codex) | Pass — 2 passed, 1 skipped: Codex API 30.2 s + real UI 34.4 s (1.3 min)       |
 | Real CLI E2E (both)  | Not re-run this pass — OpenCode requires `HAFT_REAL_E2E_OPENCODE=1` + model   |
 
 The E2E run covers 38 functional tests (including 3 Fake Runner tests), 1
 business-loop test, and 3 visual tests. The visual run regenerates screenshots in
 `docs/screenshots/` and compares the dashboard 1440×900 capture against the
 committed baseline.
+
+### Acceptance coverage by layer
+
+| Layer                       | Runtime under test | Command / test                                | This pass                                              |
+| --------------------------- | ------------------ | --------------------------------------------- | ------------------------------------------------------ |
+| API + deterministic runtime | Mock Runtime + Fake Runner | `pnpm test` (API integration), Fake Runner E2E | PASS — 114 unit/integration/component tests            |
+| UI + deterministic runtime  | Mock Runtime + Fake Runner | `pnpm test:e2e`                               | PASS — 42 Playwright tests, 2.4 min; 3 Fake Runner     |
+| API + real Codex CLI        | Codex 0.164.0      | `HAFT_REAL_CLI_E2E=1 pnpm test:e2e:real`      | PASS — `real-cli.spec.ts`, 30.2 s                      |
+| UI + real Codex CLI         | Codex 0.164.0      | `HAFT_REAL_CLI_E2E=1 pnpm test:e2e:real`      | PASS — `real-ui.spec.ts`, 34.4 s                       |
+| API + real OpenCode CLI     | OpenCode           | needs `HAFT_REAL_E2E_OPENCODE=1` + model      | SKIPPED — not run, not claimed as PASS                 |
+
+Only rows actually executed in this validation pass are marked PASS. The OpenCode
+row remains skipped because its gate and model were not enabled.
 
 ### Real CLI manual acceptance
 
@@ -306,9 +323,9 @@ user; disposable Git repository prepared by
 
 ```bash
 HAFT_REAL_CLI_E2E=1 pnpm test:e2e:real
-# 2 passed, 1 skipped (OpenCode not opted in), 1.2 min
-# Codex API flow: 30.3 s
-# Real browser UI + Codex flow: 25.4 s
+# 2 passed, 1 skipped (OpenCode not opted in), 1.3 min
+# Codex API flow: 30.2 s
+# Real browser UI + Codex flow: 34.4 s
 ```
 
 The OpenCode API test remains separately gated and was skipped in this run:
@@ -327,11 +344,13 @@ Observed assertions for the passing Codex runs:
 - task `done`, agent `idle`;
 - marker file created in the isolated worktree with the expected content;
 - primary checkout unchanged;
-- logs include the worktree-ready and successful-exit messages;
+- logs include the worktree-ready and successful-exit messages, plus a parsed
+  Codex event (`Codex thread started`/`turn started`/`turn completed`);
 - log `seq` values are unique;
-- the browser UI created the agent/task, showed live logs and completion, and the
-  Changes tab rendered the persisted unified diff (`added`, `real-ui-ok`,
-  `diffTruncated=false`, branch/base commit);
+- the browser UI created the agent and an unassigned task, assigned it through
+  task detail, showed live logs and completion, and the Changes tab rendered the
+  persisted unified diff (`added`, `real-ui-ok`, `diffTruncated=false`,
+  branch/base commit);
 - the primary repository kept the same HEAD, commit count, `git status`, and
   remote configuration; the `haft/<executionId>` branch head stayed at the base
   commit (no commit, merge, or push).
@@ -355,10 +374,13 @@ log lines.
 
 ### Repository state
 
-All Phase 1 and Phase 1.1 work is uncommitted in the working tree. No commit,
-push, merge, or branch rewrite was performed by this implementation. The new
+The Phase 1.1 implementation baseline is committed at `553eb9a`
+(`feat: add git diff evidence and runner crash recovery`). This verification
+pass adds further test-hardening and documentation changes in the working tree;
+no commit, push, merge, or branch rewrite was performed by it. The Phase 1.1
 migration is `apps/api/prisma/migrations/20261107160000_execution_git_diff`.
-Screenshots were regenerated by the visual suite and are also uncommitted.
+Screenshots are regenerated by the visual suite on every `pnpm test:e2e` run and
+may appear modified in `git status`; they are test artifacts, not source changes.
 
 Supporting checks:
 

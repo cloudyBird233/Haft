@@ -10,12 +10,12 @@ selector.
 | Level                                     | Tool                    | Location                        | Count |
 | ----------------------------------------- | ----------------------- | ------------------------------- | ----- |
 | Shared contracts                          | Vitest                  | `packages/contracts/test`       | 5     |
-| API integration + runtime + state machine | Vitest, Supertest       | `apps/api/test`, `apps/api/src` | 26    |
-| Runner unit tests                         | Vitest                  | `apps/runner/test`              | 53    |
+| API integration + runtime + state machine | Vitest, Supertest       | `apps/api/test`, `apps/api/src` | 27    |
+| Runner unit tests                         | Vitest                  | `apps/runner/test`              | 60    |
 | Web component behavior                    | Vitest, Testing Library | `apps/web/src/test`             | 22    |
 | Browser E2E                               | Playwright              | `tests/e2e`                     | 42    |
 
-The deterministic unit/integration/component total is **106 tests**.
+The deterministic unit/integration/component total is **114 tests**.
 
 Browser E2E is split into three suites on purpose:
 
@@ -26,12 +26,16 @@ Browser E2E is split into three suites on purpose:
 | Visual        | `tests/e2e/visual`        | 3     | Screenshot gallery, layout invariants, one visual baseline    |
 
 The opt-in real CLI suite lives outside `tests/e2e`, runs separately, and is
-never counted in the deterministic suite.
+never counted in the deterministic suite. Results are always reported by layer:
+API + deterministic runtime and UI + deterministic runtime (Mock Runtime plus
+the Fake Runner) are covered by `pnpm test` / `pnpm test:e2e`; API + real CLI and
+UI + real CLI are covered only by `pnpm test:e2e:real`, and a gated skip is never
+reported as a pass.
 
 ## Commands
 
 ```bash
-pnpm test          # contracts + API + runner + web (106 tests)
+pnpm test          # contracts + API + runner + web (114 tests)
 pnpm test:e2e      # resets the E2E DB, starts isolated servers + Fake Runner, runs 42 tests
 pnpm test:e2e:real # opt-in real Codex/OpenCode suite (HAFT_REAL_CLI_E2E=1)
 pnpm test:e2e:ui   # Playwright UI mode
@@ -158,6 +162,7 @@ diff idempotency, and rejection of Git results from a non-owning runner.
   over-limit patches, plus worktree retention and repository-root rejection.
 - `apps/api/test/runner.integration.spec.ts` asserts the diff metadata and patch
   are persisted separately, the diff endpoint returns the stored artifact,
+  over-limit multibyte patches are cut to the byte cap and marked truncated,
   duplicate terminal messages are idempotent, and an intruder runner cannot
   submit Git evidence.
 - `apps/web/src/test/diff-parser.test.ts` covers file/status/rename/binary
@@ -174,11 +179,18 @@ diff idempotency, and rejection of Git results from a non-owning runner.
 - `log-spool.spec.ts` — ordered persistence, duplicate suppression, ACK cleanup,
   crash recovery with a partial final line (including repair before the next
   append), size caps, replay limit.
-- `recovery.spec.ts` — interruption reporting, worktree/log preservation, PID
-  start-time verification, PID-reuse protection, ownership mismatch, unverified
-  identity, orphan tree termination, and no replay of terminal journals.
+- `protocol-event-queue.spec.ts` — a log send and its terminal event wait for a
+  durable append, executions do not block each other, and a failed event does not
+  stall the queue.
+- `recovery.spec.ts` — interruption reporting, worktree/log preservation,
+  worktree-presence reporting when the path is gone, PID start-time
+  verification, PID-reuse protection, ownership mismatch, unverified identity,
+  orphan tree termination, and no replay of terminal journals.
 - `process-identity.spec.ts` — live start marker/command line, exit waiting, and
   process-tree termination.
+- `real-executor.spec.ts` — a real-executor child-close wait, graceful-to-forced
+  escalation after the shutdown grace window, and an incomplete-cleanup report
+  when the child never confirms termination.
 - `fake-executor.spec.ts` — shutdown waits for session termination and reports a
   clean result instead of relying on a fixed delay.
 
@@ -218,8 +230,10 @@ It uses:
 `tests/e2e-real/real-cli.spec.ts` starts a real task through the API and
 `tests/e2e-real/real-ui.spec.ts` drives the real browser UI end to end:
 
-- creates the Codex agent and task through the UI;
-- starts from task detail, waits for live logs and a `completed` banner;
+- creates the Codex agent and an unassigned task through the UI;
+- assigns the task to the agent through task detail and verifies the API state;
+- starts from task detail, waits for a parsed Codex log event, live logs, and a
+  `completed` banner;
 - verifies task `done` and agent `idle`;
 - opens the Changes tab and asserts branch, base/head commit, changed file,
   unified diff content, and `diffTruncated=false`;
@@ -227,8 +241,9 @@ It uses:
 - asserts the primary checkout has the same HEAD, commit count, `git status`, and
   remote configuration, and that the execution branch never moved past the base
   commit (no commit, merge, or push);
-- asserts logs contain the isolated-worktree and successful-exit messages, and
-  `seq` values are unique.
+- asserts logs contain the isolated-worktree and successful-exit messages, a
+  parsed CLI event (`Codex thread started`/`turn started`/`turn completed`), and
+  unique `seq` values.
 
 The UI suite uses `apps/web/.env.real-e2e` and a Vite proxy targeting port 3201.
 Both suites use their own runner token file, database, ports, worktree root, and
@@ -391,16 +406,20 @@ The latest hardening pass adds targeted coverage for:
   events from a runner that does not own the execution (API).
 - **Runner log idempotency** — duplicate `messageId`/`eventId` replays do not
   duplicate logs, and server `seq` stays unique (API + runner unit).
-- **Diff ownership and persistence** — a non-owning runner cannot submit Git
-  evidence, duplicate terminal messages are idempotent, and the patch is stored
-  as a separate artifact rather than in `ExecutionDto` (API).
+- **Diff ownership, persistence, and caps** — a non-owning runner cannot submit
+  Git evidence, duplicate terminal messages are idempotent, an over-limit
+  multibyte patch is cut to the byte cap and marked truncated, and the patch is
+  stored as a separate artifact rather than in `ExecutionDto` (API).
+- **Append-before-send ordering** — a log send and its terminal event wait for a
+  durable spool append, executions are independent, and a failed event does not
+  stall later events (runner unit).
 - **Crash recovery** — journals/spools survive crashes, corrupt files are
   quarantined, PID reuse and ownership mismatches are left untouched, verified
   orphans are terminated, worktrees/logs are preserved, and interrupted runs are
   never replayed (runner unit).
-- **Shutdown termination** — shutdown waits for the session/process to actually
-  end and reports incomplete cleanup instead of relying on a fixed delay (runner
-  unit).
+- **Shutdown termination** — the fake and real executors wait for actual
+  session/child termination, escalate after the grace window, and report
+  incomplete cleanup instead of relying on a fixed delay (runner unit).
 
 ## Accessibility and interaction guarantees
 

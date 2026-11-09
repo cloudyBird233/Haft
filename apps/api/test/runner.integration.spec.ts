@@ -5,6 +5,7 @@ import request from 'supertest';
 import { io, type Socket } from 'socket.io-client';
 import type { INestApplication } from '@nestjs/common';
 import {
+  EXECUTION_DIFF_MAX_BYTES,
   RUNNER_PROTOCOL_VERSION,
   runnerServerMessageSchema,
   type ExecutionDiffDto,
@@ -385,6 +386,64 @@ describe('Runner protocol v1 integration', () => {
     expect((taskResponse.body as ApiSuccessBody<TaskDetailDto>).data.status).toBe('done');
     const agentResponse = await request(server).get(`/api/agents/${agentId}`).expect(200);
     expect((agentResponse.body as ApiSuccessBody<{ status: string }>).data.status).toBe('idle');
+  });
+
+  it('caps an over-limit diff at the byte limit and marks it truncated', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    const { executionId } = await startAndAccept(connected);
+
+    // 600k two-byte characters pass the protocol's character-count schema but
+    // exceed the byte cap once encoded as UTF-8.
+    const oversized = [
+      'diff --git a/huge.txt b/huge.txt',
+      '--- a/huge.txt',
+      '+++ b/huge.txt',
+      '@@ -1 +1 @@',
+      '-before',
+      `+${'é'.repeat(600_000)}`,
+    ].join('\n');
+    expect(oversized.length).toBeLessThanOrEqual(EXECUTION_DIFF_MAX_BYTES);
+    expect(Buffer.byteLength(oversized, 'utf8')).toBeGreaterThan(EXECUTION_DIFF_MAX_BYTES);
+
+    send(connected.socket, 'execution.completed', {
+      executionId,
+      exitCode: 0,
+      summary: 'Oversized diff submitted.',
+      git: {
+        branchName: `haft/${executionId}`,
+        baseCommit: '0'.repeat(40),
+        headCommit: 'f'.repeat(40),
+        changedFiles: 1,
+        diffStat: '1 file changed',
+        gitStatus: '?? huge.txt',
+        diff: oversized,
+        // The server must enforce the byte cap even when the runner does not
+        // set the flag.
+        diffTruncated: false,
+      },
+    });
+
+    const completed = await waitFor(async () => {
+      const response = await request(server).get(`/api/executions/${executionId}`).expect(200);
+      const execution = (response.body as ApiSuccessBody<ExecutionDto>).data;
+      return execution.status === 'completed' ? execution : null;
+    });
+    expect(completed.diffTruncated).toBe(true);
+
+    const diffResponse = await request(server)
+      .get(`/api/executions/${executionId}/diff`)
+      .expect(200);
+    const storedDiff = (diffResponse.body as ApiSuccessBody<ExecutionDiffDto>).data;
+    expect(storedDiff.diffTruncated).toBe(true);
+    expect(Buffer.byteLength(storedDiff.diff, 'utf8')).toBeLessThanOrEqual(
+      EXECUTION_DIFF_MAX_BYTES,
+    );
+    const artifact = await prisma.executionArtifact.findUnique({
+      where: { executionId_kind: { executionId, kind: 'git-diff' } },
+    });
+    expect(artifact?.truncated).toBe(true);
+    expect(artifact?.byteSize).toBeLessThanOrEqual(EXECUTION_DIFF_MAX_BYTES);
   });
 
   it('does not mark an execution cancelled until the runner confirms', async () => {

@@ -113,7 +113,7 @@ test.describe('Real Codex UI execution (opt-in)', () => {
     expect(agent.runtime).toBe('codex');
     expect(agent.computerId).toBe(COMPUTER_ID);
 
-    // 2. Create a task assigned to that agent through the real UI.
+    // 2. Create an unassigned task, then assign it through task detail.
     const taskTitle = factory.uniqueName('Real Codex UI execution');
     await gotoPath(page, '/tasks');
     await byTestId(page, 'tasks.create').click();
@@ -127,22 +127,30 @@ test.describe('Real Codex UI execution (opt-in)', () => {
       ].join(' '),
     );
     await byTestId(page, 'taskForm.project').selectOption(PROJECT_ID);
-    await byTestId(page, 'taskForm.assignee').selectOption(agent.id);
+    await byTestId(page, 'taskForm.assignee').selectOption('');
     await byTestId(page, 'taskForm.priority').selectOption('high');
     await byTestId(page, 'taskForm.submit').click();
     await expect(byTestId(page, 'taskForm.dialog')).toHaveCount(0);
     const taskCard = byTestId(page, 'taskBoard.card').filter({ hasText: taskTitle });
-    await expect(taskCard).toHaveAttribute('data-status', 'claimed');
+    await expect(taskCard).toHaveAttribute('data-status', 'todo');
 
     const createdTask = (await factory.listTasks()).items.find(
       (item) => item.title === taskTitle,
     );
     expect(createdTask, 'The UI must persist the task').toBeDefined();
     if (!createdTask) return;
+    expect(createdTask.assignee).toBeNull();
 
-    // 3. Start the execution from task detail and watch the real process.
+    // 3. Assign the Codex agent through task detail, then start the execution.
     await taskCard.click();
     await expect(byTestId(page, 'taskDetail.panel')).toBeVisible();
+    await byTestId(page, 'taskDetail.assigneeSelect').selectOption(agent.id);
+    await byTestId(page, 'taskDetail.assign').click();
+    await expect
+      .poll(async () => (await factory.getTask(createdTask.id)).assignee?.id)
+      .toBe(agent.id);
+    expect((await factory.getTask(createdTask.id)).status).toBe('claimed');
+
     await expect(byTestId(page, 'taskDetail.start')).toBeEnabled();
     await byTestId(page, 'taskDetail.start').click();
     await page.waitForURL(/\/executions\/[^/?]+$/);
@@ -155,6 +163,14 @@ test.describe('Real Codex UI execution (opt-in)', () => {
         hasText: 'Isolated Git worktree ready on branch',
       }),
     ).toHaveCount(1, { timeout: 120_000 });
+    // A parsed Codex JSONL event proves the live log is fed by the real CLI,
+    // not only by runner lifecycle messages.
+    const codexLog = byTestId(page, 'execution.logEntry').filter({
+      hasText: /Codex (thread started|turn started|turn completed)\./,
+    });
+    // Several Codex events legitimately match; use the first to avoid
+    // Playwright's strict-mode violation while still proving live CLI output.
+    await expect(codexLog.first()).toBeVisible({ timeout: 120_000 });
     await expect(byTestId(page, 'execution.logEntry').first()).toBeVisible();
 
     await expect(banner).toHaveAttribute('data-status', 'completed', {

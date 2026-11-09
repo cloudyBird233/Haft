@@ -1,3 +1,4 @@
+import { stat } from 'node:fs/promises';
 import type { RunnerLogEntry } from '@raft-lite/contracts';
 import {
   ExecutionJournal,
@@ -30,6 +31,8 @@ export interface RecoveredExecution {
   processIdentityUnverified: boolean;
   orphanTerminated: boolean;
   orphanStillAlive: boolean;
+  /** Best-effort check that the recorded worktree is still available for review. */
+  worktreeExists: boolean;
   summary: string;
 }
 
@@ -97,6 +100,7 @@ export class ExecutionRecovery {
         }
       }
 
+      const worktreeExists = await worktreePresent(record.worktreePath);
       const summary = buildRecoverySummary({
         record,
         processAlive,
@@ -105,6 +109,7 @@ export class ExecutionRecovery {
         processIdentityUnverified,
         orphanTerminated,
         orphanStillAlive,
+        worktreeExists,
       });
       await this.journal.finish(record.executionId, 'interrupted', record.phase, record.lastSequence);
       const logs = await this.spool.read(record.executionId, 200);
@@ -118,6 +123,7 @@ export class ExecutionRecovery {
         pid: record.pid,
         orphanTerminated,
         orphanStillAlive,
+        worktreeExists,
       });
 
       recovered.push({
@@ -129,6 +135,7 @@ export class ExecutionRecovery {
         processIdentityUnverified,
         orphanTerminated,
         orphanStillAlive,
+        worktreeExists,
         summary,
       });
     }
@@ -169,6 +176,17 @@ function normalize(value: string): string {
   return value.replace(/\\/g, '/').toLowerCase();
 }
 
+async function worktreePresent(path: string | null): Promise<boolean> {
+  if (!path) return false;
+  try {
+    return (await stat(path)).isDirectory();
+  } catch {
+    // Permission errors or an unmounted volume are not evidence of deletion;
+    // the summary only reports that the worktree could not be found.
+    return false;
+  }
+}
+
 function buildRecoverySummary(input: {
   record: ExecutionJournalRecord;
   processAlive: boolean;
@@ -177,6 +195,7 @@ function buildRecoverySummary(input: {
   processIdentityUnverified: boolean;
   orphanTerminated: boolean;
   orphanStillAlive: boolean;
+  worktreeExists: boolean;
 }): string {
   const parts = [
     'RUNNER_INTERRUPTED: the runner restarted before this execution finished',
@@ -201,7 +220,9 @@ function buildRecoverySummary(input: {
     parts.push('the orphaned CLI process could not be confirmed terminated');
   }
   const worktree = input.record.worktreePath
-    ? `; worktree preserved at ${input.record.worktreePath}`
+    ? input.worktreeExists
+      ? `; worktree preserved at ${input.record.worktreePath}`
+      : `; worktree path ${input.record.worktreePath} could not be found and was not modified`
     : '';
   const logs = input.record.lastSequence
     ? `; ${input.record.lastSequence} runner log sequence(s) preserved`

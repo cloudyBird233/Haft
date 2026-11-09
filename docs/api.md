@@ -351,7 +351,7 @@ run is active.
 
 `ExecutionDto` carries Git **metadata** only. The patch itself is never embedded
 in list/detail responses; it is stored as a separate `ExecutionArtifact` of kind
-`diff` and loaded lazily by the Changes view.
+`git-diff` and loaded lazily by the Changes view.
 
 #### Execution diff
 
@@ -375,10 +375,11 @@ in list/detail responses; it is stored as a separate `ExecutionArtifact` of kind
 
 - `available` is `false` when no Git result was reported (for example a mock
   execution or a failure before the worktree existed); `diff` is then `""` and
-  the metadata fields are `null`/`0`.
-- The patch is capped at `EXECUTION_DIFF_MAX_BYTES` (1 MiB). Larger patches are
-  cut at a UTF-8 boundary and `diffTruncated` becomes `true`; the UI shows an
-  explicit truncation badge.
+  the metadata fields are `null`, empty, or `0`.
+- The patch is capped at `EXECUTION_DIFF_MAX_BYTES` (1 MiB). The runner cuts on
+  a UTF-8 boundary; the API independently re-checks the byte size and cuts on a
+  code-point boundary. `diffTruncated` becomes `true` in either case, and the UI
+  shows an explicit truncation badge.
 - Modified, added, deleted, renamed, untracked, and binary files are all
   represented in the unified patch. Binary files produce Git's binary notice,
   not a textual body.
