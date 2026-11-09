@@ -32,7 +32,6 @@
     "apps/runner/src/token-store.ts",
     "apps/runner/test/cli-args.spec.ts",
     "apps/runner/test/cli-output.spec.ts",
-    "apps/runner/test/execution-journal.spec.ts",
     "apps/runner/test/git-worktree.spec.ts",
     "apps/runner/test/log-spool.spec.ts",
     "apps/runner/test/process-identity.spec.ts",

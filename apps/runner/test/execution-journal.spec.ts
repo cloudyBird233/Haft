@@ -1,11 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import {
-  ExecutionJournal,
-  type ExecutionJournalRecord,
-} from '../src/execution-journal';
+import { ExecutionJournal, type ExecutionJournalRecord } from '../src/execution-journal';
 
 const roots: string[] = [];
 
@@ -104,7 +101,14 @@ describe('ExecutionJournal', () => {
     await journal.begin(record({ executionId: 'execution_done' }));
     await journal.finish('execution_done', 'failed', 'failed', 2);
 
-    const removed = await journal.pruneTerminal(-1);
+    // Pin the terminal journal's mtime into the past instead of relying on
+    // `Date.now()` ordering. Windows filesystems can round a freshly written
+    // file's timestamp past a cutoff computed milliseconds later, which made
+    // this test intermittently prune nothing.
+    const finished = new Date(Date.now() - 60_000);
+    await utimes(join(root, 'execution_done.json'), finished, finished);
+
+    const removed = await journal.pruneTerminal(30_000);
     expect(removed).toBe(1);
     const remaining = await journal.list();
     expect(remaining.map((item) => item.executionId)).toEqual(['execution_active']);
