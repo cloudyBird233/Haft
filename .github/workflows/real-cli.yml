@@ -161,6 +161,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: real-cli-evidence
+          overwrite: true
           path: |
             ci-artifacts/real-cli/**
             !**/.env
@@ -184,6 +185,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: real-cli-cleanup
+          overwrite: true
           path: ci-artifacts/real-cli/cleanup/**
           if-no-files-found: warn
           retention-days: 30

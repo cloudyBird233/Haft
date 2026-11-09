@@ -73,6 +73,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: static-report
+          overwrite: true
           path: ci-artifacts/static/**
           if-no-files-found: warn
           retention-days: 14
@@ -125,6 +126,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: unit-${{ matrix.os }}
+          overwrite: true
           path: ci-artifacts/unit/${{ matrix.os }}/**
           if-no-files-found: warn
           retention-days: 14
@@ -177,6 +179,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-playwright
+          overwrite: true
           path: |
             playwright-report/
             test-results/
@@ -196,6 +199,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: e2e-reports
+          overwrite: true
           path: ci-artifacts/e2e/**
           if-no-files-found: warn
           retention-days: 14
@@ -252,6 +256,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: security-report
+          overwrite: true
           path: ci-artifacts/security/**
           if-no-files-found: warn
           retention-days: 14
@@ -332,6 +337,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ci-summary
+          overwrite: true
           path: |
             ci-artifacts/test-summary.json
             ci-artifacts/test-summary.md

@@ -550,6 +550,9 @@ fails, the job reports `BLOCKED`; it never reports `PASS`.
 - Artifacts: `unit-<os>`, `e2e-playwright`, `e2e-reports`, `static-report`,
   `security-report`, and `ci-summary`, retained for 14 days and uploaded with
   `if: always()`.
+- Uploads set `overwrite: true`. Re-running a failed job replaces its
+  same-named artifact, so the summary cannot silently download an older report
+  from a previous run attempt.
 - Upload exclusions: `.env` files, SQLite databases, `test-results/.runner/**`
   runner tokens, and `auth.json` CLI credentials.
 - The visual suite keeps per-platform Playwright snapshots. CI uses
