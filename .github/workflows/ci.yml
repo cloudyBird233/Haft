@@ -115,6 +115,9 @@ jobs:
       - name: Run all deterministic suites
         env:
           CI_TEST_REPORT_DIR: ${{ github.workspace }}/ci-artifacts/unit/${{ matrix.os }}
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+          TMPDIR: ${{ runner.temp }}
         run: node scripts/acceptance/run-unit-tests.mjs
 
       - name: Upload unit reports
