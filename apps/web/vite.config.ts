@@ -1,5 +1,8 @@
+import { join } from 'node:path';
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
+
+const reportDir = process.env.CI_TEST_REPORT_DIR;
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
@@ -27,6 +30,15 @@ export default defineConfig(({ mode }) => {
       include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
       css: false,
       globals: true,
+      ...(reportDir
+        ? {
+            reporters: [
+              'default',
+              ['json', { outputFile: join(reportDir, 'web.json') }],
+              ['junit', { outputFile: join(reportDir, 'web-junit.xml') }],
+            ],
+          }
+        : {}),
     },
   };
 });

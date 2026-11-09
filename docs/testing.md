@@ -7,23 +7,25 @@ selector.
 
 ## Test pyramid
 
-| Level                                     | Tool                    | Location                        | Count |
-| ----------------------------------------- | ----------------------- | ------------------------------- | ----- |
-| Shared contracts                          | Vitest                  | `packages/contracts/test`       | 5     |
-| API integration + runtime + state machine | Vitest, Supertest       | `apps/api/test`, `apps/api/src` | 27    |
-| Runner unit tests                         | Vitest                  | `apps/runner/test`              | 60    |
-| Web component behavior                    | Vitest, Testing Library | `apps/web/src/test`             | 22    |
-| Browser E2E                               | Playwright              | `tests/e2e`                     | 42    |
+| Level                                     | Tool                    | Location                        |
+| ----------------------------------------- | ----------------------- | ------------------------------- |
+| Shared contracts                          | Vitest                  | `packages/contracts/test`       |
+| API integration + runtime + state machine | Vitest, Supertest       | `apps/api/test`, `apps/api/src` |
+| Runner unit tests                         | Vitest                  | `apps/runner/test`              |
+| Web component behavior                    | Vitest, Testing Library | `apps/web/src/test`             |
+| Browser E2E                               | Playwright              | `tests/e2e`                     |
 
-The deterministic unit/integration/component total is **114 tests**.
+Current test counts are produced by CI from native Vitest/Playwright JSON
+reports (see [Continuous integration](#continuous-integration)); they are not
+maintained by hand in this document.
 
 Browser E2E is split into three suites on purpose:
 
-| Suite         | Location                  | Tests | Purpose                                                       |
-| ------------- | ------------------------- | ----- | ------------------------------------------------------------- |
-| Functional    | `tests/e2e/functional`    | 38    | CRUD, filters, workflow, errors, accessibility, Fake Runner   |
-| Business loop | `tests/e2e/business-loop` | 1     | One cross-page scenario: agent → task → execution → dashboard |
-| Visual        | `tests/e2e/visual`        | 3     | Screenshot gallery, layout invariants, one visual baseline    |
+| Suite         | Location                  | Purpose                                                       |
+| ------------- | ------------------------- | ------------------------------------------------------------- |
+| Functional    | `tests/e2e/functional`    | CRUD, filters, workflow, errors, accessibility, Fake Runner   |
+| Business loop | `tests/e2e/business-loop` | One cross-page scenario: agent → task → execution → dashboard |
+| Visual        | `tests/e2e/visual`        | Screenshot gallery, layout invariants, one visual baseline    |
 
 The opt-in real CLI suite lives outside `tests/e2e`, runs separately, and is
 never counted in the deterministic suite. Results are always reported by layer:
@@ -35,8 +37,8 @@ reported as a pass.
 ## Commands
 
 ```bash
-pnpm test          # contracts + API + runner + web (114 tests)
-pnpm test:e2e      # resets the E2E DB, starts isolated servers + Fake Runner, runs 42 tests
+pnpm test          # contracts + API + runner + web
+pnpm test:e2e      # resets the E2E DB, starts isolated servers + Fake Runner
 pnpm test:e2e:real # opt-in real Codex/OpenCode suite (HAFT_REAL_CLI_E2E=1)
 pnpm test:e2e:ui   # Playwright UI mode
 pnpm show-report   # open the latest HTML report
@@ -310,24 +312,24 @@ CSS structure.
 
 All of these are present and exercised:
 
-| Test ID                  | Surface                                              |
-| ------------------------ | ---------------------------------------------------- |
-| `agent-create-button`    | Agents page primary action                           |
-| `agent-list`             | Agent roster (`role="list"`)                         |
-| `agent-card`             | Agent card button (`aria-label="View agent {name}"`) |
-| `task-create-button`     | Tasks page primary action                            |
-| `task-board`             | Five-lane Kanban board                               |
-| `task-card`              | Task card button (`aria-label="Open task {title}"`)  |
-| `task-detail-panel`      | Task detail drawer (`role="dialog"`)                 |
-| `execution-start-button` | Start execution in task detail                       |
-| `execution-stop-button`  | Cancel execution on the execution page               |
-| `execution-log`          | Live log viewer (`role="log"`, accessible name)      |
-| `execution-changes-tab`  | Changes tab (`role="tab"`, name `Changes`)           |
-| `execution-changed-files`| Changed-file list in the diff panel                  |
-| `execution-diff-panel`   | Git diff panel                                       |
-| `execution-diff-file`    | One parsed file patch (`data-status`, `data-path`)   |
-| `execution-diff-content` | Unified patch text for one file                      |
-| `execution-diff-truncated` | Truncation badge (`data-truncated`)                |
+| Test ID                    | Surface                                              |
+| -------------------------- | ---------------------------------------------------- |
+| `agent-create-button`      | Agents page primary action                           |
+| `agent-list`               | Agent roster (`role="list"`)                         |
+| `agent-card`               | Agent card button (`aria-label="View agent {name}"`) |
+| `task-create-button`       | Tasks page primary action                            |
+| `task-board`               | Five-lane Kanban board                               |
+| `task-card`                | Task card button (`aria-label="Open task {title}"`)  |
+| `task-detail-panel`        | Task detail drawer (`role="dialog"`)                 |
+| `execution-start-button`   | Start execution in task detail                       |
+| `execution-stop-button`    | Cancel execution on the execution page               |
+| `execution-log`            | Live log viewer (`role="log"`, accessible name)      |
+| `execution-changes-tab`    | Changes tab (`role="tab"`, name `Changes`)           |
+| `execution-changed-files`  | Changed-file list in the diff panel                  |
+| `execution-diff-panel`     | Git diff panel                                       |
+| `execution-diff-file`      | One parsed file patch (`data-status`, `data-path`)   |
+| `execution-diff-content`   | Unified patch text for one file                      |
+| `execution-diff-truncated` | Truncation badge (`data-truncated`)                  |
 
 ### Naming rules
 
@@ -341,9 +343,9 @@ All of these are present and exercised:
 
 ## What the E2E suites cover
 
-### Functional (38)
+### Functional
 
-- **Agents (7)**: create via keyboard-accessible dialog and persist; search and
+- **Agents**: create via keyboard-accessible dialog and persist; search and
   status filters plus empty filter state; profile/current task/execution history;
   edit role and status; delete through confirmation; deleting an agent resets its
   active tasks to Todo and closes the detail drawer; empty roster state.
@@ -364,14 +366,14 @@ All of these are present and exercised:
   edit brief and priority; cancel with nested alert dialog and Escape
   preservation; delete only after confirmation; empty board; task-not-found.
 
-### Business loop (1)
+### Business loop
 
 One test creates an agent, creates and assigns a task, starts an execution,
 watches it complete, verifies the task moved to Done, then verifies the dashboard
 metrics and activity feed reflect the new state. This guards cross-page
 integration and cache invalidation that isolated tests can miss.
 
-### Visual (3)
+### Visual
 
 - Dashboard at 1440×900, 1280×800, and 1920×1080 with a page-overflow assertion
   and one committed baseline at 1440×900 (`maxDiffPixelRatio: 0.02`).
@@ -459,50 +461,174 @@ a different browser build.
 
 ## Troubleshooting
 
-| Symptom                                                | Cause / fix                                                                                                                                                    |
-| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| API tests fail with “database disk image is malformed” | An interrupted run left a corrupt `test.db`. Delete `apps/api/prisma/test.db`, `test.db-wal`, and `test.db-shm`, then rerun.                                   |
-| E2E pretest fails with malformed `e2e.db`              | Same as above; delete the three `e2e.db*` files and rerun `pnpm test:e2e`. `apps/api/scripts/reset-database.mjs` removes stale sidecars before reset.          |
-| `EADDRINUSE` on 3101/5174                              | A previous Playwright server is still running. Stop it or let Playwright reuse it if healthy; CI requires free ports.                                          |
-| `EADDRINUSE` on 3201/5274/3299 (real E2E)              | Stop a previous real E2E API/web/runner. The real config never reuses servers, so a stale process always fails fast.                                          |
+| Symptom                                                | Cause / fix                                                                                                                                                               |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| API tests fail with “database disk image is malformed” | An interrupted run left a corrupt `test.db`. Delete `apps/api/prisma/test.db`, `test.db-wal`, and `test.db-shm`, then rerun.                                              |
+| E2E pretest fails with malformed `e2e.db`              | Same as above; delete the three `e2e.db*` files and rerun `pnpm test:e2e`. `apps/api/scripts/reset-database.mjs` removes stale sidecars before reset.                     |
+| `EADDRINUSE` on 3101/5174                              | A previous Playwright server is still running. Stop it or let Playwright reuse it if healthy; CI requires free ports.                                                     |
+| `EADDRINUSE` on 3201/5274/3299 (real E2E)              | Stop a previous real E2E API/web/runner. The real config never reuses servers, so a stale process always fails fast.                                                      |
 | Stale recovery journal after a crash                   | Inspect `test-results/real-e2e/recovery` (real suite) or `~/.haft/recovery/<runnerId>`; it is evidence, not state. The next runner start reports it and never re-runs it. |
-| Playwright cannot launch Chromium 1248                 | Use the cached 1228 fallback described above, or set `PLAYWRIGHT_CHROMIUM_EXECUTABLE`.                                                                         |
-| Socket status stays disconnected in E2E                | Check `apps/web/.env.e2e`: `VITE_SOCKET_URL` must point at `http://127.0.0.1:3101`; the E2E web server must bind `127.0.0.1`.                                  |
-| Old toast assertions fail late in a flow               | Toasts live 4.5 s. Assert the toast immediately after the action, or assert durable UI state instead.                                                          |
-| Visual snapshot fails after a UI change                | Inspect `test-results` diff, confirm the change is intentional, then run with `--update-snapshots`.                                                            |
-| Contract helper throws unknown selector                | Add the selector to `ui-interaction.contract.json`; required IDs are validated automatically on load.                                                          |
-| API says `E2E_TEST_MODE` endpoints are 404             | Start with `NODE_ENV=test` and `E2E_TEST_MODE=true` (the E2E scripts do this).                                                                                 |
-| Fake Runner never becomes ready on 3199                | Check the API bootstrap token matches `E2E_RUNNER_BOOTSTRAP_TOKEN`; delete the cached `test-results/.runner/runner-e2e.json` and rerun.                        |
-| `/api/runtimes` says `CLI_NOT_INSTALLED`               | Install the CLI on the runner host or set `HAFT_CODEX_BIN` / `HAFT_OPENCODE_BIN` to an explicit executable path.                                               |
-| `/api/runtimes` says `CLI_NOT_AUTHENTICATED`           | Run `codex login` or `opencode auth login` on the runner host, then restart the runner so capabilities are probed again.                                       |
-| `/api/runtimes` says `PROJECT_NOT_MAPPED`              | Add the task's project id to `HAFT_RUNNER_PROJECTS` (JSON map of project id → repository path) and restart the runner.                                         |
-| Real execution fails with `PROJECT_NOT_GIT_ROOT`       | The mapped path must be the root of a Git repository with at least one commit. Worktrees are created from `HEAD`.                                              |
-| Real execution fails with `BRANCH_EXISTS`              | An earlier execution branch `haft/<executionId>` still exists; delete it or keep worktrees and choose a fresh execution.                                       |
-| Real execution fails with `WORKTREE_EXISTS`            | A stale worktree directory remains under the worktree root; remove it with `git worktree remove --force <path>` (or `git worktree prune`) and retry.           |
-| Prisma logs `Socket timeout` during E2E                | Test DB URLs use `connection_limit=1&socket_timeout=20` and the API sets `busy_timeout=15000`. If it still appears, stop stray API/Prisma processes and rerun. |
-| Real CLI E2E skipped despite `HAFT_REAL_CLI_E2E=1`     | The runner probe marked the runtime unavailable. Inspect `/api/runtimes` on `:3201` and the runner log; a skip is not a pass.                                  |
+| Playwright cannot launch Chromium 1248                 | Use the cached 1228 fallback described above, or set `PLAYWRIGHT_CHROMIUM_EXECUTABLE`.                                                                                    |
+| Socket status stays disconnected in E2E                | Check `apps/web/.env.e2e`: `VITE_SOCKET_URL` must point at `http://127.0.0.1:3101`; the E2E web server must bind `127.0.0.1`.                                             |
+| Old toast assertions fail late in a flow               | Toasts live 4.5 s. Assert the toast immediately after the action, or assert durable UI state instead.                                                                     |
+| Visual snapshot fails after a UI change                | Inspect `test-results` diff, confirm the change is intentional, then run with `--update-snapshots`.                                                                       |
+| Contract helper throws unknown selector                | Add the selector to `ui-interaction.contract.json`; required IDs are validated automatically on load.                                                                     |
+| API says `E2E_TEST_MODE` endpoints are 404             | Start with `NODE_ENV=test` and `E2E_TEST_MODE=true` (the E2E scripts do this).                                                                                            |
+| Fake Runner never becomes ready on 3199                | Check the API bootstrap token matches `E2E_RUNNER_BOOTSTRAP_TOKEN`; delete the cached `test-results/.runner/runner-e2e.json` and rerun.                                   |
+| `/api/runtimes` says `CLI_NOT_INSTALLED`               | Install the CLI on the runner host or set `HAFT_CODEX_BIN` / `HAFT_OPENCODE_BIN` to an explicit executable path.                                                          |
+| `/api/runtimes` says `CLI_NOT_AUTHENTICATED`           | Run `codex login` or `opencode auth login` on the runner host, then restart the runner so capabilities are probed again.                                                  |
+| `/api/runtimes` says `PROJECT_NOT_MAPPED`              | Add the task's project id to `HAFT_RUNNER_PROJECTS` (JSON map of project id → repository path) and restart the runner.                                                    |
+| Real execution fails with `PROJECT_NOT_GIT_ROOT`       | The mapped path must be the root of a Git repository with at least one commit. Worktrees are created from `HEAD`.                                                         |
+| Real execution fails with `BRANCH_EXISTS`              | An earlier execution branch `haft/<executionId>` still exists; delete it or keep worktrees and choose a fresh execution.                                                  |
+| Real execution fails with `WORKTREE_EXISTS`            | A stale worktree directory remains under the worktree root; remove it with `git worktree remove --force <path>` (or `git worktree prune`) and retry.                      |
+| Prisma logs `Socket timeout` during E2E                | Test DB URLs use `connection_limit=1&socket_timeout=20` and the API sets `busy_timeout=15000`. If it still appears, stop stray API/Prisma processes and rerun.            |
+| Real CLI E2E skipped despite `HAFT_REAL_CLI_E2E=1`     | The runner probe marked the runtime unavailable. Inspect `/api/runtimes` on `:3201` and the runner log; a skip is not a pass.                                             |
 
-## CI guidance
+## Continuous integration
 
-A minimal pipeline:
+The Phase 2 CI foundation consists of two workflows. Neither workflow may claim a
+pass without evidence: counts come from native reports, a skipped real CLI test is
+not a pass, and an unavailable audit endpoint is an infrastructure failure. CI
+pins Node.js `22.14.0` and pnpm `11.5.2`; pnpm 11 requires Node.js `>=22.13`.
+
+### Pull request / main workflow (`ci.yml`)
+
+| Property    | Value                                                                    |
+| ----------- | ------------------------------------------------------------------------ |
+| Triggers    | `pull_request`, push to `main`, `workflow_dispatch`                      |
+| Never       | `pull_request_target`, hosted fallback for real CLI, `continue-on-error` |
+| Permissions | `contents: read`                                                         |
+| Concurrency | Superseded pull-request runs are cancelled                               |
+
+Jobs:
+
+| Job        | Runner                             | What it proves                                                     |
+| ---------- | ---------------------------------- | ------------------------------------------------------------------ |
+| `static`   | `ubuntu-latest`                    | lint, typecheck, changed-file formatting, build                    |
+| `unit`     | `ubuntu-latest` + `windows-latest` | all deterministic Vitest layers, each layer reported independently |
+| `e2e`      | `ubuntu-latest`                    | Chromium + Fake Runner browser suite, no real CLI                  |
+| `security` | `ubuntu-latest`                    | lockfile drift + production audit + `git diff --check`             |
+| `summary`  | `ubuntu-latest`                    | report completeness, dynamic totals, required-job gate             |
+
+`pnpm install --frozen-lockfile` is used everywhere, and Prisma Client is
+generated explicitly before typecheck, build, and tests because the lockfile
+install does not run `prisma generate`. The unit jobs also build
+`packages/contracts` before the four test layers; API, runner, and web import its
+`dist` output, which does not exist in a clean checkout.
+
+Formatting: `pnpm format:check` runs
+`scripts/acceptance/check-format.mjs`. It compares the working tree against
+`scripts/acceptance/format-baseline.json` and fails if a changed file is not
+Prettier-clean. The baseline contains legacy debt inherited from the frozen
+baseline; it must shrink as owning tasks format their files. Use
+`pnpm exec prettier --write <file>` on files your task owns. Never mass-format
+another task's source to clear the baseline. `pnpm format:check:all` is the
+non-grandfathered, whole-repository view. Regenerate the debt list only with
+`node scripts/acceptance/check-format.mjs --write-baseline` after an explicit
+repository decision.
+
+Production audit: the security job runs
+`node scripts/acceptance/security-audit.mjs` against
+`https://registry.npmjs.org` because the default mirror may not expose an audit
+endpoint. High/critical findings block unless
+`scripts/acceptance/audit-exemptions.json` contains a matching entry with
+`reason`, `owner`, and a future `expiresAt`. Expired exemptions fail closed.
+Moderate/low findings are reported but do not block. When an audit call itself
+fails, the job reports `BLOCKED`; it never reports `PASS`.
+
+### Reports and artifacts
+
+- Vitest and Playwright emit JSON/JUnit only when `CI_TEST_REPORT_DIR` is set, so
+  local `pnpm test` output is unchanged.
+- `scripts/acceptance/run-unit-tests.mjs` runs contracts, API, runner, and web
+  independently and writes `orchestration.json`; one failing layer does not hide
+  the others.
+- `scripts/acceptance/summarize-ci.mjs` writes `test-summary.json`,
+  `test-summary.md`, and `metadata.json`, appends the Markdown to the GitHub job
+  summary, and fails when a required layer/platform report is missing or failed.
+- Artifacts: `unit-<os>`, `e2e-playwright`, `e2e-reports`, `static-report`,
+  `security-report`, and `ci-summary`, retained for 14 days and uploaded with
+  `if: always()`.
+- Upload exclusions: `.env` files, SQLite databases, `test-results/.runner/**`
+  runner tokens, and `auth.json` CLI credentials.
+- The visual suite keeps per-platform Playwright snapshots. CI uses
+  `dashboard-1440x900-chromium-linux.png`; regenerate it on Linux with
+  `pnpm exec playwright test tests/e2e/visual/visual.spec.ts --grep "dashboard layout is stable" --update-snapshots`
+  after an intentional layout change. Keep the Windows baseline as well.
+
+### Real CLI workflow (`real-cli.yml`)
+
+`real-cli.yml` is deliberately separate:
+
+- `workflow_dispatch` only, with a full 40-character commit SHA, a pinned Codex
+  version, and an optional OpenCode model;
+- protected GitHub environment `real-cli` with required reviewers and deployment
+  branch restrictions;
+- self-hosted runner label `haft-real-cli-ephemeral`; there is no hosted-runner
+  fallback;
+- isolated low-privilege user, `HOME`, `CODEX_HOME`, `TMPDIR`, XDG directories,
+  database (`real-e2e.db`), ports (`3201/5274/3299`), disposable repository,
+  worktree root, and recovery root; the optional environment variable
+  `HAFT_REAL_CLI_ALLOWED_USER` pins the dedicated account and rejects any other
+  user;
+- the environment secret `HAFT_CODEX_AUTH_JSON` is materialized into the isolated
+  `CODEX_HOME/auth.json` in a separate step. It is never printed, never written
+  into the repository, never passed to the test step, and is removed by cleanup;
+- the personal `~/.codex` is never used;
+- a fail-closed preflight verifies the runner is self-hosted, the user is not
+  root/Administrator, the home and Codex home are isolated, the commit matches and
+  is reachable from `origin/main`, the checkout is clean, the pinned CLI version
+  and optional SHA256 match, authentication works, the ports are free, and no
+  previous test state exists;
+- `scripts/acceptance/real-cli-report.mjs` validates the Playwright JSON report
+  and the preflight record. A missing report or a missing/blocked preflight
+  produces `BLOCKED`; required tests that are skipped or flaky never produce
+  `PASS`;
+- evidence is collected, redacted, hashed (`manifest.json`, `sha256.txt`), and
+  uploaded with 30-day retention; cleanup runs under `if: always()` and uploads a
+  separate cleanup record.
+
+A real CLI run is PASS only when the preflight is PASS, both required Codex tests
+(API and UI) pass, and the report/manifest exist. OpenCode remains optional and
+explicitly enabled.
+
+### Branch protection (administrator step)
+
+Workflow files cannot protect a branch. In **Settings → Branches**, protect
+`main` and require the checks `Static checks`, `Unit tests (ubuntu-latest)`,
+`Unit tests (windows-latest)`, `Browser E2E (Fake Runner)`,
+`Security and whitespace gates`, and `CI summary`. Require branches to be up to
+date, and block force pushes and deletions. Create the protected `real-cli`
+environment separately with reviewers, branch restrictions, and the environment
+secret/variables described above.
+
+### Local parity
 
 ```bash
 pnpm install --frozen-lockfile
+pnpm --filter @raft-lite/api exec prisma generate
 pnpm lint
 pnpm typecheck
+pnpm format:check
+pnpm build
 pnpm test
 pnpm exec playwright install --with-deps chromium
 pnpm test:e2e
-pnpm build
 ```
 
-Run E2E serially, keep `docs/screenshots` and the visual baseline in the
-artifact set, and publish the Playwright HTML report on failure. If the runner
-lacks Chromium 1248, either install it or set
-`PLAYWRIGHT_CHROMIUM_EXECUTABLE` to a compatible build.
+Run the real CLI suite only on the dedicated isolated host. Never run it on a
+developer machine with personal CLI credentials, and never fold it into the
+deterministic PR pipeline.
 
-Do not run `pnpm test:e2e:real` on a generic CI worker without provisioning and
-authenticating both CLIs. It is a manual/self-hosted acceptance gate; the
-deterministic Fake Runner suite already covers the protocol end to end. The real
-project now includes a browser-UI test, so the self-hosted job must also be able
-to bind ports 3201/5274/3299 and allocate a disposable Git workspace.
+### CI troubleshooting
+
+| Symptom                                 | Cause / fix                                                                                                                                                                            |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `format:check` lists legacy files       | They are expected baseline debt. Only reformat files owned by your task; if a new file appears, format it.                                                                             |
+| `security` job says `BLOCKED`           | The audit endpoint was unreachable or returned non-JSON. Fix registry/network access; do not treat it as a pass.                                                                       |
+| Unit report missing in summary          | The artifact upload or matrix job failed. Re-run the layer and confirm `CI_TEST_REPORT_DIR` is absolute.                                                                               |
+| E2E report exists but status is `empty` | Playwright ran no tests (for example, a web-server startup failure). Inspect `test-results` and the job log.                                                                           |
+| Windows-only unit failure               | Reproduce locally on Windows; check path separators and file-locking in the failing layer. Linux PASS does not imply Windows PASS.                                                     |
+| Known E2E flake: task delete            | `tasks.spec.ts` occasionally times out waiting for the detail delete action and passes on the configured CI retry. Inspect the trace; a retry is visible as `flaky`, not a clean pass. |
+| Real CLI preflight `BLOCKED`            | Check the runner label/environment, isolated `HOME`/`CODEX_HOME`, pinned version/SHA256, auth file, ports, and clean checkout. Missing prerequisites are blocked, not skipped.         |
+| Real CLI report `SKIPPED`               | The runtime probe marked the CLI unavailable. Fix installation/authentication; a skip is not acceptance evidence.                                                                      |

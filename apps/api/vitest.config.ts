@@ -1,5 +1,8 @@
+import { join } from 'node:path';
 import swc from 'unplugin-swc';
 import { defineConfig } from 'vitest/config';
+
+const reportDir = process.env.CI_TEST_REPORT_DIR;
 
 export default defineConfig({
   plugins: [
@@ -18,5 +21,14 @@ export default defineConfig({
     fileParallelism: false,
     testTimeout: 20_000,
     hookTimeout: 30_000,
+    ...(reportDir
+      ? {
+          reporters: [
+            'default',
+            ['json', { outputFile: join(reportDir, 'api.json') }],
+            ['junit', { outputFile: join(reportDir, 'api-junit.xml') }],
+          ],
+        }
+      : {}),
   },
 });

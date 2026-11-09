@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "packageManager": "pnpm@11.5.2",
   "engines": {
-    "node": ">=20.19"
+    "node": ">=22.13"
   },
   "scripts": {
     "predev": "pnpm --filter @raft-lite/contracts build",
@@ -28,7 +28,8 @@
     "db:seed": "pnpm --filter @raft-lite/api db:seed",
     "db:studio": "pnpm --filter @raft-lite/api db:studio",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "node scripts/acceptance/check-format.mjs",
+    "format:check:all": "prettier --check ."
   },
   "devDependencies": {
     "@eslint/js": "^9.33.0",

@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "note": "High/Critical findings are blocking unless an entry below is unexpired and owned. Remove an exemption as soon as the dependency is upgraded. Moderate/Low findings are reported but do not block.",
+  "exemptions": [
+    {
+      "id": "1115356",
+      "module": "effect",
+      "severity": "high",
+      "reason": "Transitive optional dependency of the Prisma CLI (@prisma/client > prisma > @prisma/config > effect). Haft imports neither effect nor @prisma/config at runtime. The fix is bundled with a Prisma major upgrade; direct dependency upgrades are intentionally out of scope for P2-04.",
+      "owner": "P2-04 CI owner / repository maintainer",
+      "expiresAt": "2026-12-31T23:59:59Z",
+      "tracking": "Dependency upgrade task (Prisma toolchain)"
+    },
+    {
+      "id": "1145093",
+      "module": "deepmerge-ts",
+      "severity": "high",
+      "reason": "Transitive optional dependency of the Prisma CLI toolchain, not imported by Haft runtime code. Fix requires the same Prisma toolchain upgrade as advisory 1115356.",
+      "owner": "P2-04 CI owner / repository maintainer",
+      "expiresAt": "2026-12-31T23:59:59Z",
+      "tracking": "Dependency upgrade task (Prisma toolchain)"
+    },
+    {
+      "id": "1243066",
+      "module": "zod",
+      "severity": "high",
+      "reason": "The patched release is Zod 4 (>=4.6.6) while contracts intentionally pin Zod 3 (^3.25.76). A major migration would change every shared contract and is out of scope for P2-04. Request bodies are size-limited and the API is loopback-only until P2-03/P2-05; residual risk is tracked.",
+      "owner": "P2-04 CI owner / repository maintainer",
+      "expiresAt": "2026-12-31T23:59:59Z",
+      "tracking": "P2-00 contracts baseline / dedicated Zod 4 migration"
+    },
+    {
+      "id": "1243083",
+      "module": "multer",
+      "severity": "high",
+      "reason": "Transitive dependency of @nestjs/platform-express. Haft exposes JSON REST endpoints only and has no multipart upload route, so the affected fileFilter path is not reachable. Fix requires a coordinated NestJS platform upgrade.",
+      "owner": "P2-04 CI owner / repository maintainer",
+      "expiresAt": "2026-12-31T23:59:59Z",
+      "tracking": "NestJS dependency upgrade task"
+    }
+  ]
+}

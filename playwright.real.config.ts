@@ -14,6 +14,7 @@ const RUNNER_HEALTH_PORT = process.env.REAL_E2E_RUNNER_HEALTH_PORT ?? '3299';
 const RUNNER_HEALTH_URL = `http://127.0.0.1:${RUNNER_HEALTH_PORT}`;
 const RUNNER_BOOTSTRAP_TOKEN =
   process.env.REAL_E2E_RUNNER_BOOTSTRAP_TOKEN ?? 'real-e2e-runner-bootstrap-token';
+const CI_TEST_REPORT_DIR = process.env.CI_TEST_REPORT_DIR;
 
 const REAL_E2E_ROOT = join(process.cwd(), 'test-results', 'real-e2e');
 const PROJECT_DIR = join(REAL_E2E_ROOT, 'workspace');
@@ -54,7 +55,15 @@ export default defineConfig({
   workers: 1,
   timeout: 600_000,
   expect: { timeout: 15_000 },
-  reporter: [['list']],
+  reporter: [
+    ['list'],
+    ...(CI_TEST_REPORT_DIR
+      ? [
+          ['json', { outputFile: join(CI_TEST_REPORT_DIR, 'playwright.json') }],
+          ['junit', { outputFile: join(CI_TEST_REPORT_DIR, 'playwright-junit.xml') }],
+        ]
+      : []),
+  ],
   outputDir: 'test-results/real-e2e/playwright',
   use: {
     baseURL: WEB_URL,
@@ -91,8 +100,7 @@ export default defineConfig({
       },
     },
     {
-      command:
-        'node tests/e2e-real/prepare-project.mjs && pnpm --filter @raft-lite/runner start',
+      command: 'node tests/e2e-real/prepare-project.mjs && pnpm --filter @raft-lite/runner start',
       url: `${RUNNER_HEALTH_URL}/ready`,
       reuseExistingServer: false,
       timeout: 120_000,

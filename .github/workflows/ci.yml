@@ -1,0 +1,337 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CI: 'true'
+  NODE_VERSION: '22.14.0'
+  PNPM_VERSION: '11.5.2'
+
+jobs:
+  static:
+    name: Static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@9fd676a19091d4595eefd76e4bd31c97133911f1 # v4.2.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          standalone: 'true'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma Client
+        run: pnpm --filter @raft-lite/api exec prisma generate
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Check formatting
+        env:
+          CI_FORMAT_BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
+        run: pnpm format:check
+
+      - name: Build
+        run: pnpm build
+
+      - name: Record build summary
+        if: always()
+        env:
+          CI_STATIC_ARTIFACT_DIR: ${{ github.workspace }}/ci-artifacts/static
+        run: node scripts/acceptance/build-report.mjs
+
+      - name: Upload static report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: static-report
+          path: ci-artifacts/static/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  unit:
+    name: Unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@9fd676a19091d4595eefd76e4bd31c97133911f1 # v4.2.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          standalone: 'true'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma Client
+        run: pnpm --filter @raft-lite/api exec prisma generate
+
+      - name: Build shared contracts
+        run: pnpm --filter @raft-lite/contracts build
+
+      - name: Run all deterministic suites
+        env:
+          CI_TEST_REPORT_DIR: ${{ github.workspace }}/ci-artifacts/unit/${{ matrix.os }}
+        run: node scripts/acceptance/run-unit-tests.mjs
+
+      - name: Upload unit reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unit-${{ matrix.os }}
+          path: ci-artifacts/unit/${{ matrix.os }}/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  e2e:
+    name: Browser E2E (Fake Runner)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@9fd676a19091d4595eefd76e4bd31c97133911f1 # v4.2.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          standalone: 'true'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma Client
+        run: pnpm --filter @raft-lite/api exec prisma generate
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Run Fake Runner browser suite
+        env:
+          CI_TEST_REPORT_DIR: ${{ github.workspace }}/ci-artifacts/e2e
+        run: pnpm test:e2e
+
+      - name: Redact E2E artifacts
+        if: always()
+        env:
+          E2E_RUNNER_BOOTSTRAP_TOKEN: e2e-runner-bootstrap-token
+        run: |
+          node scripts/acceptance/redact-artifacts.mjs ci-artifacts/e2e
+          node scripts/acceptance/redact-artifacts.mjs test-results
+          node scripts/acceptance/redact-artifacts.mjs playwright-report
+
+      - name: Upload Playwright reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-playwright
+          path: |
+            playwright-report/
+            test-results/
+            !**/.env
+            !**/.env.*
+            !**/*.db
+            !**/*.db-journal
+            !**/*.db-wal
+            !**/*.db-shm
+            !**/auth.json
+            !test-results/.runner/**
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload machine-readable E2E reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-reports
+          path: ci-artifacts/e2e/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  security:
+    name: Security and whitespace gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@9fd676a19091d4595eefd76e4bd31c97133911f1 # v4.2.0
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          standalone: 'true'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify lockfile is unchanged
+        run: git diff --exit-code -- pnpm-lock.yaml
+
+      - name: Production dependency audit
+        env:
+          CI_SECURITY_ARTIFACT_DIR: ${{ github.workspace }}/ci-artifacts/security
+          CI_AUDIT_REGISTRY: https://registry.npmjs.org
+        run: node scripts/acceptance/security-audit.mjs
+
+      - name: Check whitespace errors
+        shell: bash
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            git diff --check "$BASE_SHA...HEAD"
+          elif [ "$GITHUB_EVENT_NAME" = "push" ] && [[ ! "$BASE_SHA" =~ ^0+$ ]]; then
+            git diff --check "$BASE_SHA...HEAD"
+          else
+            git diff --check
+          fi
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || 'HEAD' }}
+
+      - name: Upload security report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: security-report
+          path: ci-artifacts/security/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  summary:
+    name: CI summary
+    needs:
+      - static
+      - unit
+      - e2e
+      - security
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download unit reports
+        if: always()
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: unit-*
+          path: ci-artifacts/unit
+
+      - name: Download E2E reports
+        if: always()
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: e2e-*
+          path: ci-artifacts/e2e
+
+      - name: Download static report
+        if: always()
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: static-report
+          path: ci-artifacts/static
+
+      - name: Download security report
+        if: always()
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: security-report
+          path: ci-artifacts/security
+
+      - name: Generate CI report
+        if: always()
+        run: node scripts/acceptance/summarize-ci.mjs --artifacts ci-artifacts
+
+      - name: Enforce required jobs
+        if: always()
+        shell: bash
+        env:
+          STATIC_RESULT: ${{ needs.static.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          E2E_RESULT: ${{ needs.e2e.result }}
+          SECURITY_RESULT: ${{ needs.security.result }}
+        run: |
+          failed=0
+          for pair in "static:$STATIC_RESULT" "unit:$UNIT_RESULT" "e2e:$E2E_RESULT" "security:$SECURITY_RESULT"; do
+            name="${pair%%:*}"
+            result="${pair#*:}"
+            if [ "$result" != "success" ]; then
+              echo "::error title=Required job $name::$name concluded $result"
+              failed=1
+            fi
+          done
+          exit "$failed"
+
+      - name: Upload CI summary
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-summary
+          path: |
+            ci-artifacts/test-summary.json
+            ci-artifacts/test-summary.md
+            ci-artifacts/metadata.json
+          if-no-files-found: warn
+          retention-days: 14

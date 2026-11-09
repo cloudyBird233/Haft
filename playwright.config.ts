@@ -9,6 +9,7 @@ const RUNNER_HEALTH_URL =
   process.env.E2E_RUNNER_HEALTH_URL ?? `http://127.0.0.1:${RUNNER_HEALTH_PORT}`;
 const RUNNER_BOOTSTRAP_TOKEN =
   process.env.E2E_RUNNER_BOOTSTRAP_TOKEN ?? 'e2e-runner-bootstrap-token';
+const CI_TEST_REPORT_DIR = process.env.CI_TEST_REPORT_DIR;
 
 /**
  * Keep screenshots comparable across machines by preferring the Chromium
@@ -52,6 +53,12 @@ export default defineConfig({
   reporter: [
     ['list'],
     ['html', { outputFolder: 'playwright-report', open: 'never' }],
+    ...(CI_TEST_REPORT_DIR
+      ? [
+          ['json', { outputFile: join(CI_TEST_REPORT_DIR, 'playwright.json') }],
+          ['junit', { outputFile: join(CI_TEST_REPORT_DIR, 'playwright-junit.xml') }],
+        ]
+      : []),
   ],
   outputDir: 'test-results',
   use: {
@@ -115,18 +122,8 @@ export default defineConfig({
         HAFT_RUNNER_ID: 'runner_e2e',
         HAFT_RUNNER_COMPUTER_ID: 'computer_local',
         HAFT_RUNNER_BOOTSTRAP_TOKEN: RUNNER_BOOTSTRAP_TOKEN,
-        HAFT_RUNNER_TOKEN_FILE: join(
-          process.cwd(),
-          'test-results',
-          '.runner',
-          'runner-e2e.json',
-        ),
-        HAFT_RUNNER_RECOVERY_ROOT: join(
-          process.cwd(),
-          'test-results',
-          '.runner',
-          'recovery',
-        ),
+        HAFT_RUNNER_TOKEN_FILE: join(process.cwd(), 'test-results', '.runner', 'runner-e2e.json'),
+        HAFT_RUNNER_RECOVERY_ROOT: join(process.cwd(), 'test-results', '.runner', 'recovery'),
         HAFT_RUNNER_MODE: 'fake',
         HAFT_RUNNER_PROJECTS: JSON.stringify({ project_demo: process.cwd() }),
         HAFT_RUNNER_HEALTH_PORT: RUNNER_HEALTH_PORT,

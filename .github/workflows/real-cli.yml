@@ -1,0 +1,189 @@
+name: Real CLI Acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Full 40-character commit SHA on main to verify
+        required: true
+        type: string
+      codex_version:
+        description: Pinned Codex CLI version installed on the dedicated runner
+        required: true
+        type: string
+      opencode_model:
+        description: Optional OpenCode model (provider/model). Leave empty to skip OpenCode.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-cli-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  real-cli:
+    name: Real Codex CLI acceptance
+    runs-on:
+      - self-hosted
+      - haft-real-cli-ephemeral
+    timeout-minutes: 45
+    environment: real-cli
+    steps:
+      - name: Validate fixed commit input
+        shell: bash
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          if ! [[ "$INPUT_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Invalid ref::ref must be a full 40-character lowercase commit SHA"
+            exit 1
+          fi
+
+      - name: Checkout fixed commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Fetch main for ancestry verification
+        shell: bash
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          while read -r key _; do
+            git config --local --unset-all "$key" || true
+          done < <(git config --local --get-regexp '^http\..*extraheader$' || true)
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@9fd676a19091d4595eefd76e4bd31c97133911f1 # v4.2.0
+        with:
+          version: 11.5.2
+          standalone: 'true'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.14.0
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma Client
+        run: pnpm --filter @raft-lite/api exec prisma generate
+
+      - name: Build contracts
+        run: pnpm --filter @raft-lite/contracts build
+
+      - name: Prepare isolated runtime root
+        shell: bash
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+          INPUT_CODEX_VERSION: ${{ inputs.codex_version }}
+        run: |
+          root="${RUNNER_TEMP}/haft-real-cli"
+          host_home="$HOME"
+          rm -rf "$root"
+          mkdir -p "$root/home" "$root/codex-home" "$root/tmp"
+          {
+            echo "HAFT_REAL_CLI_ROOT=$root"
+            echo "HAFT_REAL_CLI_HOST_HOME=$host_home"
+            echo "HOME=$root/home"
+            echo "USERPROFILE=$root/home"
+            echo "CODEX_HOME=$root/codex-home"
+            echo "TMPDIR=$root/tmp"
+            echo "XDG_CONFIG_HOME=$root/home/.config"
+            echo "XDG_CACHE_HOME=$root/home/.cache"
+            echo "XDG_DATA_HOME=$root/home/.local/share"
+            echo "HAFT_REAL_CLI_COMMIT=$INPUT_REF"
+            echo "HAFT_CODEX_VERSION=$INPUT_CODEX_VERSION"
+            echo "HAFT_REAL_CLI_EPHEMERAL=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Materialize isolated Codex credentials
+        env:
+          HAFT_CODEX_AUTH_JSON: ${{ secrets.HAFT_CODEX_AUTH_JSON }}
+        run: node scripts/acceptance/materialize-codex-auth.mjs
+
+      - name: Real CLI preflight
+        env:
+          HAFT_REAL_CLI_E2E: '1'
+          HAFT_REAL_CLI_REQUIRED: '1'
+          HAFT_REAL_CLI_REQUIRE_CODEX_SHA256: '1'
+          HAFT_CODEX_BIN: ${{ vars.HAFT_CODEX_BIN || 'codex' }}
+          HAFT_CODEX_BIN_SHA256: ${{ vars.HAFT_CODEX_BIN_SHA256 }}
+          HAFT_REAL_CLI_ALLOWED_USER: ${{ vars.HAFT_REAL_CLI_ALLOWED_USER }}
+          HAFT_REAL_E2E_OPENCODE: ${{ inputs.opencode_model != '' && '1' || '0' }}
+          HAFT_REAL_OPENCODE_MODEL: ${{ inputs.opencode_model }}
+          CI_REAL_CLI_ARTIFACT_DIR: ${{ github.workspace }}/ci-artifacts/real-cli
+        run: node scripts/acceptance/real-cli-preflight.mjs
+
+      - name: Run real CLI acceptance tests
+        shell: bash
+        env:
+          HAFT_REAL_CLI_E2E: '1'
+          HAFT_REAL_CLI_REQUIRED: '1'
+          HAFT_REAL_E2E_OPENCODE: ${{ inputs.opencode_model != '' && '1' || '0' }}
+          HAFT_REAL_OPENCODE_MODEL: ${{ inputs.opencode_model }}
+          CI_TEST_REPORT_DIR: ${{ github.workspace }}/ci-artifacts/real-cli
+          CI_REAL_CLI_ARTIFACT_DIR: ${{ github.workspace }}/ci-artifacts/real-cli
+        run: |
+          set -o pipefail
+          mkdir -p ci-artifacts/real-cli
+          pnpm test:e2e:real 2>&1 | tee ci-artifacts/real-cli/run.log
+
+      - name: Collect evidence
+        if: always()
+        env:
+          CI_REAL_CLI_ARTIFACT_DIR: ${{ github.workspace }}/ci-artifacts/real-cli
+        run: node scripts/acceptance/collect-real-cli-evidence.mjs
+
+      - name: Redact evidence
+        if: always()
+        env:
+          HAFT_CODEX_AUTH_JSON: ${{ secrets.HAFT_CODEX_AUTH_JSON }}
+        run: node scripts/acceptance/redact-artifacts.mjs ci-artifacts/real-cli
+
+      - name: Build real CLI report and manifest
+        if: always()
+        env:
+          HAFT_CODEX_VERSION: ${{ inputs.codex_version }}
+          HAFT_CODEX_BIN_SHA256: ${{ vars.HAFT_CODEX_BIN_SHA256 }}
+          HAFT_REAL_CLI_COMMIT: ${{ inputs.ref }}
+          HAFT_REAL_E2E_OPENCODE: ${{ inputs.opencode_model != '' && '1' || '0' }}
+          CI_REAL_CLI_ARTIFACT_DIR: ${{ github.workspace }}/ci-artifacts/real-cli
+        run: node scripts/acceptance/real-cli-report.mjs
+
+      - name: Upload redacted real CLI evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: real-cli-evidence
+          path: |
+            ci-artifacts/real-cli/**
+            !**/.env
+            !**/.env.*
+            !**/auth.json
+            !**/*.db
+            !**/*.db-journal
+            !**/*.db-wal
+            !**/*.db-shm
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Cleanup isolated state
+        if: always()
+        env:
+          CI_REAL_CLI_ARTIFACT_DIR: ${{ github.workspace }}/ci-artifacts/real-cli
+        run: node scripts/acceptance/cleanup-real-cli.mjs
+
+      - name: Upload cleanup record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: real-cli-cleanup
+          path: ci-artifacts/real-cli/cleanup/**
+          if-no-files-found: warn
+          retention-days: 30

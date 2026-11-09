@@ -3,6 +3,7 @@ dist
 coverage
 playwright-report
 test-results
+ci-artifacts
 pnpm-lock.yaml
 apps/api/prisma/*.db
 tests/e2e/**-snapshots/**
