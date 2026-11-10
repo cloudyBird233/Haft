@@ -298,10 +298,7 @@ export class RunnerClient {
         break;
       case 'execution.log.ack':
         this.executor.acknowledge(message.payload.executionId, message.payload.throughSeq);
-        void this.recovery.acknowledgeLogs(
-          message.payload.executionId,
-          message.payload.throughSeq,
-        );
+        void this.recovery.acknowledgeLogs(message.payload.executionId, message.payload.throughSeq);
         break;
     }
   }
@@ -356,21 +353,8 @@ export class RunnerClient {
       acceptedAt: new Date().toISOString(),
     });
 
-    if (!this.config.projectPaths[payload.projectId]) {
-      this.send('execution.failed', {
-        executionId: payload.executionId,
-        reason: `PROJECT_NOT_MAPPED: ${payload.projectId}`,
-        exitCode: null,
-        summary: null,
-        git: null,
-      });
-      return;
-    }
-
     if (this.config.mode === 'real') {
-      const capability = this.runtimeCapabilities.find(
-        (item) => item.runtime === payload.runtime,
-      );
+      const capability = this.runtimeCapabilities.find((item) => item.runtime === payload.runtime);
       if (!capability?.installed) {
         this.send('execution.failed', {
           executionId: payload.executionId,
@@ -523,7 +507,7 @@ export class RunnerClient {
   private capabilities(): RunnerCapabilities {
     return {
       runtimes: this.runtimeCapabilities,
-      projectIds: Object.keys(this.config.projectPaths),
+      projectIds: [],
       maxConcurrentExecutions: this.config.maxConcurrentExecutions,
     };
   }

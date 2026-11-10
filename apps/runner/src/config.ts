@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, normalize, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { RUNNER_RUNTIMES, type RunnerRuntimeType } from '@raft-lite/contracts';
 
@@ -23,13 +23,26 @@ export interface RunnerConfig {
   shutdownGraceMs: number;
   cliTimeoutMs: number;
   allowAutoApprove: boolean;
-  projectPaths: Record<string, string>;
+  allowedRepositoryRoots: string[];
+  allowUnc: boolean;
   stepMs: number;
   healthPort: number;
   maxConcurrentExecutions: number;
   runnerVersion: string;
-  platform: string;
+  platform: NodeJS.Platform;
   architecture: string;
+}
+
+let legacyProjectsWarningEmitted = false;
+
+function warnAboutLegacyProjectConfig(env: NodeJS.ProcessEnv): void {
+  if (legacyProjectsWarningEmitted || env.HAFT_RUNNER_PROJECTS === undefined) {
+    return;
+  }
+  legacyProjectsWarningEmitted = true;
+  console.warn(
+    'HAFT_RUNNER_PROJECTS is no longer used; configure --allowed-root/HAFT_RUNNER_ALLOWED_ROOTS',
+  );
 }
 
 const HELP = `Haft Agent Runner
@@ -43,7 +56,8 @@ Options:
   --bootstrap-token <token>  One-time pairing token
   --token-file <path>        Where the issued runner token is cached
   --mode <fake|real|codex|opencode>  fake runs deterministic steps; real/codex/opencode run a real CLI (default fake)
-  --project <id=path>        Project mapping; repeat for multiple projects
+  --allowed-root <path>      Absolute repository root the runner may access; repeat for multiple roots
+  --allow-unc                Allow UNC repository paths (Windows only; default: reject)
   --codex-bin <path>         Explicit Codex CLI executable (default: codex from PATH)
   --opencode-bin <path>      Explicit OpenCode CLI executable (default: opencode from PATH)
   --codex-model <model>      Optional Codex model passed to the CLI
@@ -58,18 +72,24 @@ Environment equivalents use the HAFT_ prefix:
   HAFT_RUNNER_BOOTSTRAP_TOKEN, HAFT_RUNNER_TOKEN_FILE, HAFT_RUNNER_MODE,
   HAFT_RUNNER_FAKE_RUNTIMES, HAFT_RUNNER_REAL_RUNTIMES,
   HAFT_CODEX_BIN, HAFT_OPENCODE_BIN, HAFT_CODEX_MODEL, HAFT_OPENCODE_MODEL,
-  HAFT_RUNNER_PROJECTS (JSON map), HAFT_RUNNER_PROJECT_ID,
-  HAFT_RUNNER_WORKSPACE_ROOT, HAFT_RUNNER_WORKTREE_ROOT, HAFT_GIT_BIN,
-  HAFT_RUNNER_KEEP_WORKTREES, HAFT_RUNNER_RECOVERY_ROOT,
-  HAFT_RUNNER_SHUTDOWN_GRACE_MS, HAFT_RUNNER_CLI_TIMEOUT_MS,
-  HAFT_RUNNER_ALLOW_AUTO_APPROVE, HAFT_RUNNER_STEP_MS,
-  HAFT_RUNNER_HEALTH_PORT, HAFT_RUNNER_MAX_CONCURRENT.
+  HAFT_RUNNER_ALLOWED_ROOTS (JSON array of absolute paths), HAFT_RUNNER_ALLOW_UNC,
+  HAFT_RUNNER_WORKTREE_ROOT, HAFT_GIT_BIN, HAFT_RUNNER_KEEP_WORKTREES,
+  HAFT_RUNNER_RECOVERY_ROOT, HAFT_RUNNER_SHUTDOWN_GRACE_MS,
+  HAFT_RUNNER_CLI_TIMEOUT_MS, HAFT_RUNNER_ALLOW_AUTO_APPROVE,
+  HAFT_RUNNER_STEP_MS, HAFT_RUNNER_HEALTH_PORT, HAFT_RUNNER_MAX_CONCURRENT.
+
+HAFT_RUNNER_PROJECTS, HAFT_RUNNER_PROJECT_ID and HAFT_RUNNER_WORKSPACE_ROOT are
+no longer used. Real execution requires an explicit allowed root and a
+server-supplied repository binding.
 
 Real CLI mode always uses the Codex workspace-write sandbox. OpenCode --auto
 is only passed when HAFT_RUNNER_ALLOW_AUTO_APPROVE=1 is configured explicitly.
 `;
 
-export function loadConfig(argv: string[] = process.argv.slice(2), env: NodeJS.ProcessEnv = process.env): RunnerConfig {
+export function loadConfig(
+  argv: string[] = process.argv.slice(2),
+  env: NodeJS.ProcessEnv = process.env,
+): RunnerConfig {
   const { values } = parseArgs({
     args: argv,
     allowPositionals: false,
@@ -81,7 +101,8 @@ export function loadConfig(argv: string[] = process.argv.slice(2), env: NodeJS.P
       'bootstrap-token': { type: 'string' },
       'token-file': { type: 'string' },
       mode: { type: 'string' },
-      project: { type: 'string', multiple: true },
+      'allowed-root': { type: 'string', multiple: true },
+      'allow-unc': { type: 'boolean' },
       'codex-bin': { type: 'string' },
       'opencode-bin': { type: 'string' },
       'codex-model': { type: 'string' },
@@ -98,22 +119,22 @@ export function loadConfig(argv: string[] = process.argv.slice(2), env: NodeJS.P
     process.exit(0);
   }
 
-  const serverUrl = trimSlash(
-    values.server ?? env.HAFT_SERVER_URL ?? 'http://127.0.0.1:3001',
-  );
+  warnAboutLegacyProjectConfig(env);
+
+  const serverUrl = trimSlash(values.server ?? env.HAFT_SERVER_URL ?? 'http://127.0.0.1:3001');
   const runnerId = values['runner-id'] ?? env.HAFT_RUNNER_ID ?? 'runner_local';
   const computerId = values['computer-id'] ?? env.HAFT_RUNNER_COMPUTER_ID ?? 'computer_local';
   const bootstrapToken =
     values['bootstrap-token'] ?? env.HAFT_RUNNER_BOOTSTRAP_TOKEN?.trim() ?? null;
-  const tokenFile = expandHome(
-    values['token-file'] ??
-      env.HAFT_RUNNER_TOKEN_FILE ??
-      join(homedir(), '.haft', `runner-${runnerId}.json`),
+  const tokenFile = resolve(
+    expandHome(
+      values['token-file'] ??
+        env.HAFT_RUNNER_TOKEN_FILE ??
+        join(homedir(), '.haft', `runner-${runnerId}.json`),
+    ),
   );
 
-  const requestedMode = (values.mode ?? env.HAFT_RUNNER_MODE ?? 'fake')
-    .trim()
-    .toLowerCase();
+  const requestedMode = (values.mode ?? env.HAFT_RUNNER_MODE ?? 'fake').trim().toLowerCase();
   if (
     requestedMode !== 'fake' &&
     requestedMode !== 'real' &&
@@ -149,20 +170,6 @@ export function loadConfig(argv: string[] = process.argv.slice(2), env: NodeJS.P
   const opencodeModel = values['opencode-model'] ?? env.HAFT_OPENCODE_MODEL;
   if (codexModel?.trim()) cliModels.codex = codexModel.trim();
   if (opencodeModel?.trim()) cliModels.opencode = opencodeModel.trim();
-  const projectPaths = parseProjectPaths(
-    env.HAFT_RUNNER_PROJECTS,
-    env.HAFT_RUNNER_PROJECT_ID ?? 'project_demo',
-    env.HAFT_RUNNER_WORKSPACE_ROOT ?? env.INIT_CWD ?? process.cwd(),
-  );
-  for (const project of values.project ?? []) {
-    const separator = project.indexOf('=');
-    if (separator <= 0) {
-      throw new Error(`--project must be <projectId>=<absolutePath>, received "${project}"`);
-    }
-    const projectId = project.slice(0, separator).trim();
-    const projectPath = resolve(project.slice(separator + 1).trim());
-    projectPaths[projectId] = projectPath;
-  }
 
   return {
     serverUrl,
@@ -176,12 +183,14 @@ export function loadConfig(argv: string[] = process.argv.slice(2), env: NodeJS.P
     cliPaths,
     cliModels,
     gitBinary: env.HAFT_GIT_BIN?.trim() || 'git',
-    worktreeRoot: expandHome(
+    worktreeRoot: absoluteConfigPath(
       env.HAFT_RUNNER_WORKTREE_ROOT ?? join(homedir(), '.haft', 'worktrees'),
+      'HAFT_RUNNER_WORKTREE_ROOT',
     ),
     keepWorktrees: env.HAFT_RUNNER_KEEP_WORKTREES !== '0',
-    recoveryRoot: expandHome(
+    recoveryRoot: absoluteConfigPath(
       env.HAFT_RUNNER_RECOVERY_ROOT ?? join(homedir(), '.haft', 'recovery', runnerId),
+      'HAFT_RUNNER_RECOVERY_ROOT',
     ),
     shutdownGraceMs: clampInt(
       env.HAFT_RUNNER_SHUTDOWN_GRACE_MS ?? '10000',
@@ -196,13 +205,12 @@ export function loadConfig(argv: string[] = process.argv.slice(2), env: NodeJS.P
       'cli-timeout-ms',
     ),
     allowAutoApprove: env.HAFT_RUNNER_ALLOW_AUTO_APPROVE === '1',
-    projectPaths,
-    stepMs: clampInt(
-      values['step-ms'] ?? env.HAFT_RUNNER_STEP_MS ?? '250',
-      20,
-      10_000,
-      'step-ms',
+    allowedRepositoryRoots: parseAllowedRoots(
+      values['allowed-root'],
+      env.HAFT_RUNNER_ALLOWED_ROOTS,
     ),
+    allowUnc: values['allow-unc'] === true || env.HAFT_RUNNER_ALLOW_UNC === '1',
+    stepMs: clampInt(values['step-ms'] ?? env.HAFT_RUNNER_STEP_MS ?? '250', 20, 10_000, 'step-ms'),
     healthPort: clampInt(
       values['health-port'] ?? env.HAFT_RUNNER_HEALTH_PORT ?? '0',
       0,
@@ -221,6 +229,41 @@ export function loadConfig(argv: string[] = process.argv.slice(2), env: NodeJS.P
   };
 }
 
+function parseAllowedRoots(cliValues: string[] | undefined, rawEnv: string | undefined): string[] {
+  if (cliValues && cliValues.length > 0) {
+    return cliValues.map((value, index) =>
+      absoluteConfigPath(value, `--allowed-root (${index + 1})`),
+    );
+  }
+  if (rawEnv === undefined || rawEnv.trim().length === 0) {
+    return [];
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawEnv);
+  } catch {
+    throw new Error('HAFT_RUNNER_ALLOWED_ROOTS must be a JSON array of absolute paths');
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error('HAFT_RUNNER_ALLOWED_ROOTS must be a JSON array of absolute paths');
+  }
+  return parsed.map((value, index) => {
+    if (typeof value !== 'string') {
+      throw new Error(`HAFT_RUNNER_ALLOWED_ROOTS[${index}] must be a string`);
+    }
+    return absoluteConfigPath(value, `HAFT_RUNNER_ALLOWED_ROOTS[${index}]`);
+  });
+}
+
+function absoluteConfigPath(value: string, name: string): string {
+  const expanded = expandHome(value.trim());
+  if (expanded.length === 0 || !isAbsolute(expanded)) {
+    throw new Error(`${name} must be an absolute path`);
+  }
+  return normalize(expanded);
+}
+
 function parseRuntimeList(value: string, name: string): RunnerRuntimeType[] {
   const selected = value
     .split(',')
@@ -235,42 +278,7 @@ function parseRuntimeList(value: string, name: string): RunnerRuntimeType[] {
   return [...new Set(runtimes)];
 }
 
-function parseProjectPaths(
-  raw: string | undefined,
-  fallbackProjectId: string,
-  fallbackRoot: string,
-): Record<string, string> {
-  if (!raw?.trim()) {
-    return { [fallbackProjectId]: resolve(fallbackRoot) };
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error('HAFT_RUNNER_PROJECTS must be a JSON object mapping project ids to paths');
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('HAFT_RUNNER_PROJECTS must be a JSON object mapping project ids to paths');
-  }
-  const result: Record<string, string> = {};
-  for (const [projectId, projectPath] of Object.entries(parsed)) {
-    if (typeof projectPath !== 'string' || !projectId.trim() || !projectPath.trim()) {
-      throw new Error('HAFT_RUNNER_PROJECTS entries must be non-empty string paths');
-    }
-    result[projectId.trim()] = resolve(projectPath);
-  }
-  if (Object.keys(result).length === 0) {
-    throw new Error('HAFT_RUNNER_PROJECTS must contain at least one project mapping');
-  }
-  return result;
-}
-
-function clampInt(
-  raw: string,
-  min: number,
-  max: number,
-  name: string,
-): number {
+function clampInt(raw: string, min: number, max: number, name: string): number {
   const parsed = Number(raw);
   if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
     throw new Error(`--${name} must be an integer between ${min} and ${max}`);
@@ -283,7 +291,7 @@ function expandHome(value: string): string {
   if (value.startsWith('~/') || value.startsWith('~\\')) {
     return join(homedir(), value.slice(2));
   }
-  return resolve(value);
+  return value;
 }
 
 function trimSlash(value: string): string {

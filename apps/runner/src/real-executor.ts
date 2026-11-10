@@ -10,11 +10,7 @@ import type {
 } from '@raft-lite/contracts';
 import type { RunnerConfig } from './config';
 import { buildCliArgs } from './cli-args';
-import {
-  createCliOutputParser,
-  type CliLogLine,
-  type CliOutputParser,
-} from './cli-output';
+import { createCliOutputParser, type CliLogLine, type CliOutputParser } from './cli-output';
 import type {
   CancelledPayload,
   CompletedPayload,
@@ -52,6 +48,12 @@ export interface RealExecutorDependencies {
   inspectProcess(pid: number): Promise<ProcessIdentity | null>;
   terminateProcess(child: ChildProcess, force?: boolean): Promise<void>;
   git: Pick<GitWorktreeManager, 'prepare' | 'collect' | 'cleanup'>;
+  /**
+   * Temporary WP-B seam. The production default returns null so a real
+   * execution fails closed until the WP-C execution-repository context
+   * supplies the canonical path. Tests inject an explicit path.
+   */
+  resolveRepositoryPath?(payload: ExecutionStartMessage['payload']): string | null;
   shutdownForceWaitMs: number;
 }
 
@@ -106,6 +108,9 @@ export class RealExecutor implements RunnerExecutor {
   private readonly spawnProcess: RealExecutorDependencies['spawnProcess'];
   private readonly inspectProcess: RealExecutorDependencies['inspectProcess'];
   private readonly terminateProcess: RealExecutorDependencies['terminateProcess'];
+  private readonly resolveRepositoryPath: NonNullable<
+    RealExecutorDependencies['resolveRepositoryPath']
+  >;
   private readonly shutdownForceWaitMs: number;
 
   constructor(
@@ -119,8 +124,8 @@ export class RealExecutor implements RunnerExecutor {
     this.spawnProcess = dependencies.spawnProcess ?? spawn;
     this.inspectProcess = dependencies.inspectProcess ?? inspectProcess;
     this.terminateProcess = dependencies.terminateProcess ?? terminateProcess;
-    this.shutdownForceWaitMs =
-      dependencies.shutdownForceWaitMs ?? SHUTDOWN_FORCE_WAIT_MS;
+    this.resolveRepositoryPath = dependencies.resolveRepositoryPath ?? (() => null);
+    this.shutdownForceWaitMs = dependencies.shutdownForceWaitMs ?? SHUTDOWN_FORCE_WAIT_MS;
   }
 
   start(payload: ExecutionStartMessage['payload']): void {
@@ -135,22 +140,14 @@ export class RealExecutor implements RunnerExecutor {
       return;
     }
     if (this.sessions.size >= this.config.maxConcurrentExecutions) {
-      this.failBeforeStart(
-        payload,
-        'RUNNER_BUSY: maximum concurrent executions reached',
-      );
+      this.failBeforeStart(payload, 'RUNNER_BUSY: maximum concurrent executions reached');
       return;
     }
 
     const session = this.createSession(payload);
     this.sessions.set(session.executionId, session);
     this.emitPhase(session, 'preparing', 'Runner accepted the execution');
-    this.log(
-      session,
-      'system',
-      'info',
-      `Real ${payload.runtime} runner accepted the execution.`,
-    );
+    this.log(session, 'system', 'info', `Real ${payload.runtime} runner accepted the execution.`);
 
     void this.prepareAndRun(session, payload).catch((error: unknown) => {
       if (session.cancelled) {
@@ -172,12 +169,7 @@ export class RealExecutor implements RunnerExecutor {
     }
     session.cancelled = true;
     session.cancelReason = reason?.trim() || 'Cancelled by operator';
-    this.log(
-      session,
-      'system',
-      'warning',
-      `Cancellation requested: ${session.cancelReason}`,
-    );
+    this.log(session, 'system', 'warning', `Cancellation requested: ${session.cancelReason}`);
 
     const child = session.child;
     if (!child) {
@@ -282,21 +274,17 @@ export class RealExecutor implements RunnerExecutor {
     session: RealSession,
     payload: ExecutionStartMessage['payload'],
   ): Promise<void> {
-    await this.beginJournal(session, payload);
-    const projectPath = this.config.projectPaths[payload.projectId];
+    const projectPath = this.resolveRepositoryPath(payload);
     if (!projectPath) {
       throw new RunnerFailure(
-        'PROJECT_NOT_MAPPED',
-        `${payload.projectId} is not configured on this runner`,
+        'PROJECT_BINDING_UNSUPPORTED',
+        'No repository context is available; the repository handshake is required before a real execution can start',
       );
     }
+    await this.beginJournal(session, payload);
     session.projectPath = projectPath;
 
-    const worktree = await this.git.prepare(
-      projectPath,
-      payload.projectId,
-      payload.executionId,
-    );
+    const worktree = await this.git.prepare(projectPath, payload.projectId, payload.executionId);
     session.worktree = worktree;
     await this.persistJournal(
       session,
@@ -568,10 +556,7 @@ export class RealExecutor implements RunnerExecutor {
     });
   }
 
-  private failBeforeStart(
-    payload: ExecutionStartMessage['payload'],
-    reason: string,
-  ): void {
+  private failBeforeStart(payload: ExecutionStartMessage['payload'], reason: string): void {
     const session = this.createSession(payload);
     this.emitPhase(session, 'failed', null);
     this.log(session, 'stderr', 'error', reason);
@@ -583,10 +568,7 @@ export class RealExecutor implements RunnerExecutor {
     });
   }
 
-  private scheduleTerminalFallback(
-    session: RealSession,
-    outcome: 'cancelled' | 'timeout',
-  ): void {
+  private scheduleTerminalFallback(session: RealSession, outcome: 'cancelled' | 'timeout'): void {
     if (session.fallbackTimer) return;
     session.fallbackTimer = setTimeout(() => {
       if (session.finished) return;
@@ -616,11 +598,7 @@ export class RealExecutor implements RunnerExecutor {
     }
   }
 
-  private emitPhase(
-    session: RealSession,
-    phase: ExecutionPhase,
-    message: string | null,
-  ): void {
+  private emitPhase(session: RealSession, phase: ExecutionPhase, message: string | null): void {
     session.phase = phase;
     void this.persistJournal(session, { phase, status: 'active' }, true);
     this.callbacks.onPhase(session, phase, message);
@@ -759,12 +737,7 @@ export class RealExecutor implements RunnerExecutor {
   ): Promise<void> {
     if (!this.recovery) return;
     try {
-      await this.recovery.journal.finish(
-        session.executionId,
-        outcome,
-        outcome,
-        session.lastSeq,
-      );
+      await this.recovery.journal.finish(session.executionId, outcome, outcome, session.lastSeq);
     } catch {
       // Recovery metadata is best-effort; the terminal protocol event is the
       // authoritative outcome.

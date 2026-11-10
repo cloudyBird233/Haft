@@ -2,6 +2,7 @@ import type { Server } from 'node:http';
 import { loadConfig } from './config';
 import { startHealthServer } from './health-server';
 import { log } from './logger';
+import { RepositoryPathPolicy } from './repository-policy';
 import { RunnerClient } from './runner-client';
 
 async function main(): Promise<void> {
@@ -21,6 +22,29 @@ async function main(): Promise<void> {
 
   let shuttingDown = false;
   let healthServer: Server | null = null;
+  const policy = new RepositoryPathPolicy({
+    allowedRepositoryRoots: config.allowedRepositoryRoots,
+    allowUnc: config.allowUnc,
+    worktreeRoot: config.worktreeRoot,
+    recoveryRoot: config.recoveryRoot,
+    gitBinary: config.gitBinary,
+    platform: config.platform,
+  });
+  for (const warning of policy.warnings) {
+    log('warn', {
+      eventType: 'runner.policy_warning',
+      message: warning,
+      status: 'degraded',
+    });
+  }
+  if (policy.configError) {
+    log('warn', {
+      eventType: 'runner.policy_not_configured',
+      message: 'Repository path policy is not usable; repository validation will fail closed',
+      status: 'degraded',
+      error: policy.configError,
+    });
+  }
   const client = new RunnerClient({
     config,
     onFatal: (message) => {
@@ -76,7 +100,8 @@ async function main(): Promise<void> {
     status: 'ready',
     mode: config.mode,
     computerId: config.computerId,
-    projectIds: Object.keys(config.projectPaths),
+    allowedRepositoryRoots: config.allowedRepositoryRoots,
+    policyVersion: policy.policyVersion,
     healthPort: config.healthPort,
   });
 }
