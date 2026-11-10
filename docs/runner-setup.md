@@ -108,6 +108,13 @@ legacy fallback `HAFT_RUNNER_PROJECT_ID` + `HAFT_RUNNER_WORKSPACE_ROOT` maps one
 project. Project ids in the runner map must match task project ids; otherwise
 availability reports `PROJECT_NOT_MAPPED`.
 
+> **P2-01 note:** `HAFT_RUNNER_PROJECTS` (and `--project`) is the historical
+> pre-P2-02 execution mapping, not the P2-01 repository binding. P2-02 will
+> replace it with the server-supplied binding path and the
+> `execution.repository` handshake. Until then, P2-01 keeps every
+> product-created binding `unverified`, so the API rejects real CLI execution
+> before dispatch. Configuring this map does not bypass the binding guard.
+
 ### Worktree root
 
 Each execution gets a branch `haft/<executionId>` and a worktree at
@@ -141,10 +148,10 @@ is never deleted automatically; retention is an operator decision.
 
 ### Crash recovery storage
 
-| Variable                        | Default                            | Behavior |
-| ------------------------------- | ---------------------------------- | -------- |
-| `HAFT_RUNNER_RECOVERY_ROOT`     | `~/.haft/recovery/<runnerId>`      | Atomic journals plus `logs/*.ndjson` spool. |
-| `HAFT_RUNNER_SHUTDOWN_GRACE_MS` | `10000` (1 s–120 s)                | How long shutdown waits for real process termination before force-killing. |
+| Variable                        | Default                       | Behavior                                                                   |
+| ------------------------------- | ----------------------------- | -------------------------------------------------------------------------- |
+| `HAFT_RUNNER_RECOVERY_ROOT`     | `~/.haft/recovery/<runnerId>` | Atomic journals plus `logs/*.ndjson` spool.                                |
+| `HAFT_RUNNER_SHUTDOWN_GRACE_MS` | `10000` (1 s–120 s)           | How long shutdown waits for real process termination before force-killing. |
 
 The runner writes `<executionId>.json` before spawning a CLI and appends each log
 entry to the spool before sending it. On startup it scans active journals, verifies
@@ -224,32 +231,32 @@ To enable only one runtime, use `HAFT_RUNNER_MODE=codex` or
 
 ## Complete configuration reference
 
-| Variable                         | Mode | Default                    | Description                                          |
-| -------------------------------- | ---- | -------------------------- | ---------------------------------------------------- |
-| `HAFT_SERVER_URL`                | both | `http://127.0.0.1:3001`    | API base URL; the runner appends `/runner`.          |
-| `HAFT_RUNNER_ID`                 | both | `runner_local`             | Stable id; must be unique per computer.              |
-| `HAFT_RUNNER_COMPUTER_ID`        | both | `computer_local`           | Existing Computer row in the API.                    |
-| `HAFT_RUNNER_BOOTSTRAP_TOKEN`    | both | unset                      | Required only for first pairing or re-pairing.       |
-| `HAFT_RUNNER_TOKEN_FILE`         | both | `~/.haft/runner-<id>.json` | Local token cache.                                   |
-| `HAFT_RUNNER_MODE`               | both | `fake`                     | `fake`, `real`, `codex`, or `opencode`.              |
-| `HAFT_RUNNER_FAKE_RUNTIMES`      | fake | `codex,opencode`           | Runtimes the Fake executor advertises.               |
-| `HAFT_RUNNER_REAL_RUNTIMES`      | real | `codex,opencode`           | Runtimes the real executor enables.                  |
-| `HAFT_CODEX_BIN`                 | real | `codex`                    | Codex executable name/path.                          |
-| `HAFT_OPENCODE_BIN`              | real | `opencode`                 | OpenCode executable name/path.                       |
-| `HAFT_CODEX_MODEL`               | real | unset                      | Default Codex model.                                 |
-| `HAFT_OPENCODE_MODEL`            | real | unset                      | Default OpenCode model.                              |
-| `HAFT_RUNNER_PROJECTS`           | both | `{ "<projectId>": cwd }`   | JSON map of project id → repository path.            |
-| `HAFT_RUNNER_WORKTREE_ROOT`      | real | `~/.haft/worktrees`        | Root for per-execution worktrees.                    |
-| `HAFT_GIT_BIN`                   | real | `git`                      | Git executable.                                      |
-| `HAFT_RUNNER_KEEP_WORKTREES`     | real | `1`                        | `0` removes worktrees after collection.              |
-| `HAFT_RUNNER_RECOVERY_ROOT`      | real | `~/.haft/recovery/<runnerId>` | Journal and log-spool root.                       |
-| `HAFT_RUNNER_SHUTDOWN_GRACE_MS`  | both | `10000`                    | Wait for real termination before force-kill.         |
-| `HAFT_RUNNER_CLI_TIMEOUT_MS`     | real | `1800000`                  | CLI timeout in milliseconds.                         |
-| `HAFT_RUNNER_ALLOW_AUTO_APPROVE` | real | unset                      | `1` adds `--auto` to OpenCode.                       |
-| `HAFT_RUNNER_STEP_MS`            | fake | `250`                      | Fake step delay.                                     |
-| `HAFT_RUNNER_HEALTH_PORT`        | both | `0`                        | Loopback health port; `0` disables.                  |
-| `HAFT_RUNNER_MAX_CONCURRENT`     | both | `1`                        | Maximum local concurrent executions.                 |
-| `HAFT_RUNNER_FAKE_FAIL`          | fake | unset                      | `1` forces deterministic failure for every fake run. |
+| Variable                         | Mode | Default                       | Description                                                |
+| -------------------------------- | ---- | ----------------------------- | ---------------------------------------------------------- |
+| `HAFT_SERVER_URL`                | both | `http://127.0.0.1:3001`       | API base URL; the runner appends `/runner`.                |
+| `HAFT_RUNNER_ID`                 | both | `runner_local`                | Stable id; must be unique per computer.                    |
+| `HAFT_RUNNER_COMPUTER_ID`        | both | `computer_local`              | Existing Computer row in the API.                          |
+| `HAFT_RUNNER_BOOTSTRAP_TOKEN`    | both | unset                         | Required only for first pairing or re-pairing.             |
+| `HAFT_RUNNER_TOKEN_FILE`         | both | `~/.haft/runner-<id>.json`    | Local token cache.                                         |
+| `HAFT_RUNNER_MODE`               | both | `fake`                        | `fake`, `real`, `codex`, or `opencode`.                    |
+| `HAFT_RUNNER_FAKE_RUNTIMES`      | fake | `codex,opencode`              | Runtimes the Fake executor advertises.                     |
+| `HAFT_RUNNER_REAL_RUNTIMES`      | real | `codex,opencode`              | Runtimes the real executor enables.                        |
+| `HAFT_CODEX_BIN`                 | real | `codex`                       | Codex executable name/path.                                |
+| `HAFT_OPENCODE_BIN`              | real | `opencode`                    | OpenCode executable name/path.                             |
+| `HAFT_CODEX_MODEL`               | real | unset                         | Default Codex model.                                       |
+| `HAFT_OPENCODE_MODEL`            | real | unset                         | Default OpenCode model.                                    |
+| `HAFT_RUNNER_PROJECTS`           | both | `{ "<projectId>": cwd }`      | Legacy pre-P2-02 project-id → path map; P2-02 replaces it. |
+| `HAFT_RUNNER_WORKTREE_ROOT`      | real | `~/.haft/worktrees`           | Root for per-execution worktrees.                          |
+| `HAFT_GIT_BIN`                   | real | `git`                         | Git executable.                                            |
+| `HAFT_RUNNER_KEEP_WORKTREES`     | real | `1`                           | `0` removes worktrees after collection.                    |
+| `HAFT_RUNNER_RECOVERY_ROOT`      | real | `~/.haft/recovery/<runnerId>` | Journal and log-spool root.                                |
+| `HAFT_RUNNER_SHUTDOWN_GRACE_MS`  | both | `10000`                       | Wait for real termination before force-kill.               |
+| `HAFT_RUNNER_CLI_TIMEOUT_MS`     | real | `1800000`                     | CLI timeout in milliseconds.                               |
+| `HAFT_RUNNER_ALLOW_AUTO_APPROVE` | real | unset                         | `1` adds `--auto` to OpenCode.                             |
+| `HAFT_RUNNER_STEP_MS`            | fake | `250`                         | Fake step delay.                                           |
+| `HAFT_RUNNER_HEALTH_PORT`        | both | `0`                           | Loopback health port; `0` disables.                        |
+| `HAFT_RUNNER_MAX_CONCURRENT`     | both | `1`                           | Maximum local concurrent executions.                       |
+| `HAFT_RUNNER_FAKE_FAIL`          | fake | unset                         | `1` forces deterministic failure for every fake run.       |
 
 Command-line equivalents exist for the main options:
 
@@ -313,21 +320,21 @@ their child processes.
 
 ## Troubleshooting
 
-| Symptom                                      | Check                                                                                                       |
-| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `RUNNER_AUTH_FAILED` on connect              | Bootstrap token on the runner must equal `HAFT_RUNNER_BOOTSTRAP_TOKEN` on the API.                          |
-| Runner never connects                        | `HAFT_SERVER_URL` must be reachable; the API must expose `/socket.io`/`/runner`; check CORS/proxy.          |
-| `RUNNER_NOT_FOUND` after server reset        | The runner row was deleted. Set the bootstrap token and restart the runner to re-pair.                      |
-| Runtime shows `CLI_NOT_INSTALLED`            | Use the same user/PATH as the runner; set an explicit `HAFT_*_BIN` after checking `--version`.              |
-| Runtime shows `CLI_NOT_AUTHENTICATED`        | Log in with the CLI as the runner user, then restart the runner to re-probe.                                |
-| `PROJECT_NOT_MAPPED`                         | Add the exact task `projectId` to `HAFT_RUNNER_PROJECTS`.                                                   |
-| `PROJECT_NOT_GIT_ROOT`                       | Point at the repository root, not a subdirectory. Commit at least one file.                                 |
-| `BRANCH_EXISTS` / `WORKTREE_EXISTS`          | Delete the old branch/worktree after review; each execution must get fresh isolation.                       |
-| `CLI_TIMEOUT`                                | Increase `HAFT_RUNNER_CLI_TIMEOUT_MS` within the 2-hour cap, or reduce task scope.                          |
-| `CLI_EXIT_CODE`                              | Inspect the execution log tail; fix authentication/model/configuration or the task itself.                  |
-| Cancellation returns `RUNNER_OFFLINE`        | The runner disconnected before receiving the cancel. Reconnect it; the execution is still running.          |
-| Cancellation returns `RUNNER_CANCEL_TIMEOUT` | The process did not stop within 30 s. Inspect the runner and the process tree; the execution stays running. |
-| Worktrees consume too much disk              | Review diffs, then remove worktrees/branches; set `HAFT_RUNNER_KEEP_WORKTREES=0` for automatic cleanup.     |
+| Symptom                                      | Check                                                                                                                                                              |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `RUNNER_AUTH_FAILED` on connect              | Bootstrap token on the runner must equal `HAFT_RUNNER_BOOTSTRAP_TOKEN` on the API.                                                                                 |
+| Runner never connects                        | `HAFT_SERVER_URL` must be reachable; the API must expose `/socket.io`/`/runner`; check CORS/proxy.                                                                 |
+| `RUNNER_NOT_FOUND` after server reset        | The runner row was deleted. Set the bootstrap token and restart the runner to re-pair.                                                                             |
+| Runtime shows `CLI_NOT_INSTALLED`            | Use the same user/PATH as the runner; set an explicit `HAFT_*_BIN` after checking `--version`.                                                                     |
+| Runtime shows `CLI_NOT_AUTHENTICATED`        | Log in with the CLI as the runner user, then restart the runner to re-probe.                                                                                       |
+| `PROJECT_NOT_MAPPED`                         | Add the exact task `projectId` to `HAFT_RUNNER_PROJECTS`.                                                                                                          |
+| `PROJECT_NOT_GIT_ROOT`                       | Point at the repository root, not a subdirectory. Commit at least one file.                                                                                        |
+| `BRANCH_EXISTS` / `WORKTREE_EXISTS`          | Delete the old branch/worktree after review; each execution must get fresh isolation.                                                                              |
+| `CLI_TIMEOUT`                                | Increase `HAFT_RUNNER_CLI_TIMEOUT_MS` within the 2-hour cap, or reduce task scope.                                                                                 |
+| `CLI_EXIT_CODE`                              | Inspect the execution log tail; fix authentication/model/configuration or the task itself.                                                                         |
+| Cancellation returns `RUNNER_OFFLINE`        | The runner disconnected before receiving the cancel. Reconnect it; the execution is still running.                                                                 |
+| Cancellation returns `RUNNER_CANCEL_TIMEOUT` | The process did not stop within 30 s. Inspect the runner and the process tree; the execution stays running.                                                        |
+| Worktrees consume too much disk              | Review diffs, then remove worktrees/branches; set `HAFT_RUNNER_KEEP_WORKTREES=0` for automatic cleanup.                                                            |
 | Runner restarted after a crash               | Check `HAFT_RUNNER_RECOVERY_ROOT` for `<executionId>.json` and `logs/*.ndjson`; the next start reports `RUNNER_INTERRUPTED` and terminates only a verified orphan. |
 
 ## Security checklist

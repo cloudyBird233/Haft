@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import type { INestApplication } from '@nestjs/common';
 import type {
@@ -10,16 +10,19 @@ import type {
 } from '@raft-lite/contracts';
 import { createTestApp, type ApiSuccessBody } from './test-app';
 import { PrismaService } from '../src/common/prisma/prisma.service';
+import { EventsGateway } from '../src/modules/events/events.gateway';
 
 describe('Projects and repository bindings API', () => {
   let app: INestApplication;
   let server: Parameters<typeof request>[0];
   let prisma: PrismaService;
+  let events: { emitTaskUpdated: ReturnType<typeof vi.fn> };
 
   beforeAll(async () => {
     app = await createTestApp();
     server = app.getHttpServer() as Parameters<typeof request>[0];
     prisma = app.get(PrismaService);
+    events = app.get(EventsGateway) as unknown as typeof events;
   });
 
   afterAll(async () => {
@@ -29,11 +32,45 @@ describe('Projects and repository bindings API', () => {
   beforeEach(async () => {
     const response = await request(server).post('/__test__/reset').send({});
     expect(response.status).toBe(200);
+    events.emitTaskUpdated.mockClear();
   });
 
   async function createProject(body: Record<string, unknown>): Promise<ProjectDto> {
     const response = await request(server).post('/api/projects').send(body).expect(201);
     return (response.body as ApiSuccessBody<ProjectDto>).data;
+  }
+
+  /**
+   * Test-only interleaving point. The first Project read in a request is the
+   * service's precheck; archive the project immediately after that read
+   * returns, so the write transaction must reject it. No product code is
+   * aware of this hook.
+   */
+  function archiveAfterNextProjectRead(projectId: string): {
+    wasArchived: () => boolean;
+    restore: () => void;
+  } {
+    type FindFirst = (args: unknown) => Promise<{ id: string } | null>;
+    const delegate = prisma.project as unknown as { findFirst: FindFirst };
+    const original = delegate.findFirst;
+    let archived = false;
+    delegate.findFirst = async (args) => {
+      const project = await original.call(prisma.project, args);
+      if (!archived && project?.id === projectId) {
+        archived = true;
+        await prisma.project.update({
+          where: { id: projectId },
+          data: { archivedAt: new Date() },
+        });
+      }
+      return project;
+    };
+    return {
+      wasArchived: () => archived,
+      restore: () => {
+        delegate.findFirst = original;
+      },
+    };
   }
 
   it('creates, lists, updates, archives, and deletes projects with counts', async () => {
@@ -311,6 +348,77 @@ describe('Projects and repository bindings API', () => {
     });
     const agentAfter = await request(server).get(`/api/agents/${agent.id}`).expect(200);
     expect((agentAfter.body as ApiSuccessBody<{ status: string }>).data.status).toBe('idle');
+  });
+
+  it('rejects task creation when the project is archived between precheck and insert', async () => {
+    const project = await createProject({ key: 'RACE', name: 'Task Creation Race' });
+    const beforeActivityCount = await prisma.activity.count();
+    events.emitTaskUpdated.mockClear();
+
+    expect((await prisma.project.findUniqueOrThrow({ where: { id: project.id } })).archivedAt).toBe(
+      null,
+    );
+    const hook = archiveAfterNextProjectRead(project.id);
+
+    let response;
+    try {
+      response = await request(server)
+        .post('/api/tasks')
+        .send({
+          title: 'Must not survive the archive race',
+          projectId: project.id,
+          assigneeAgentId: 'agent_developer',
+        })
+        .expect(409);
+    } finally {
+      hook.restore();
+    }
+    expect(response.body.error.code).toBe('PROJECT_ARCHIVED');
+    // The precheck observed an active project; only the transaction re-read
+    // saw the archive that landed in between.
+    expect(hook.wasArchived()).toBe(true);
+
+    expect(await prisma.task.count({ where: { title: 'Must not survive the archive race' } })).toBe(
+      0,
+    );
+    expect(await prisma.task.count({ where: { projectId: project.id } })).toBe(0);
+    expect(await prisma.activity.count()).toBe(beforeActivityCount);
+    expect(events.emitTaskUpdated).not.toHaveBeenCalled();
+  });
+
+  it('rejects moving a task when the target project is archived between precheck and update', async () => {
+    const source = await createProject({ key: 'SRC', name: 'Source Project' });
+    const target = await createProject({ key: 'TGT', name: 'Target Project' });
+    const created = await request(server)
+      .post('/api/tasks')
+      .send({ title: 'Keep me in the source project', projectId: source.id })
+      .expect(201);
+    const task = (created.body as ApiSuccessBody<TaskDto>).data;
+    const beforeActivityCount = await prisma.activity.count();
+    events.emitTaskUpdated.mockClear();
+
+    expect((await prisma.project.findUniqueOrThrow({ where: { id: target.id } })).archivedAt).toBe(
+      null,
+    );
+    const hook = archiveAfterNextProjectRead(target.id);
+
+    let response;
+    try {
+      response = await request(server)
+        .patch(`/api/tasks/${task.id}`)
+        .send({ projectId: target.id })
+        .expect(409);
+    } finally {
+      hook.restore();
+    }
+    expect(response.body.error.code).toBe('PROJECT_ARCHIVED');
+    expect(hook.wasArchived()).toBe(true);
+
+    const stored = await prisma.task.findUniqueOrThrow({ where: { id: task.id } });
+    expect(stored.projectId).toBe(source.id);
+    expect(await prisma.task.count({ where: { projectId: target.id } })).toBe(0);
+    expect(await prisma.activity.count()).toBe(beforeActivityCount);
+    expect(events.emitTaskUpdated).not.toHaveBeenCalled();
   });
 
   it('hides projects that belong to another workspace', async () => {

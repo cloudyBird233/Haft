@@ -152,11 +152,22 @@ binding request returns `404 BINDING_NOT_FOUND`.
 blocks:
 
 - creating a Task in the project (`409 PROJECT_ARCHIVED`);
+- moving an existing Task into the project (`409 PROJECT_ARCHIVED`);
 - starting any execution for a Task in the project (`409 PROJECT_ARCHIVED`).
+
+Task creation performs a fast precheck and then re-reads the Project inside the
+same database transaction that inserts the Task. Moving a Task to another
+Project re-reads the target Project inside the update transaction. The
+transactional read also verifies `Project.workspaceId`; a project from another
+workspace is still `PROJECT_NOT_FOUND`.
+
+A `PROJECT_ARCHIVED` rejection creates no Task, commits no Activity, and emits no
+WebSocket task update. The Task remains in its source Project when a move is
+rejected. Restoring with `{ "archived": false }` clears `archivedAt`.
 
 The execution guard runs before the binding gate and again inside the
 Execution-creation transaction. It creates no Execution and does not modify the
-Task or Agent. Restoring with `{ "archived": false }` clears `archivedAt`.
+Task or Agent.
 
 ## Execution gate and snapshot
 
@@ -178,7 +189,7 @@ is **not** the correctness mechanism for bindings.
 Inside the same database transaction that creates the Execution, the service
 re-reads:
 
-- `Project.archivedAt`; and
+- `Project.archivedAt` and `Project.defaultBranch`; and
 - the binding `id`, `status`, `bindingVersion`, and
   `validatedBindingVersion`.
 
@@ -186,7 +197,7 @@ If the Project became archived, the start is rejected with
 `409 PROJECT_ARCHIVED`. If the binding disappeared or its id/version/status
 changed after the precheck, the start is rejected with
 `409 PROJECT_BINDING_MISSING` or `409 PROJECT_BINDING_NOT_READY`. The
-transactional row is the source of the snapshot:
+transactional rows are the source of the snapshot:
 
 ```json
 {
@@ -197,20 +208,30 @@ transactional row is the source of the snapshot:
 }
 ```
 
+`repositoryDefaultBranch` always comes from the transactional `Project` read,
+never from the Task relation loaded before the precheck. A default-branch change
+committed between the precheck and the transaction therefore cannot produce a
+stale branch snapshot, and it does not cause a retry or a second
+`execution.start` dispatch. The Mock Runtime path is unchanged: it creates no
+repository snapshot and stores `repositoryDefaultBranch = null`.
+
 A concurrent path change or re-validation therefore cannot produce an
 Execution that points at a stale path/version. No Task/Agent state is committed
 when the transaction rejects.
 
 ## Concurrency guarantees
 
-| Race                                                         | Result                                                                  |
-| ------------------------------------------------------------ | ----------------------------------------------------------------------- |
-| Path change between precheck and Execution insert            | `409 PROJECT_BINDING_NOT_READY`; no Execution; Task/Agent unchanged     |
-| Binding deleted between precheck and Execution insert        | `409 PROJECT_BINDING_MISSING`; no Execution                             |
-| Status/validated version changed between precheck and insert | `409 PROJECT_BINDING_NOT_READY`; no Execution                           |
-| Project archived between precheck and Execution insert       | `409 PROJECT_ARCHIVED`; no Execution                                    |
-| Two starts racing for the same Task                          | Serialized by `execution-start`; one Execution, one active-run conflict |
-| Two bindings racing for the same Computer on one Project     | Unique `(projectId, computerId)` constraint                             |
+| Race                                                          | Result                                                                      |
+| ------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Path change between precheck and Execution insert             | `409 PROJECT_BINDING_NOT_READY`; no Execution; Task/Agent unchanged         |
+| Binding deleted between precheck and Execution insert         | `409 PROJECT_BINDING_MISSING`; no Execution                                 |
+| Status/validated version changed between precheck and insert  | `409 PROJECT_BINDING_NOT_READY`; no Execution                               |
+| Project archived between precheck and Execution insert        | `409 PROJECT_ARCHIVED`; no Execution                                        |
+| Default branch changed between precheck and Execution insert  | Snapshot uses the transaction value; one Execution, one dispatch            |
+| Project archived between Task precheck and Task insert        | `409 PROJECT_ARCHIVED`; no Task, Activity, or task WebSocket event          |
+| Target Project archived between Task-move precheck and update | `409 PROJECT_ARCHIVED`; Task stays in its source Project; no Activity/event |
+| Two starts racing for the same Task                           | Serialized by `execution-start`; one Execution, one active-run conflict     |
+| Two bindings racing for the same Computer on one Project      | Unique `(projectId, computerId)` constraint                                 |
 
 There is no correctness dependency on a browser-side lock, a front-end
 pre-check, or an in-memory validation cache.
@@ -276,12 +297,16 @@ deployed database. For a development database, delete the SQLite file and run
 - `apps/api/test/projects.integration.spec.ts` — Project CRUD/counts, duplicate
   key, archive/restore, archived Task rejection, delete conflict,
   cross-workspace 404, binding CRUD/duplicate/`pathHash`/version/reset,
-  immutable fields, absence of the validation route, and archived execution
-  rejection without side effects.
+  immutable fields, absence of the validation route, archived execution
+  rejection without side effects, and deterministic Task-creation /
+  Task-migration archive races (no Task, Activity, or WebSocket task update).
 - `apps/api/test/runner.integration.spec.ts` — missing/unverified/stale binding
   gates, zero Runner messages for binding CRUD, archived execution rejection
-  with a connected Runner, Execution snapshot correctness, and a deterministic
-  binding-change race between precheck and Execution creation.
+  with a connected Runner, Execution snapshot correctness, a deterministic
+  binding-change race between precheck and Execution creation, and a
+  deterministic default-branch change during `getAvailability` proving the
+  branch snapshot comes from the execution transaction with exactly one
+  `execution.start` dispatch.
 - Web component tests cover the Projects page, project form, project detail
   drawer, unverified states, and Task execution hints.
 - `tests/e2e/functional/projects-bindings.spec.ts` — UI loop: create Project →
@@ -293,6 +318,38 @@ deployed database. For a development database, delete the SQLite file and run
   obtain a `ready` binding. That endpoint is compiled into
   `TestModule` only when `E2E_TEST_MODE=true`; it is not part of the product
   API and is never called by P2-01 business code.
+
+## Final consistency verification
+
+Verified on 2026-11-10 from baseline
+`c14f8c704afc0535c9c99fdc5d3cffef64c017a1` with the final P2-01 consistency
+fix applied.
+
+| Scenario                                                                      | Automated coverage                                           | Result |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------ | ------ |
+| Execution branch snapshot comes from the creation transaction                 | `runner.integration.spec.ts` default-branch race             | PASS   |
+| Branch change does not cause a retry or duplicate `execution.start`           | same test, dispatch count assertion                          | PASS   |
+| Archived Project cannot start an existing Task                                | `projects.integration.spec.ts`, `runner.integration.spec.ts` | PASS   |
+| Binding is re-read inside the Execution-creation transaction                  | `runner.integration.spec.ts` binding-change race             | PASS   |
+| Binding version change cannot produce a stale Execution snapshot              | same test, `repositoryBindingVersion` assertions             | PASS   |
+| Failed start leaves Task/Agent state unchanged and sends no `execution.start` | same test plus archived-start test                           | PASS   |
+| Binding CRUD sends zero Runner messages                                       | `runner.integration.spec.ts`                                 | PASS   |
+| Task creation rejects a Project archived after the precheck                   | `projects.integration.spec.ts` Task-creation race            | PASS   |
+| Task migration rejects a target Project archived after the precheck           | `projects.integration.spec.ts` Task-migration race           | PASS   |
+| Rejected Task write creates no Task, Activity, or WebSocket task update       | both race tests                                              | PASS   |
+| Mock Runtime behavior is unchanged                                            | API integration Mock Runtime tests                           | PASS   |
+
+Local acceptance gate (2026-11-10):
+
+- `pnpm lint`, `pnpm typecheck`, `pnpm format:check`, `pnpm build` — PASS.
+- Contracts 107, API 40, Runner 60, Web 41 deterministic tests — PASS.
+- Playwright E2E 44 tests — PASS.
+- `git diff --check` — PASS.
+
+P2-01 still does not implement any P2-02 Runner validation, path policy, or
+repository handshake behavior. The legacy `HAFT_RUNNER_PROJECTS` mapping is a
+pre-P2-02 execution mechanism; until P2-02 replaces it, P2-01's binding status
+guard blocks real CLI execution.
 
 ## P2-02 work still pending
 

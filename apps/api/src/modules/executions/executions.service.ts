@@ -218,12 +218,12 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
 
     const execution = await this.prisma.$transaction(async (tx) => {
       // The pre-check above runs outside the transaction. Re-read the archived
-      // flag and the binding inside the same transaction that creates the
-      // Execution so a concurrent archive, path change, or re-validation cannot
-      // leak into a stale execution snapshot.
+      // flag, the default branch, and the binding inside the same transaction
+      // that creates the Execution so a concurrent archive, branch change, path
+      // change, or re-validation cannot leak into a stale execution snapshot.
       const projectState = await tx.project.findUnique({
         where: { id: task.projectId },
-        select: { archivedAt: true },
+        select: { archivedAt: true, defaultBranch: true },
       });
       if (!projectState || projectState.archivedAt) {
         throw new AppException(
@@ -289,7 +289,9 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
           repositoryProjectId: requiresRunner ? task.projectId : null,
           repositoryBindingId: bindingSnapshot?.id ?? null,
           repositoryBindingVersion: bindingSnapshot?.bindingVersion ?? null,
-          repositoryDefaultBranch: requiresRunner ? task.project.defaultBranch : null,
+          // Use the branch read in this transaction, never the possibly stale
+          // value from the Task relation loaded before the precheck.
+          repositoryDefaultBranch: requiresRunner ? projectState.defaultBranch : null,
           runtime: runtimeType,
           status: 'running',
           phase: requiresRunner ? 'queued' : 'running',

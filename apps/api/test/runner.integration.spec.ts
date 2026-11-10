@@ -424,6 +424,83 @@ describe('Runner protocol v1 integration', () => {
     expect(agentAfter.lastActiveAt).toEqual(beforeAgent.lastActiveAt);
   });
 
+  it('snapshots the project default branch read inside the execution transaction', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    const binding = await ensureReadyBinding();
+    const { agentId, taskId } = await createCodexTask();
+
+    const started: string[] = [];
+    const handler = (raw: unknown): void => {
+      const parsed = runnerServerMessageSchema.safeParse(raw);
+      if (parsed.success && parsed.data.type === 'execution.start') {
+        started.push(parsed.data.payload.executionId);
+      }
+    };
+    connected.socket.on('runner.message', handler);
+
+    const runtimes = app.get(RuntimeRegistryService);
+    const original = runtimes.getAvailability.bind(runtimes);
+    let branchChanged = false;
+    vi.spyOn(runtimes, 'getAvailability').mockImplementation(
+      async (runtime, computerId, projectId) => {
+        const availability = await original(runtime, computerId, projectId);
+        if (!branchChanged) {
+          branchChanged = true;
+          // The precheck has already loaded the Task relation. Changing the
+          // branch here proves the snapshot comes from the transaction re-read,
+          // not from the stale `task.project.defaultBranch` value.
+          await prisma.project.update({
+            where: { id: SEED_IDS.project },
+            data: { defaultBranch: 'release/during-start' },
+          });
+        }
+        return availability;
+      },
+    );
+
+    let executionId = '';
+    try {
+      const startMessage = waitForMessage(connected.socket, 'execution.start', 5000);
+      const startResponse = Promise.resolve(
+        request(server).post(`/api/tasks/${taskId}/start`).send({}),
+      );
+      const start = await startMessage;
+      send(connected.socket, 'execution.accepted', {
+        executionId: start.payload.executionId,
+        acceptedAt: new Date().toISOString(),
+      });
+      const response = await startResponse;
+      expect(response.status).toBe(201);
+      const execution = (response.body as ApiSuccessBody<ExecutionDto>).data;
+      executionId = execution.id;
+
+      expect(execution).toMatchObject({
+        agentId,
+        repositoryProjectId: SEED_IDS.project,
+        repositoryBindingId: binding.id,
+        repositoryBindingVersion: binding.bindingVersion,
+        repositoryDefaultBranch: 'release/during-start',
+      });
+      const stored = await prisma.execution.findUniqueOrThrow({ where: { id: execution.id } });
+      expect(stored).toMatchObject({
+        repositoryProjectId: SEED_IDS.project,
+        repositoryBindingId: binding.id,
+        repositoryBindingVersion: binding.bindingVersion,
+        repositoryDefaultBranch: 'release/during-start',
+      });
+    } finally {
+      connected.socket.off('runner.message', handler);
+    }
+    await delay(200);
+
+    expect(branchChanged).toBe(true);
+    // Exactly one dispatch: the branch change must not trigger a retry, a
+    // second Execution, or a second execution.start message.
+    expect(started).toEqual([executionId]);
+    expect(await prisma.execution.count({ where: { taskId } })).toBe(1);
+  });
+
   it('runs a complete execution over the runner protocol and persists logs once', async () => {
     const connected = await connectRunner();
     await registerRunner(connected);

@@ -138,6 +138,13 @@ rules. Real CLI execution also requires a validated repository binding, which
 P2-01 intentionally does not provide; it stays blocked until P2-02. Real CLI E2E
 is opt-in:
 
+> **P2-01 scope note:** `HAFT_RUNNER_PROJECTS` is the legacy pre-P2-02
+> runner-side project allowlist. P2-02 will replace it with server-supplied
+> binding paths and the `execution.repository` handshake. In P2-01 every
+> product-created binding is `unverified`, so the API binding-status guard
+> blocks real CLI execution before dispatch; an existing runner-side mapping
+> cannot bypass that guard.
+
 ```bash
 HAFT_REAL_CLI_E2E=1 pnpm test:e2e:real
 ```
