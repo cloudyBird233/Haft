@@ -410,7 +410,7 @@ sequenceDiagram
     else acquired
       HS->>Registry: send execution.repository {executionId, projectId, bindingId,<br/>bindingVersion, path, defaultBranch, policyVersion}
       HS->>HS: 2 s / 4 s retries, same messageId+payload, total 15 s
-      Runner->>Runner: validate fields, policyVersion, path policy,<br/>defaultBranch existence (check-ref-format + rev-parse), base commit;<br/>create/reuse in-memory context; DO NOT spawn CLI
+      Runner->>Runner: validate fields, policyVersion, path policy,<br/>defaultBranch existence (check-ref-format + rev-parse ^{commit}), base commit;<br/>create/reuse in-memory context; DO NOT spawn CLI
       alt rejected
         Runner-->>HS: execution.repository.rejected {code, message, retryable}
         HS->>Registry: execution.cancel (best effort, release context)
@@ -1011,7 +1011,7 @@ The API must not send this message unless the Binding is `ready`, its version ma
 **Mandatory default-branch check (Runner).** Before sending `execution.repository.accepted`, the Runner must:
 
 1. run `git check-ref-format --branch <defaultBranch>`; non-zero exit → reject with `REPO_DEFAULT_BRANCH_NOT_FOUND`;
-2. run `git rev-parse --verify --quiet refs/heads/<defaultBranch>` as an argv element (no shell interpolation, no `^{commit}` suffix); non-zero → reject with `REPO_DEFAULT_BRANCH_NOT_FOUND`;
+2. run `git rev-parse --verify --quiet "refs/heads/<defaultBranch>^{commit}"` as a single argv element via `execFile` (no shell interpolation, no string concatenation into a shell command); non-zero → reject with `REPO_DEFAULT_BRANCH_NOT_FOUND`;
 3. only then resolve the base commit and create the context.
 
 This is the **only** stage at which P2-02 performs a real default-branch existence check. The API must not duplicate it, and `repository.validate` must not receive it. A rejection is an `execution.repository.rejected`; no `execution.start` is sent and no CLI is spawned.
@@ -1119,7 +1119,7 @@ The current `RealExecutor.start()` performs checks 4–6 _after_ the old immedia
 | Recovery root            | existing                             | `HAFT_RUNNER_RECOVERY_ROOT`              | `~/.haft/recovery/<runnerId>` |
 | Git binary               | existing                             | `HAFT_GIT_BIN`                           | `git`                         |
 
-**Device paths are not configurable.** Windows device paths (`\\?\` and `\\.\`, including `\\?\GLOBALROOT\...`, `\\?\Volume{...}`, `\\.\PhysicalDrive...` and `\\?\UNC\...`) are **always** rejected with the existing `REPO_PATH_INVALID`. The plan defines no `allowDevicePaths` field, no `--allow-device-paths` flag, no `HAFT_RUNNER_ALLOW_DEVICE_PATHS` environment variable, and no positive test branch. Do not add one during implementation.
+**Device paths are not configurable.** Windows device paths (`\\?\` and `\\.\`, including `\\?\GLOBALROOT\...`, `\\?\Volume{...}`, `\\.\PhysicalDrive...` and `\\?\UNC\...`) are **always** rejected with the existing `REPO_PATH_INVALID`. The plan defines no `allowDevicePaths` field, no `--allow-device-paths` flag, no `HAFT_RUNNER_ALLOW_DEVICE_PATHS` environment variable, and no positive test branch. Do not add one during implementation. For `policyVersion` compatibility with the frozen roadmap, the hash input contains the fixed constant `allowDevicePaths: false`; it is never read from configuration and cannot be changed at runtime or by an operator.
 
 **Worktree/recovery roots are policy inputs.** `worktreeRoot` and `recoveryRoot` must be absolute and mutually disjoint at policy construction. They are additionally checked against every validated repository canonical path in both directions (§9.4 step 7). A configuration that nests one inside the other is invalid and fails closed with `REPOSITORY_POLICY_NOT_CONFIGURED`.
 
@@ -1141,7 +1141,8 @@ export interface RunnerConfig {
   allowedRepositoryRoots: string[];
   allowUnc: boolean;
   // projectPaths: REMOVED
-  // allowDevicePaths: DELIBERATELY ABSENT — device paths are always rejected.
+  // allowDevicePaths: NO CONFIG FIELD — device paths are always rejected.
+  // policyVersion hashes the fixed constant allowDevicePaths: false (not configurable).
 }
 ```
 
@@ -1191,6 +1192,7 @@ Compute once at startup and recompute only if configuration changes (it does not
 
 ```ts
 const canonical = {
+  allowDevicePaths: false, // fixed constant; never read from config, never true
   allowUnc: config.allowUnc,
   allowedRepositoryRoots: [...config.allowedRepositoryRoots].sort(),
   recoveryRoot: normalizeForPolicy(config.recoveryRoot),
@@ -1208,11 +1210,11 @@ Rules:
 - Use normalized absolute paths. If a root exists, use its `realpath`; otherwise canonicalize the longest existing prefix with `realpath` and append the non-existing remainder with `resolve`, so parent junctions/symlinks cannot hide an overlap.
 - `allowUnc` participates in the hash; flipping it must change the version.
 - `worktreeRoot` / `recoveryRoot` participate because they affect bidirectional isolation.
-- Device paths do not participate because there is no device-path option: they are always rejected. Their rejection is constant policy, not state.
+- `allowDevicePaths` is a **fixed constant `false`**. It exists only to keep the `policyVersion` hash input aligned with the frozen roadmap; it is not a configuration field, is never parsed from CLI/env/JSON, and cannot be set to `true`. Device paths are nevertheless rejected before any policy hash is consulted, so changing this constant could never authorize them.
 - Do not include the Runner ID, hostname, time, or environment variables that do not affect path decisions.
-- Test: same config → same hash; reordered roots → same hash; changed root or `allowUnc` → different hash; overlapping `worktreeRoot`/`recoveryRoot` → invalid config with a stable `policyVersion`.
+- Test: same config → same hash; reordered roots → same hash; changed root or `allowUnc` → different hash; overlapping `worktreeRoot`/`recoveryRoot` → invalid config with a stable `policyVersion`; `allowDevicePaths` is always `false` and has no config surface.
 
-**Frozen-roadmap note.** The P2-02 card lists `allowDevicePaths` as a `policyVersion` input. The independent review removes that option entirely, so there is no device-path policy state to hash. This is a fail-closed narrowing of the card's path policy, not a change to the frozen protocol, schema or error-code registry; `docs/phase-2-technical-roadmap.md` itself is not edited.
+**Frozen-roadmap note.** The P2-02 card lists `allowDevicePaths` as a `policyVersion` input. This plan keeps that key in the hash as the fixed constant `false`, preserving the card's hash input shape while providing no way to enable device paths. This is a fail-closed narrowing of the card's path policy, not a change to the frozen protocol, schema or error-code registry; `docs/phase-2-technical-roadmap.md` itself is not edited.
 
 ### 9.4 Validation algorithm and error precedence
 
@@ -1344,7 +1346,7 @@ Rules:
 - If any of those differ → throw `REPOSITORY_CONTEXT_CONFLICT`.
 - `prepare` is the **only** P2-02 stage that checks default-branch existence. It must:
   - run `git check-ref-format --branch <defaultBranch>` and fail `REPO_DEFAULT_BRANCH_NOT_FOUND` on non-zero;
-  - run `git rev-parse --verify --quiet refs/heads/<defaultBranch>` with the branch as an argv element and fail `REPO_DEFAULT_BRANCH_NOT_FOUND` on non-zero;
+  - run `git rev-parse --verify --quiet "refs/heads/<defaultBranch>^{commit}"` with the whole ref expression as a single argv element via `execFile` (no shell) and fail `REPO_DEFAULT_BRANCH_NOT_FOUND` on non-zero; the `^{commit}` peel ensures the ref resolves to a Commit object, not a tag, tree or other non-commit object;
   - pass the default branch to `git worktree add` only after both checks pass.
     `repository.validate` must not perform these checks, because it never receives `defaultBranch`.
 - `prepare` must not spawn a CLI. It only validates, resolves, checks the policy and default branch, reads `HEAD`, asserts bidirectional root isolation, and stores the context.
@@ -1822,40 +1824,41 @@ and the Playwright Fake Runner E2E suite on `ubuntu-latest`. P2-02 should use th
 
 The **Stage** column is normative: a row marked `validate` must be asserted through `repository.validate`; a row marked `handshake` must be asserted through `execution.repository`. Do not test a handshake-only condition through the validation route, and do not test a validation-only condition through the handshake.
 
-| Stage     | Case                                                   | Windows        | Linux         | Expected result                                                             |
-| --------- | ------------------------------------------------------ | -------------- | ------------- | --------------------------------------------------------------------------- |
-| validate  | Allowed root contains repo                             | yes            | yes           | `ok=true`                                                                   |
-| validate  | Same path with different case (`C:\Repo` vs `c:\repo`) | yes            | n/a           | `ok=true` (Windows) / `REPO_PATH_NOT_FOUND` or outside (Linux)              |
-| validate  | Relative path `repo`                                   | yes            | yes           | `REPO_PATH_NOT_ABSOLUTE`                                                    |
-| validate  | Drive-relative `C:repo`                                | yes            | n/a           | `REPO_PATH_NOT_ABSOLUTE`                                                    |
-| validate  | `..` traversal                                         | yes            | yes           | `REPO_PATH_TRAVERSAL`                                                       |
-| validate  | NUL in path                                            | yes            | yes           | `REPO_PATH_INVALID` (contract also rejects)                                 |
-| validate  | UNC `\\server\share`                                   | yes            | n/a           | `REPO_UNC_NOT_ALLOWED` (default)                                            |
-| validate  | Device `\\?\C:\repo`                                   | yes            | n/a           | `REPO_PATH_INVALID` — **always**, no opt-in                                 |
-| validate  | Device `\\.\PhysicalDrive0`                            | yes            | n/a           | `REPO_PATH_INVALID` — **always**, no opt-in                                 |
-| validate  | Device `\\?\UNC\server\share`                          | yes            | n/a           | `REPO_PATH_INVALID` — device namespace wins over UNC allow                  |
-| validate  | Junction/symlink escaping root                         | yes (junction) | yes (symlink) | `REPO_PATH_OUTSIDE_ALLOWED_ROOTS`                                           |
-| validate  | Nonexistent path                                       | yes            | yes           | `REPO_PATH_NOT_FOUND`                                                       |
-| validate  | File instead of directory                              | yes            | yes           | `REPO_PATH_INVALID`                                                         |
-| validate  | Path outside allowed roots                             | yes            | yes           | `REPO_PATH_OUTSIDE_ALLOWED_ROOTS`                                           |
-| validate  | Repo inside worktreeRoot                               | yes            | yes           | `REPO_PATH_NESTED_IN_WORKTREE_ROOT`                                         |
-| validate  | Repo inside recoveryRoot                               | yes            | yes           | `REPO_PATH_NESTED_IN_WORKTREE_ROOT`                                         |
-| validate  | worktreeRoot inside repo                               | yes            | yes           | `REPO_PATH_NESTED_IN_WORKTREE_ROOT`                                         |
-| validate  | recoveryRoot inside repo                               | yes            | yes           | `REPO_PATH_NESTED_IN_WORKTREE_ROOT`                                         |
-| validate  | worktreeRoot/recoveryRoot overlap each other           | yes            | yes           | `REPOSITORY_POLICY_NOT_CONFIGURED`                                          |
-| validate  | repo, worktreeRoot, recoveryRoot mutually disjoint     | yes            | yes           | `ok=true`                                                                   |
-| validate  | Non-Git directory                                      | yes            | yes           | `REPO_NOT_GIT_ROOT`                                                         |
-| validate  | Bare repo                                              | yes            | yes           | `REPO_BARE_UNSUPPORTED`                                                     |
-| validate  | Linked worktree                                        | yes            | yes           | `REPO_PATH_IS_WORKTREE`                                                     |
-| validate  | Submodule                                              | yes            | yes           | `REPO_PATH_IS_WORKTREE`                                                     |
-| validate  | Empty repo / no HEAD                                   | yes            | yes           | `REPO_VALIDATION_FAILED`                                                    |
-| validate  | Missing Project.defaultBranch is **not** checked       | yes            | yes           | `ok=true` even when `refs/heads/<defaultBranch>` is absent                  |
-| validate  | Policy version stable across root order                | yes            | yes           | same hash                                                                   |
-| validate  | Policy version changes with root/`allowUnc`            | yes            | yes           | different hash                                                              |
-| handshake | Missing default branch                                 | yes            | yes           | `execution.repository.rejected` + `REPO_DEFAULT_BRANCH_NOT_FOUND`; no start |
-| handshake | Invalid ref syntax in default branch                   | yes            | yes           | `REPO_DEFAULT_BRANCH_NOT_FOUND`; no start                                   |
-| handshake | Valid default branch                                   | yes            | yes           | accepted → start                                                            |
-| handshake | Policy changed after validation                        | yes            | yes           | `REPOSITORY_POLICY_CHANGED`; Binding `unverified`                           |
+| Stage     | Case                                                        | Windows        | Linux         | Expected result                                                                         |
+| --------- | ----------------------------------------------------------- | -------------- | ------------- | --------------------------------------------------------------------------------------- |
+| validate  | Allowed root contains repo                                  | yes            | yes           | `ok=true`                                                                               |
+| validate  | Same path with different case (`C:\Repo` vs `c:\repo`)      | yes            | n/a           | `ok=true` (Windows) / `REPO_PATH_NOT_FOUND` or outside (Linux)                          |
+| validate  | Relative path `repo`                                        | yes            | yes           | `REPO_PATH_NOT_ABSOLUTE`                                                                |
+| validate  | Drive-relative `C:repo`                                     | yes            | n/a           | `REPO_PATH_NOT_ABSOLUTE`                                                                |
+| validate  | `..` traversal                                              | yes            | yes           | `REPO_PATH_TRAVERSAL`                                                                   |
+| validate  | NUL in path                                                 | yes            | yes           | `REPO_PATH_INVALID` (contract also rejects)                                             |
+| validate  | UNC `\\server\share`                                        | yes            | n/a           | `REPO_UNC_NOT_ALLOWED` (default)                                                        |
+| validate  | Device `\\?\C:\repo`                                        | yes            | n/a           | `REPO_PATH_INVALID` — **always**, no opt-in                                             |
+| validate  | Device `\\.\PhysicalDrive0`                                 | yes            | n/a           | `REPO_PATH_INVALID` — **always**, no opt-in                                             |
+| validate  | Device `\\?\UNC\server\share`                               | yes            | n/a           | `REPO_PATH_INVALID` — device namespace wins over UNC allow                              |
+| validate  | Junction/symlink escaping root                              | yes (junction) | yes (symlink) | `REPO_PATH_OUTSIDE_ALLOWED_ROOTS`                                                       |
+| validate  | Nonexistent path                                            | yes            | yes           | `REPO_PATH_NOT_FOUND`                                                                   |
+| validate  | File instead of directory                                   | yes            | yes           | `REPO_PATH_INVALID`                                                                     |
+| validate  | Path outside allowed roots                                  | yes            | yes           | `REPO_PATH_OUTSIDE_ALLOWED_ROOTS`                                                       |
+| validate  | Repo inside worktreeRoot                                    | yes            | yes           | `REPO_PATH_NESTED_IN_WORKTREE_ROOT`                                                     |
+| validate  | Repo inside recoveryRoot                                    | yes            | yes           | `REPO_PATH_NESTED_IN_WORKTREE_ROOT`                                                     |
+| validate  | worktreeRoot inside repo                                    | yes            | yes           | `REPO_PATH_NESTED_IN_WORKTREE_ROOT`                                                     |
+| validate  | recoveryRoot inside repo                                    | yes            | yes           | `REPO_PATH_NESTED_IN_WORKTREE_ROOT`                                                     |
+| validate  | worktreeRoot/recoveryRoot overlap each other                | yes            | yes           | `REPOSITORY_POLICY_NOT_CONFIGURED`                                                      |
+| validate  | repo, worktreeRoot, recoveryRoot mutually disjoint          | yes            | yes           | `ok=true`                                                                               |
+| validate  | Non-Git directory                                           | yes            | yes           | `REPO_NOT_GIT_ROOT`                                                                     |
+| validate  | Bare repo                                                   | yes            | yes           | `REPO_BARE_UNSUPPORTED`                                                                 |
+| validate  | Linked worktree                                             | yes            | yes           | `REPO_PATH_IS_WORKTREE`                                                                 |
+| validate  | Submodule                                                   | yes            | yes           | `REPO_PATH_IS_WORKTREE`                                                                 |
+| validate  | Empty repo / no HEAD                                        | yes            | yes           | `REPO_VALIDATION_FAILED`                                                                |
+| validate  | Missing/non-commit Project.defaultBranch is **not** checked | yes            | yes           | `ok=true` even when `refs/heads/<defaultBranch>` is absent or does not peel to a commit |
+| validate  | Policy version stable across root order                     | yes            | yes           | same hash                                                                               |
+| validate  | Policy version changes with root/`allowUnc`                 | yes            | yes           | different hash                                                                          |
+| handshake | Missing default branch                                      | yes            | yes           | `execution.repository.rejected` + `REPO_DEFAULT_BRANCH_NOT_FOUND`; no start             |
+| handshake | Invalid ref syntax in default branch                        | yes            | yes           | `REPO_DEFAULT_BRANCH_NOT_FOUND`; no start                                               |
+| handshake | Default branch ref does not peel to a commit                | yes            | yes           | `REPO_DEFAULT_BRANCH_NOT_FOUND`; no start                                               |
+| handshake | Valid default branch                                        | yes            | yes           | accepted → start                                                                        |
+| handshake | Policy changed after validation                             | yes            | yes           | `REPOSITORY_POLICY_CHANGED`; Binding `unverified`                                       |
 
 ### 14.3 Test files and responsibilities
 
@@ -2132,7 +2135,7 @@ The A–E review variants map as follows: (A) same Runner re-registration → G1
    - recovered pre-start failures go through `finishExecution`, never `failExecutionStart`.
 7. In `RuntimeRegistryService.availability`, remove the `projectIds` gate; add feature reasons.
 8. In the Runner:
-   - `RepositoryContextManager`, including the mandatory `defaultBranch` checks (`check-ref-format` + `rev-parse --verify refs/heads/<branch>`) and bidirectional root isolation;
+   - `RepositoryContextManager`, including the mandatory `defaultBranch` checks (`check-ref-format` + `rev-parse --verify "refs/heads/<branch>^{commit}"` via `execFile`) and bidirectional root isolation;
    - handle `execution.repository` and send accepted/rejected;
    - remove the early `execution.accepted`;
    - `handleStart` checks context/policy/pre-accept admission (CLI, runtime enabled, capacity), sends `execution.start.rejected` or `execution.accepted`;
@@ -2485,19 +2488,19 @@ Each criterion must have an automated test or a reproducible command in the PR. 
 
 ### 18.4 Isolation, compatibility, migration, UI
 
-| ID     | Criterion                                                                                                                                                                                | Test                                                                           |
-| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| AC-32  | Main checkout HEAD unchanged after a Fake Runner execution                                                                                                                               | E2E                                                                            |
-| AC-33  | No `HAFT_RUNNER_PROJECTS` or cwd fallback in the execution path                                                                                                                          | `rg` + config unit test                                                        |
-| AC-33B | No live `allowDevicePaths` / `HAFT_RUNNER_ALLOW_DEVICE_PATHS` / `--allow-device-paths` surface in code, tests or config; mentions are limited to prohibition statements in planning docs | `rg` evidence (scoped to `apps`, `packages`, `tests`, `playwright*.config.ts`) |
-| AC-33C | `defaultBranch` existence is checked only in `execution.repository`/context preparation; validation code has no branch check                                                             | `rg` + integration branch-separation test                                      |
-| AC-34  | Old Runner connects, mock works, real execution 409                                                                                                                                      | integration                                                                    |
-| AC-35  | New API + old Runner does not send repository messages; new Runner + new API succeeds                                                                                                    | integration                                                                    |
-| AC-36  | Migration works on an empty DB and an existing DB; backfill sets terminal/running correctly                                                                                              | migration test/manual SQL verification with recorded output                    |
-| AC-37  | `execution.start` v1 contract still rejects unknown repository fields                                                                                                                    | existing contracts test                                                        |
-| AC-38  | UI shows validation status/canonical/policy/error and execution repository/dispatch state                                                                                                | web/E2E                                                                        |
-| AC-39  | Windows path matrix passes on `windows-latest`                                                                                                                                           | CI unit                                                                        |
-| AC-40  | Linux path matrix passes on `ubuntu-latest`                                                                                                                                              | CI unit                                                                        |
+| ID     | Criterion                                                                                                                                                                                                                                                                                                                                                 | Test                                                                           |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| AC-32  | Main checkout HEAD unchanged after a Fake Runner execution                                                                                                                                                                                                                                                                                                | E2E                                                                            |
+| AC-33  | No `HAFT_RUNNER_PROJECTS` or cwd fallback in the execution path                                                                                                                                                                                                                                                                                           | `rg` + config unit test                                                        |
+| AC-33B | No configurable `allowDevicePaths` / `HAFT_RUNNER_ALLOW_DEVICE_PATHS` / `--allow-device-paths` surface in code, tests or config, and no test expects a device path to be accepted; the only occurrence with runtime effect is the fixed `allowDevicePaths: false` constant in the `policyVersion` hash (comments and prohibition statements do not count) | `rg` evidence (scoped to `apps`, `packages`, `tests`, `playwright*.config.ts`) |
+| AC-33C | `defaultBranch` existence is checked only in `execution.repository`/context preparation; validation code has no branch check                                                                                                                                                                                                                              | `rg` + integration branch-separation test                                      |
+| AC-34  | Old Runner connects, mock works, real execution 409                                                                                                                                                                                                                                                                                                       | integration                                                                    |
+| AC-35  | New API + old Runner does not send repository messages; new Runner + new API succeeds                                                                                                                                                                                                                                                                     | integration                                                                    |
+| AC-36  | Migration works on an empty DB and an existing DB; backfill sets terminal/running correctly                                                                                                                                                                                                                                                               | migration test/manual SQL verification with recorded output                    |
+| AC-37  | `execution.start` v1 contract still rejects unknown repository fields                                                                                                                                                                                                                                                                                     | existing contracts test                                                        |
+| AC-38  | UI shows validation status/canonical/policy/error and execution repository/dispatch state                                                                                                                                                                                                                                                                 | web/E2E                                                                        |
+| AC-39  | Windows path matrix passes on `windows-latest`                                                                                                                                                                                                                                                                                                            | CI unit                                                                        |
+| AC-40  | Linux path matrix passes on `ubuntu-latest`                                                                                                                                                                                                                                                                                                               | CI unit                                                                        |
 
 ### 18.5 The core invariant test (must be obvious in the PR)
 
@@ -2550,13 +2553,13 @@ Each risk is analyzed with: trigger, existing protection, missing protection, pr
 
 #### R3 — UNC and device path handling
 
-| Field               | Detail                                                                                                                                                                                                                                                                             |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Trigger             | A binding path uses `\\server\share`, `\\?\C:\...`, `\\.\PhysicalDrive...`, or another Windows device namespace; realpath/containment behaves unexpectedly.                                                                                                                        |
-| Existing protection | `repositoryPathSchema` rejects NUL/length only; Git may accept UNC.                                                                                                                                                                                                                |
-| Missing protection  | No explicit device-path rejection; no policy version sensitivity for UNC.                                                                                                                                                                                                          |
-| Proposed solution   | **Always** reject `\\?\` and `\\.\` (including `\\?\UNC\...`) with `REPO_PATH_INVALID`; there is no flag, no prefix stripping and no containment fallback. Reject UNC unless `allowUnc=true`; include `allowUnc`, allowed roots, worktreeRoot and recoveryRoot in `policyVersion`. |
-| Test method         | Windows-only policy tests: device forms always reject; UNC default reject; allowed UNC succeeds; no test expects a device path to be accepted.                                                                                                                                     |
+| Field               | Detail                                                                                                                                                                                                                                                                                                                           |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Trigger             | A binding path uses `\\server\share`, `\\?\C:\...`, `\\.\PhysicalDrive...`, or another Windows device namespace; realpath/containment behaves unexpectedly.                                                                                                                                                                      |
+| Existing protection | `repositoryPathSchema` rejects NUL/length only; Git may accept UNC.                                                                                                                                                                                                                                                              |
+| Missing protection  | No explicit device-path rejection; no policy version sensitivity for UNC.                                                                                                                                                                                                                                                        |
+| Proposed solution   | **Always** reject `\\?\` and `\\.\` (including `\\?\UNC\...`) with `REPO_PATH_INVALID`; there is no flag, no prefix stripping and no containment fallback. Reject UNC unless `allowUnc=true`; include the fixed constant `allowDevicePaths: false`, `allowUnc`, allowed roots, worktreeRoot and recoveryRoot in `policyVersion`. |
+| Test method         | Windows-only policy tests: device forms always reject; UNC default reject; allowed UNC succeeds; no test expects a device path to be accepted.                                                                                                                                                                                   |
 
 #### R4 — Symlink/junction escape from allowed roots
 
@@ -2590,13 +2593,13 @@ Each risk is analyzed with: trigger, existing protection, missing protection, pr
 
 #### R7 — Missing default branch or empty repository
 
-| Field               | Detail                                                                                                                                                                                                                                                                                                                                           |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Trigger             | Project `defaultBranch` does not exist, or the repo has no commits/unborn HEAD.                                                                                                                                                                                                                                                                  |
-| Existing protection | Contract validates branch syntax; the Runner context manager can check branch existence during execution preparation.                                                                                                                                                                                                                            |
-| Missing protection  | `repository.validate` has no `defaultBranch` field and cannot check branch existence; a binding can legitimately be `ready` with a bad branch until the handshake.                                                                                                                                                                               |
-| Proposed solution   | Check `defaultBranch` **only** in the `execution.repository` handshake/context preparation: `git check-ref-format --branch`, then `git rev-parse --verify --quiet refs/heads/<branch>`; return `REPO_DEFAULT_BRANCH_NOT_FOUND` before accepted. Do not add a branch check to validation. Empty/no HEAD at validation → `REPO_VALIDATION_FAILED`. |
-| Test method         | Git fixture where validation succeeds but the project default `release/missing` does not exist; assert validation `ok=true`, handshake `REPO_DEFAULT_BRANCH_NOT_FOUND`, no `execution.start`, no CLI. Empty repo fixture fails validation with `REPO_VALIDATION_FAILED`.                                                                         |
+| Field               | Detail                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Trigger             | Project `defaultBranch` does not exist, or the repo has no commits/unborn HEAD.                                                                                                                                                                                                                                                                                                                                                                    |
+| Existing protection | Contract validates branch syntax; the Runner context manager can check branch existence during execution preparation.                                                                                                                                                                                                                                                                                                                              |
+| Missing protection  | `repository.validate` has no `defaultBranch` field and cannot check branch existence; a binding can legitimately be `ready` with a bad branch until the handshake.                                                                                                                                                                                                                                                                                 |
+| Proposed solution   | Check `defaultBranch` **only** in the `execution.repository` handshake/context preparation: `git check-ref-format --branch`, then `git rev-parse --verify --quiet "refs/heads/<branch>^{commit}"` via `execFile` argv; return `REPO_DEFAULT_BRANCH_NOT_FOUND` before accepted. The `^{commit}` peel rejects refs that do not resolve to a Commit. Do not add a branch check to validation. Empty/no HEAD at validation → `REPO_VALIDATION_FAILED`. |
+| Test method         | Git fixture where validation succeeds but the project default `release/missing` does not exist; assert validation `ok=true`, handshake `REPO_DEFAULT_BRANCH_NOT_FOUND`, no `execution.start`, no CLI. Also create a `refs/heads/<branch>` that exists but does not peel to a commit and assert the same handshake rejection. Empty repo fixture fails validation with `REPO_VALIDATION_FAILED`.                                                    |
 
 #### R8 — Stale binding version, concurrent path edit, or Runner replacement
 
@@ -3149,8 +3152,11 @@ assert execution.failureReason === "REPO_DEFAULT_BRANCH_NOT_FOUND: ..."
 # Must return no execution-path reads
 rg "HAFT_RUNNER_PROJECTS|INIT_CWD|projectPaths" apps/runner/src apps/api/src
 
-# Must return nothing: no device-path allow surface in code, tests or config
-rg "allowDevicePaths|HAFT_RUNNER_ALLOW_DEVICE_PATHS|--allow-device-paths" apps packages tests playwright*.config.ts
+# Must return nothing: no configurable device-path allow surface in code, tests or config
+rg "allowDevicePaths: (true|process\.env|config\.)|HAFT_RUNNER_ALLOW_DEVICE_PATHS|--allow-device-paths" apps packages tests playwright*.config.ts
+
+# Must return exactly the single fixed hash-input line (no config surface)
+rg -n "allowDevicePaths: false" apps/runner/src/repository-policy.ts
 
 # Branch existence checks must be confined to the Runner handshake/context
 rg "REPO_DEFAULT_BRANCH_NOT_FOUND|check-ref-format" apps/runner/src apps/api/src
