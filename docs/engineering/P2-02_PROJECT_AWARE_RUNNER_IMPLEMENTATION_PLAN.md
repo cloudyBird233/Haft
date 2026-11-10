@@ -2,7 +2,7 @@
 
 | Field                  | Value                                                                                                                                                                                                                              |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Status                 | **Planning only** — no product code, schema, migration, commit, push or PR in this round                                                                                                                                           |
+| Status                 | **Planning only** — documentation revision only; no product code, schema, migration or PR                                                                                                                                          |
 | Baseline               | `origin/main` @ `eea16d94de2ce90342eb37805fb083777f839d00` (“Merge pull request #4 … feature/p2-01-project-crud-repository-binding”)                                                                                               |
 | Planning branch        | `feature/p2-02-project-aware-runner`                                                                                                                                                                                               |
 | Planning worktree      | `D:\CODE\GIT\Haft-p2-02`                                                                                                                                                                                                           |
@@ -12,7 +12,7 @@
 | Audience               | The coding agent that will implement P2-02 after this plan is approved                                                                                                                                                             |
 | Internal work packages | WP-A Repository Validation, WP-B Repository Path Policy, WP-C Execution Repository Handshake, WP-D Reliability/Recovery, WP-E UI & Automated Acceptance. These are **internal planning units**, not new official roadmap task IDs. |
 
-> **Hard scope rule.** This document describes work only. The implementation round must not modify product code, Prisma schema, migrations, roadmap cards, commits, pushes or PRs until the plan is explicitly approved.
+> **Hard scope rule.** This document describes work only. The implementation round must not modify product code, Prisma schema, migrations or roadmap cards, and must not create a PR, until the plan is explicitly approved. Revisions to this planning document itself may be committed and pushed to the planning branch; no product code is changed by those revisions.
 
 ---
 
@@ -70,6 +70,13 @@ The implementation must make the following invariant true end-to-end, with autom
 
 > **No `execution.start` may be sent — and no Codex/OpenCode process may be spawned — unless a valid `execution.repository.accepted` has been received, correlated, persisted, and followed by a successful binding re-check.**
 
+Four review-driven rules are now part of that invariant:
+
+1. **Device paths are never allowed.** `\\?\` and `\\.\` always return the existing `REPO_PATH_INVALID`; there is no configuration flag and no test branch that permits them.
+2. **Validation is path-only.** `repository.validate` has no `defaultBranch` field. `Project.defaultBranch` existence is checked only in the `execution.repository` handshake, which returns `REPO_DEFAULT_BRANCH_NOT_FOUND` before any `execution.start`.
+3. **Validation is bound to one Runner identity and platform.** A `ready` binding is executable only by the Runner that produced the validation and on the same platform. A different or replacement Runner requires revalidation.
+4. **Worktree, recovery and main-repository roots are mutually isolated.** The policy rejects overlap in both directions, not only a repository path nested inside `worktreeRoot`/`recoveryRoot`.
+
 The plan is deliberately **fail-closed**:
 
 - old Runners stay connected but cannot start real executions;
@@ -78,7 +85,7 @@ The plan is deliberately **fail-closed**:
 - a timeout never fabricates success;
 - every pre-start failure cleans up the Runner context and leaves the main checkout untouched.
 
-**Readiness verdict:** implementable now. The work is large but well-bounded. The highest-risk areas are Windows path normalization/junction escape, handshake idempotency across reconnects, and stale binding/policy handling. Those are addressed in WP-B, WP-C and WP-D and in the risk register in §19.
+**Readiness verdict:** implementable now. The work is large but well-bounded. The highest-risk areas are Windows path normalization/junction escape and bidirectional root isolation, handshake idempotency across reconnects, and stale binding/policy/validator handling. Those are addressed in WP-B, WP-C and WP-D and in the risk register in §19.
 
 ---
 
@@ -147,16 +154,16 @@ P2-02 must reverse this: `execution.accepted` means **all pre-start checks passe
 
 ### 1.5 Gap summary
 
-| Gap                          | Current state                                                    | P2-02 target                                                                                                                        |
-| ---------------------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| Binding validation           | No API route, no Runner message handling                         | `POST …/validate`, `repository.validate`/`repository.validation`, conditional DB writes                                             |
-| Path safety                  | Only `git rev-parse --show-toplevel` equality                    | Allowed roots, realpath, UNC/device/traversal rejection, bare/linked-worktree/submodule rejection, worktree/recovery-root exclusion |
-| Runner capability            | `features` parsed but never advertised or enforced               | Advertise four P2-02 features; API fails closed when absent                                                                         |
-| Execution repository context | No message, no context, no `dispatchState`                       | `execution.repository` → accepted/rejected; durable `dispatchState`; Runner in-memory context                                       |
-| Start gating                 | `execution.start` sent immediately; accepted sent immediately    | No start before valid accepted; Runner rejects start when context is not ready                                                      |
-| Old mapping                  | `HAFT_RUNNER_PROJECTS` / `--project` / cwd fallback              | Deleted from the execution path; `allowedRepositoryRoots` only                                                                      |
-| Recovery                     | Reconcile only started sessions                                  | State-aware recovery for preparing/ready/start_sent/running; context TTL                                                            |
-| UI                           | Binding status only; no validation action, no repository details | Validate/Revalidate, canonical path, policy version, dispatch state, actionable errors                                              |
+| Gap                          | Current state                                                    | P2-02 target                                                                                                                                                                |
+| ---------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Binding validation           | No API route, no Runner message handling                         | `POST …/validate`, `repository.validate`/`repository.validation`, conditional DB writes                                                                                     |
+| Path safety                  | Only `git rev-parse --show-toplevel` equality                    | Allowed roots, realpath, UNC rejection, unconditional device-path rejection, bare/linked-worktree/submodule rejection, bidirectional worktree/recovery/repository isolation |
+| Runner capability            | `features` parsed but never advertised or enforced               | Advertise four P2-02 features; API fails closed when absent                                                                                                                 |
+| Execution repository context | No message, no context, no `dispatchState`                       | `execution.repository` → accepted/rejected; durable `dispatchState`; Runner in-memory context                                                                               |
+| Start gating                 | `execution.start` sent immediately; accepted sent immediately    | No start before valid accepted; Runner rejects start when context is not ready                                                                                              |
+| Old mapping                  | `HAFT_RUNNER_PROJECTS` / `--project` / cwd fallback              | Deleted from the execution path; `allowedRepositoryRoots` only                                                                                                              |
+| Recovery                     | Reconcile only started sessions                                  | State-aware recovery for preparing/ready/start_sent/running; context TTL                                                                                                    |
+| UI                           | Binding status only; no validation action, no repository details | Validate/Revalidate, canonical path, policy version, dispatch state, actionable errors                                                                                      |
 
 ---
 
@@ -328,7 +335,7 @@ sequenceDiagram
     API->>DB: UPDATE Binding SET validationRequestId=requestId
     API->>Registry: send repository.validate {requestId, projectId, computerId, bindingId, bindingVersion, path}
     API->>API: start 15 s timer (retry at half-timeout, same messageId/payload)
-    Runner->>Runner: schema check, path policy, realpath, git root/bare/linked-worktree, branch, head
+    Runner->>Runner: schema check, path policy, realpath, git root/bare/linked-worktree, head<br/>(no defaultBranch: the payload has no such field)
     Runner-->>API: repository.validation {requestId, bindingVersion, ok, platform, policyVersion, canonicalPath, headCommit, errorCode?, message?}
     API->>DB: conditional UPDATE WHERE id=? AND bindingVersion=? AND validationRequestId=?
     alt requestId/version mismatch
@@ -349,6 +356,8 @@ sequenceDiagram
 
 **Message contract used:** `repository.validate` → `repository.validation` (exact schemas in §8). No other messages are involved. The API never reads the Runner filesystem; it only persists the Runner-reported facts.
 
+**Validation is path-only.** The frozen `repository.validate` payload is `{ requestId, projectId, computerId, bindingId, bindingVersion, path }` and has no `defaultBranch`. Repository validation therefore checks path existence, `realpath`, `allowedRepositoryRoots`, Git main-worktree shape, `policyVersion` and `headCommit` only. It must not read the Project's `defaultBranch` and must not claim that the default branch exists. Branch existence is checked by the `execution.repository` handshake (§4.2, §8.6). A binding can legitimately be `ready` before a later handshake rejects a missing default branch with `REPO_DEFAULT_BRANCH_NOT_FOUND`.
+
 **Response semantics:** a validation that ran and produced a negative result is **not** an HTTP error. The route returns `200` with `status='missing'|'error'`, `errorCode`, and a human-readable `message`. HTTP errors are reserved for “validation could not be attempted” (404/409/504) or “the result was stale” (409 `BINDING_VERSION_STALE`).
 
 ### 4.2 Execution repository handshake sequence
@@ -360,15 +369,21 @@ sequenceDiagram
 1. Task is startable and assigned.
 2. Project is not archived.
 3. Binding exists and `status='ready'` **and** `validatedBindingVersion === bindingVersion`.
-4. Binding has non-null `canonicalPath` and non-null `policyVersion` (P2-02 strengthens P2-01's ready check).
-5. Computer has a live Runner.
-6. Frozen task/agent/busy/offline checks from P2-01 still pass.
-7. The live Runner advertises `project-binding-v1`, `repository-handshake-v1`, `repository-path-policy-v1`.
-8. Runtime availability says the CLI is installed and authenticated (pre-check; the Runner re-checks before accepted).
-9. The runner has capacity: count other non-terminal executions assigned to it (excluding this `executionId`) and require `count < maxConcurrentExecutions`. Preserve the existing `dispatchStart` concurrency limit when moving dispatch into the handshake service; do not drop it.
-10. This execution is not already in `repository_preparing` / `repository_ready` / `start_sent` / `running`; a duplicate dispatch returns `EXECUTION_ALREADY_RUNNING` without sending another message.
+4. Binding has non-null `canonicalPath`, non-null `policyVersion`, non-null `platform`, and non-null `validatedByRunnerId` (P2-02 strengthens P2-01's ready check).
+5. The binding was validated by the **selected live Runner** and on the **same platform**:
+   - `binding.validatedByRunnerId === selectedRunner.id`;
+   - `binding.platform === selectedRunner.platform`.
+     `selectedRunner` is the live Runner registration for `task.assignee.computerId` that will own the dispatch. A `ready` binding validated by a different Runner row, or on a different platform, is not executable. The API returns `409 PROJECT_BINDING_NOT_READY` and requires revalidation on the selected Runner; it must not dispatch.
+6. Computer has a live Runner.
+7. Frozen task/agent/busy/offline checks from P2-01 still pass.
+8. The live Runner advertises `project-binding-v1`, `repository-handshake-v1`, `repository-path-policy-v1` (all three are required; a partial advertisement is unsupported).
+9. Runtime availability says the CLI is installed and authenticated (pre-check; the Runner re-checks before accepted).
+10. The runner has capacity: count other non-terminal executions assigned to it (excluding this `executionId`) and require `count < maxConcurrentExecutions`. Preserve the existing `dispatchStart` concurrency limit when moving dispatch into the handshake service; do not drop it.
+11. This execution is not already in `repository_preparing` / `repository_ready` / `start_sent` / `running`; a duplicate dispatch returns `EXECUTION_ALREADY_RUNNING` without sending another message.
 
-If 3/4 fail → `409 PROJECT_BINDING_NOT_READY`. If 5 fails → `409 RUNNER_OFFLINE`. If 7 fails → `409 PROJECT_BINDING_UNSUPPORTED`. **No Execution row is created for these failures.**
+If 3, 4 or 5 fails → `409 PROJECT_BINDING_NOT_READY`. If 6 fails → `409 RUNNER_OFFLINE`. If 8 fails → `409 PROJECT_BINDING_UNSUPPORTED`. **No Execution row is created for these failures.**
+
+The Execution snapshot still records `repositoryDefaultBranch` from the Project. The API does **not** verify that the branch exists at this point; that check belongs to the Runner in `execution.repository` (§8.6). A missing branch is therefore an execution failure after the row is created, with `failureReason` beginning `REPO_DEFAULT_BRANCH_NOT_FOUND`, no `execution.start`, and no CLI spawn.
 
 ```mermaid
 sequenceDiagram
@@ -382,10 +397,10 @@ sequenceDiagram
   participant CLI as Codex/OpenCode
 
   Web->>Exec: POST /tasks/:id/start
-  Exec->>DB: precheck Binding=ready + version + canonicalPath + policyVersion
-  Exec->>Registry: isConnected, hasLiveFeatures([project-binding, handshake, path-policy])
-  alt guard fails
-    Exec-->>Web: 409 PROJECT_BINDING_* / RUNNER_OFFLINE
+  Exec->>DB: precheck Binding=ready + version + canonicalPath + policyVersion<br/>+ validatedByRunnerId + platform
+  Exec->>Registry: resolve selectedRunner; check id/platform/features
+  alt guard fails (including runner identity or platform mismatch)
+    Exec-->>Web: 409 PROJECT_BINDING_NOT_READY / RUNNER_OFFLINE / PROJECT_BINDING_UNSUPPORTED
   else guard passes
     Exec->>DB: transaction: create Execution(status=running, phase=queued,<br/>repository snapshot, dispatchState=created)
     Exec->>HS: dispatch({executionId, runnerId, runtime, prompt, options})
@@ -395,7 +410,7 @@ sequenceDiagram
     else acquired
       HS->>Registry: send execution.repository {executionId, projectId, bindingId,<br/>bindingVersion, path, defaultBranch, policyVersion}
       HS->>HS: 2 s / 4 s retries, same messageId+payload, total 15 s
-      Runner->>Runner: validate fields, policyVersion, path policy, branch, base commit;<br/>create/reuse in-memory context; DO NOT spawn CLI
+      Runner->>Runner: validate fields, policyVersion, path policy,<br/>defaultBranch existence (check-ref-format + rev-parse), base commit;<br/>create/reuse in-memory context; DO NOT spawn CLI
       alt rejected
         Runner-->>HS: execution.repository.rejected {code, message, retryable}
         HS->>Registry: execution.cancel (best effort, release context)
@@ -405,9 +420,9 @@ sequenceDiagram
       else accepted
         Runner-->>HS: execution.repository.accepted {executionId, projectId, bindingId,<br/>bindingVersion, policyVersion, contextId, canonicalPath, defaultBranch, baseCommit, acceptedAt}
         HS->>DB: verify ACK against Execution snapshot + current Binding
-        HS->>DB: re-read Binding (status/version/policyVersion/canonicalPath)
-        alt mismatch / binding changed / policy changed
-          HS->>DB: maybe Binding=unverified
+        HS->>DB: transactional re-read Binding (status/version/policyVersion/canonicalPath/<br/>validatedByRunnerId/platform), re-resolve the live selected Runner, and live features
+        alt mismatch / binding changed / policy changed /<br/>runner identity or platform changed / features lost
+          HS->>DB: maybe Binding=unverified (policy change only)
           HS->>Registry: execution.cancel
           HS-->>Exec: reject with concrete code
           Exec->>DB: failExecutionStart: terminal + failureReason + task/agent rollback
@@ -434,6 +449,8 @@ sequenceDiagram
   end
   Note over HS,Runner: No execution.start before a valid accepted.<br/>No CLI spawn before accepted.<br/>All pre-start failures cancel and release the context.<br/>Synchronous failures are persisted only by ExecutionsService.failExecutionStart (§6.5).
 ```
+
+**What `ready` means.** A `ready` Binding means that the path and repository policy were validated successfully by a specific Runner, on a specific platform, at a specific binding version. It does **not** mean that every `Project.defaultBranch` has passed the pre-execution check, and it does **not** transfer to a replacement Runner. The identity/platform gate (precheck) and the transactional binding re-check (after accepted) are therefore mandatory, not optional hardening.
 
 ### 4.3 Message order assertions
 
@@ -471,20 +488,22 @@ stateDiagram-v2
   ready --> ready: timeout (status unchanged, attempt error recorded)
 ```
 
+`ready` is scoped to the Runner identity and platform that produced the response. If the selected Runner is different, or its live platform differs from `binding.platform`, the binding is **not executable** even though its stored status is still `ready`. The API does not mutate the binding merely because a different Runner was selected; the execution precheck returns `PROJECT_BINDING_NOT_READY` and the user must revalidate on the selected Runner. This keeps the persisted status honest and avoids silently invalidating a valid binding when an unrelated Runner connects.
+
 ### 5.2 Transition rules
 
-| Current      | Event                                   | Guard                                                                                      | Next         | Fields written                                                                                                                                                         |
-| ------------ | --------------------------------------- | ------------------------------------------------------------------------------------------ | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `unverified` | validation success                      | `ok=true`, `canonicalPath` + `headCommit` + `policyVersion` present, request/version match | `ready`      | `canonicalPath`, `platform`, `policyVersion`, `validatedByRunnerId`, `validatedBindingVersion=bindingVersion`, `lastValidatedAt`, clear `validationErrorCode/Error`    |
-| `unverified` | validation failure                      | `errorCode=REPO_PATH_NOT_FOUND`                                                            | `missing`    | `validationErrorCode/Error`, `canonicalPath=null`, `validatedBindingVersion=null`, `policyVersion=null`                                                                |
-| `unverified` | validation failure                      | any other error                                                                            | `error`      | same as above                                                                                                                                                          |
-| `ready`      | revalidation success                    | request/version match                                                                      | `ready`      | refresh `canonicalPath`, `platform`, `policyVersion`, `validatedByRunnerId`, `validatedBindingVersion`, `lastValidatedAt`, clear errors                                |
-| `ready`      | revalidation failure                    | `REPO_PATH_NOT_FOUND`                                                                      | `missing`    | clear canonical path/validation version/policy; keep `path`                                                                                                            |
-| `ready`      | revalidation failure                    | other                                                                                      | `error`      | same                                                                                                                                                                   |
-| any          | path PATCH                              | P2-01 update                                                                               | `unverified` | P2-01 already resets all validation metadata                                                                                                                           |
-| `ready`      | policy change detected during handshake | Runner rejects `REPOSITORY_POLICY_CHANGED`                                                 | `unverified` | keep `path`; clear `canonicalPath`, `validatedBindingVersion`, `policyVersion`, `lastValidatedAt`; set `validationErrorCode=REPOSITORY_POLICY_CHANGED`                 |
-| any          | validation timeout                      | no response within configured window                                                       | unchanged    | set `validationErrorCode=REPOSITORY_VALIDATION_TIMEOUT`, `validationError=...`; keep `status`, `canonicalPath`, `validatedBindingVersion`; clear `validationRequestId` |
-| any          | stale response                          | requestId/version mismatch                                                                 | unchanged    | none; log `STALE_REPOSITORY_VALIDATION`                                                                                                                                |
+| Current      | Event                                   | Guard                                                                                                   | Next         | Fields written                                                                                                                                                         |
+| ------------ | --------------------------------------- | ------------------------------------------------------------------------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unverified` | validation success                      | `ok=true`, `canonicalPath` + `headCommit` + `policyVersion` + `platform` present, request/version match | `ready`      | `canonicalPath`, `platform`, `policyVersion`, `validatedByRunnerId`, `validatedBindingVersion=bindingVersion`, `lastValidatedAt`, clear `validationErrorCode/Error`    |
+| `unverified` | validation failure                      | `errorCode=REPO_PATH_NOT_FOUND`                                                                         | `missing`    | `validationErrorCode/Error`, `canonicalPath=null`, `validatedBindingVersion=null`, `policyVersion=null`                                                                |
+| `unverified` | validation failure                      | any other error                                                                                         | `error`      | same as above                                                                                                                                                          |
+| `ready`      | revalidation success                    | same success guard as `unverified` (including `platform` present)                                       | `ready`      | refresh `canonicalPath`, `platform`, `policyVersion`, `validatedByRunnerId`, `validatedBindingVersion`, `lastValidatedAt`, clear errors                                |
+| `ready`      | revalidation failure                    | `REPO_PATH_NOT_FOUND`                                                                                   | `missing`    | clear canonical path/validation version/policy; keep `path`                                                                                                            |
+| `ready`      | revalidation failure                    | other                                                                                                   | `error`      | same                                                                                                                                                                   |
+| any          | path PATCH                              | P2-01 update                                                                                            | `unverified` | P2-01 already resets all validation metadata                                                                                                                           |
+| `ready`      | policy change detected during handshake | Runner rejects `REPOSITORY_POLICY_CHANGED`                                                              | `unverified` | keep `path`; clear `canonicalPath`, `validatedBindingVersion`, `policyVersion`, `lastValidatedAt`; set `validationErrorCode=REPOSITORY_POLICY_CHANGED`                 |
+| any          | validation timeout                      | no response within configured window                                                                    | unchanged    | set `validationErrorCode=REPOSITORY_VALIDATION_TIMEOUT`, `validationError=...`; keep `status`, `canonicalPath`, `validatedBindingVersion`; clear `validationRequestId` |
+| any          | stale response                          | requestId/version mismatch                                                                              | unchanged    | none; log `STALE_REPOSITORY_VALIDATION`                                                                                                                                |
 
 ### 5.3 Concurrency and out-of-order rules
 
@@ -500,18 +519,21 @@ stateDiagram-v2
      AND validationRequestId = ?
    ```
    `count = 0` means the binding changed or a newer validation started. Log `STALE_REPOSITORY_VALIDATION`; do not apply the result.
-3. **No partial success.** A response with `ok=true` but missing `canonicalPath`, `headCommit`, or `policyVersion` is treated as `ok=false` with `REPO_VALIDATION_FAILED`. The API never fills missing Runner facts.
+3. **No partial success.** A response with `ok=true` but missing `canonicalPath`, `headCommit`, `policyVersion`, or `platform` is treated as `ok=false` with `REPO_VALIDATION_FAILED`. The API never fills missing Runner facts.
 4. **Timeout does not mutate status.** It records the attempt error and clears `validationRequestId`. A late response then fails the requestId guard and is discarded.
 5. **Deleting a binding** while validation is in flight is allowed. The conditional update finds no row; the HTTP request returns `BINDING_NOT_FOUND` or `BINDING_VERSION_STALE` depending on when the deletion is observed. No orphan state is created.
-6. **Runner re-pairing** invalidates `validatedByRunnerId` by FK `SetNull`, but the binding status must not silently remain `ready` with a null validator. The next execution precheck requires `policyVersion` and live features; the handshake will reject if the policy changed. For stricter behavior, P2-02 may add an API guard: if `validatedByRunnerId` is null, treat the binding as not executable until revalidated. Recommended.
+6. **Runner re-pairing or replacement invalidates executability, not the stored status.** `validatedByRunnerId` may become null by FK `SetNull`, or may still point at the old Runner row when a new Runner registers for the same Computer. Both cases must fail closed: the execution precheck requires `validatedByRunnerId === selectedRunner.id`, `binding.platform === selectedRunner.platform`, `status='ready'`, `validatedBindingVersion === bindingVersion`, non-null `canonicalPath`, non-null `policyVersion`, and the full live feature set. Any mismatch returns `PROJECT_BINDING_NOT_READY` before an Execution row is created. Revalidation on the selected Runner is the only way to make the binding executable again.
 7. **Clear `validationRequestId`** in the same conditional update that applies a result. On timeout or send failure, clear it only if it still equals the failed request's ID; never clear a newer request's ID.
+8. **Identity/platform is checked twice.** The API precheck runs before Execution creation; the handshake re-runs the same identity/platform/features/version/path checks transactionally after `execution.repository.accepted` and before sending `execution.start`. The re-check re-resolves the live selected Runner for the execution's computer inside the transaction and requires it to still be the Runner that received the handshake; it must not accept a deleted or replaced Runner row merely because that row's id appears in the Binding. The inbound socket's authenticated `runnerId` must equal the re-resolved selected Runner id.
 
 ### 5.4 What validation does **not** do
 
 - It does not create an Execution.
 - It does not send `execution.repository`.
 - It does not reserve a worktree.
+- It does not read, receive, or check `Project.defaultBranch`. The frozen `repository.validate` payload has no `defaultBranch`; branch existence is checked only by the `execution.repository` handshake.
 - It does not guarantee the path will still be valid at execution time. The handshake re-checks; TOCTOU is a documented residual risk.
+- It does not authorize a different Runner or platform. A `ready` binding is executable only by `validatedByRunnerId` on the same `platform`; a replacement Runner requires revalidation.
 
 ---
 
@@ -538,11 +560,11 @@ stateDiagram-v2
 stateDiagram-v2
   [*] --> created: Execution created with binding snapshot
   created --> repository_preparing: conditional update acquired<br/>(only one dispatcher)
-  created --> terminal: pre-dispatch guard failed (runner offline/feature lost)
-  repository_preparing --> repository_ready: valid execution.repository.accepted<br/>+ ACK correlation + binding re-check
-  repository_preparing --> terminal: rejected / timeout / ACK mismatch /<br/>binding changed / policy changed / cancel
-  repository_ready --> start_sent: Binding still ready + version unchanged<br/>+ policyVersion unchanged
-  repository_ready --> terminal: binding changed / policy changed / cancel
+  created --> terminal: pre-dispatch guard failed (runner offline/feature lost/<br/>binding validated by another runner or platform)
+  repository_preparing --> repository_ready: valid execution.repository.accepted<br/>+ ACK correlation + binding/runner identity re-check
+  repository_preparing --> terminal: rejected / timeout / ACK mismatch /<br/>binding changed / policy changed / runner identity or platform changed / cancel
+  repository_ready --> start_sent: Binding still ready + version unchanged<br/>+ policyVersion + canonicalPath unchanged<br/>+ validatedByRunnerId/platform match + live features
+  repository_ready --> terminal: binding changed / policy changed /<br/>runner identity or platform changed / cancel
   start_sent --> running: valid execution.accepted
   start_sent --> terminal: execution.start.rejected / START_ACCEPT_TIMEOUT / cancel
   running --> terminal: execution.completed / failed / cancelled
@@ -551,23 +573,24 @@ stateDiagram-v2
 
 ### 6.3 Transition rules
 
-| From                   | Event                              | Guard / action                                                                                                                                                                               | To                        | Persisted evidence                                                                                                 |
-| ---------------------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `created`              | dispatcher acquires                | `updateMany({id, dispatchState:'created'}, {dispatchState:'repository_preparing'})`; `count=0` means another dispatcher won                                                                  | `repository_preparing`    | state only                                                                                                         |
-| `created`              | pre-dispatch guard fails           | fail execution, cancel if a Runner context might exist                                                                                                                                       | `terminal`                | `failureReason`                                                                                                    |
-| `repository_preparing` | `execution.repository.accepted`    | executionId/projectId/bindingId/bindingVersion/policyVersion/defaultBranch match snapshot; `canonicalPath` matches current Binding (platform-aware); Binding still ready/same version/policy | `repository_ready`        | `repositoryPath`, `repositoryPolicyVersion`, `repositoryContextId`, `repositoryBaseCommit`, `repositoryPreparedAt` |
-| `repository_preparing` | `execution.repository.rejected`    | verify executionId + binding fields; code is the failure                                                                                                                                     | `terminal`                | `failureReason = code: message`                                                                                    |
-| `repository_preparing` | timeout (15 s total)               | retries exhausted                                                                                                                                                                            | `terminal`                | `failureReason = REPOSITORY_HANDSHAKE_TIMEOUT`                                                                     |
-| `repository_preparing` | ACK mismatch                       | `REPOSITORY_CONTEXT_MISMATCH`                                                                                                                                                                | `terminal`                | `failureReason`                                                                                                    |
-| `repository_preparing` | binding version/status changed     | `REPOSITORY_BINDING_CHANGED`                                                                                                                                                                 | `terminal`                | `failureReason`                                                                                                    |
-| `repository_preparing` | policyVersion changed              | `REPOSITORY_POLICY_CHANGED`; set Binding `unverified`                                                                                                                                        | `terminal`                | `failureReason` + binding state                                                                                    |
-| `repository_ready`     | start guard passes                 | re-read Binding: ready, same version, same policyVersion, same canonicalPath (platform-aware); then `updateMany({dispatchState:'repository_ready'}, {dispatchState:'start_sent'})`           | `start_sent`              | state only                                                                                                         |
-| `repository_ready`     | start guard fails                  | `REPOSITORY_BINDING_CHANGED` / `REPOSITORY_POLICY_CHANGED`; a changed canonicalPath is `REPOSITORY_BINDING_CHANGED`                                                                          | `terminal`                | `failureReason`; maybe binding unverified                                                                          |
-| `start_sent`           | `execution.accepted`               | executionId + runner ownership; only valid in `start_sent`                                                                                                                                   | `running`                 | state only                                                                                                         |
-| `start_sent`           | `execution.start.rejected`         | code/message from payload                                                                                                                                                                    | `terminal`                | `failureReason`                                                                                                    |
-| `start_sent`           | accept timeout (20 s)              | `START_ACCEPT_TIMEOUT`                                                                                                                                                                       | `terminal`                | `failureReason`; send cancel                                                                                       |
-| `running`              | terminal message                   | existing `finishExecution`                                                                                                                                                                   | `terminal`                | existing terminal fields + `dispatchState='terminal'`                                                              |
-| any non-terminal       | operator cancel / pre-start cancel | send `execution.cancel`; Runner releases context                                                                                                                                             | `terminal` when confirmed | `cancelReason`                                                                                                     |
+| From                   | Event                              | Guard / action                                                                                                                                                                                                                                                                                                                                                                                                                                       | To                        | Persisted evidence                                                                                                 |
+| ---------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `created`              | dispatcher acquires                | `updateMany({id, dispatchState:'created'}, {dispatchState:'repository_preparing'})`; `count=0` means another dispatcher won                                                                                                                                                                                                                                                                                                                          | `repository_preparing`    | state only                                                                                                         |
+| `created`              | pre-dispatch guard fails           | runner offline / feature lost / binding validated by a different runner / platform mismatch; fail execution, cancel if a Runner context might exist; no `execution.repository` is sent                                                                                                                                                                                                                                                               | `terminal`                | `failureReason` (`RUNNER_OFFLINE` / `PROJECT_BINDING_UNSUPPORTED` / `PROJECT_BINDING_NOT_READY`)                   |
+| `repository_preparing` | `execution.repository.accepted`    | executionId/projectId/bindingId/bindingVersion/policyVersion/defaultBranch match snapshot; `canonicalPath` matches current Binding (platform-aware); Binding still ready/same version/policy; `validatedByRunnerId === runnerId` and `runnerId` is still the re-resolved live selected Runner; `binding.platform === runner.platform`; live features still present. The Runner has already verified defaultBranch existence before sending accepted. | `repository_ready`        | `repositoryPath`, `repositoryPolicyVersion`, `repositoryContextId`, `repositoryBaseCommit`, `repositoryPreparedAt` |
+| `repository_preparing` | `execution.repository.rejected`    | verify executionId + binding fields; code is the failure                                                                                                                                                                                                                                                                                                                                                                                             | `terminal`                | `failureReason = code: message`                                                                                    |
+| `repository_preparing` | timeout (15 s total)               | retries exhausted                                                                                                                                                                                                                                                                                                                                                                                                                                    | `terminal`                | `failureReason = REPOSITORY_HANDSHAKE_TIMEOUT`                                                                     |
+| `repository_preparing` | ACK mismatch                       | `REPOSITORY_CONTEXT_MISMATCH`                                                                                                                                                                                                                                                                                                                                                                                                                        | `terminal`                | `failureReason`                                                                                                    |
+| `repository_preparing` | binding version/status changed     | `REPOSITORY_BINDING_CHANGED`                                                                                                                                                                                                                                                                                                                                                                                                                         | `terminal`                | `failureReason`                                                                                                    |
+| `repository_preparing` | policyVersion changed              | `REPOSITORY_POLICY_CHANGED`; set Binding `unverified`                                                                                                                                                                                                                                                                                                                                                                                                | `terminal`                | `failureReason` + binding state                                                                                    |
+| `repository_preparing` | runner identity/platform changed   | `PROJECT_BINDING_NOT_READY`; do not send `execution.start`; require revalidation on the selected Runner                                                                                                                                                                                                                                                                                                                                              | `terminal`                | `failureReason`                                                                                                    |
+| `repository_ready`     | start guard passes                 | re-read Binding: ready, same version, same policyVersion, same canonicalPath (platform-aware), `validatedByRunnerId === runnerId`, `binding.platform === runner.platform`; re-resolve the live selected Runner and require it is still `runnerId`; re-check live features; then `updateMany({dispatchState:'repository_ready'}, {dispatchState:'start_sent'})`                                                                                       | `start_sent`              | state only                                                                                                         |
+| `repository_ready`     | start guard fails                  | `REPOSITORY_BINDING_CHANGED` / `REPOSITORY_POLICY_CHANGED` / `PROJECT_BINDING_NOT_READY`; a changed canonicalPath is `REPOSITORY_BINDING_CHANGED`; an identity/platform mismatch is `PROJECT_BINDING_NOT_READY`                                                                                                                                                                                                                                      | `terminal`                | `failureReason`; maybe binding unverified                                                                          |
+| `start_sent`           | `execution.accepted`               | executionId + runner ownership; only valid in `start_sent`                                                                                                                                                                                                                                                                                                                                                                                           | `running`                 | state only                                                                                                         |
+| `start_sent`           | `execution.start.rejected`         | code/message from payload                                                                                                                                                                                                                                                                                                                                                                                                                            | `terminal`                | `failureReason`                                                                                                    |
+| `start_sent`           | accept timeout (20 s)              | `START_ACCEPT_TIMEOUT`                                                                                                                                                                                                                                                                                                                                                                                                                               | `terminal`                | `failureReason`; send cancel                                                                                       |
+| `running`              | terminal message                   | existing `finishExecution`                                                                                                                                                                                                                                                                                                                                                                                                                           | `terminal`                | existing terminal fields + `dispatchState='terminal'`                                                              |
+| any non-terminal       | operator cancel / pre-start cancel | send `execution.cancel`; Runner releases context                                                                                                                                                                                                                                                                                                                                                                                                     | `terminal` when confirmed | `cancelReason`                                                                                                     |
 
 The table describes the logical end state. For failures inside the synchronous `POST /tasks/:id/start` call, the row ending in `terminal` is written by `ExecutionsService.failExecutionStart` (see §6.5), not by the handshake service, so there is exactly one Task/Agent rollback. Recovery paths write it through `finishExecution`.
 
@@ -593,7 +616,7 @@ if (result.count === 0) {
 
 There must be **exactly one** writer for the synchronous failure state; otherwise `failExecutionStart` and the handshake service race and the task/agent rollback is skipped or applied twice.
 
-**Synchronous pre-start failure** (rejected, timeout, mismatch, binding/policy change, send failure):
+**Synchronous pre-start failure** (rejected, timeout, mismatch, binding/policy change, runner identity/platform change, send failure):
 
 1. `RepositoryHandshakeService` clears its pending dispatch entry and timers, sends `execution.cancel` (best effort), and throws `RepositoryDispatchError(code, message, retryable)`.
 2. It does **not** set `Execution.status='failed'` and does **not** set `dispatchState='terminal'`. The row stays in its current dispatch state until the caller handles the error, so an API crash cannot leave a terminal-dispatch/running-status hybrid.
@@ -616,8 +639,9 @@ This asymmetry is deliberate: a request-scoped start failure can restore the pre
 1. Any failure **before** `execution.start` sends `execution.cancel` with a reason that starts with the failure code.
 2. The Runner treats `execution.cancel` in `repository_preparing` or `repository_ready` as: abort preparation, release context, **do not spawn CLI**.
 3. The API never sends `execution.start` after a cancel or rejection.
-4. The main checkout is never touched, even on failure.
-5. Late accepted/rejected messages after `dispatchState='terminal'` are ignored, not applied.
+4. The API never sends `execution.start` to a Runner other than `binding.validatedByRunnerId`, and never when `binding.platform !== selectedRunner.platform`.
+5. The main checkout is never touched, even on failure.
+6. Late accepted/rejected messages after `dispatchState='terminal'` are ignored, not applied.
 
 ---
 
@@ -942,10 +966,12 @@ This applies to **both** `fake` and `real` modes. The Playwright Fake Runner mus
 | `bindingVersion` | positive int | yes      | matches binding at request time                                          |
 | `path`           | string       | yes      | `repositoryPathSchema` (non-empty, ≤4096, no NUL); **opaque to the API** |
 
+This payload intentionally has **no `defaultBranch`**. Repository validation is a path/repository-shape operation and must not infer a branch from the Project. Do not add a branch field, do not read the Project, and do not return `REPO_DEFAULT_BRANCH_NOT_FOUND` from this handler. Branch existence is verified during `execution.repository` (§8.6).
+
 The Runner must:
 
 1. Reject if `computerId` does not equal `config.computerId`.
-2. Apply the path policy from §9.
+2. Apply the path policy from §9. Device paths (`\\?\`, `\\.\`) are always rejected with `REPO_PATH_INVALID`; there is no opt-in.
 3. Cache the result by `requestId` for 5 minutes; a duplicate request with the same `requestId` and identical payload returns the cached result with a **new envelope messageId**.
 4. If the same `requestId` is reused with a different payload, return `ok=false` with `REPO_VALIDATION_FAILED` and a message; do not overwrite the cache.
 
@@ -966,7 +992,7 @@ The Runner must:
 | `errorCode`      | `ErrorCode`  | when `ok=false` | one of the P2-02 codes          |
 | `message`        | string       | when `ok=false` | human-readable, no secrets      |
 
-The API must reject `ok=true` if `canonicalPath`, `headCommit`, or `policyVersion` is missing/empty. It must not synthesize them.
+The API must reject `ok=true` if `canonicalPath`, `headCommit`, `policyVersion`, or `platform` is missing/empty. It must not synthesize them. It must also reject an `errorCode=REPO_DEFAULT_BRANCH_NOT_FOUND` from this message as a protocol violation: branch existence is not a validation concern in P2-02.
 
 ### 8.6 `execution.repository` (server → Runner)
 
@@ -980,7 +1006,15 @@ The API must reject `ok=true` if `canonicalPath`, `headCommit`, or `policyVersio
 | `defaultBranch`  | branch string | yes      | Execution `repositoryDefaultBranch` snapshot                |
 | `policyVersion`  | string        | yes      | Binding `policyVersion` from the last successful validation |
 
-The API must not send this message unless the Binding is `ready`, its version matches the snapshot, and its `policyVersion` is non-null.
+The API must not send this message unless the Binding is `ready`, its version matches the snapshot, its `policyVersion` is non-null, `validatedByRunnerId === selectedRunner.id`, `binding.platform === selectedRunner.platform`, and the live Runner still advertises the three required features.
+
+**Mandatory default-branch check (Runner).** Before sending `execution.repository.accepted`, the Runner must:
+
+1. run `git check-ref-format --branch <defaultBranch>`; non-zero exit → reject with `REPO_DEFAULT_BRANCH_NOT_FOUND`;
+2. run `git rev-parse --verify --quiet refs/heads/<defaultBranch>` as an argv element (no shell interpolation, no `^{commit}` suffix); non-zero → reject with `REPO_DEFAULT_BRANCH_NOT_FOUND`;
+3. only then resolve the base commit and create the context.
+
+This is the **only** stage at which P2-02 performs a real default-branch existence check. The API must not duplicate it, and `repository.validate` must not receive it. A rejection is an `execution.repository.rejected`; no `execution.start` is sent and no CLI is spawned.
 
 ### 8.7 `execution.repository.accepted` (Runner → server)
 
@@ -1001,7 +1035,8 @@ Platform-aware path comparison:
 
 - `win32`: normalize separators (`/` → `\`), trim trailing separators, compare case-insensitively.
 - `linux`/`darwin`: normalize separators, compare exactly.
-- Do **not** use `path.resolve` on a path from a different platform; the API may be running on Linux while the Runner is Windows. Use the `platform` field from validation or Runner registration to pick the comparator.
+- Do **not** use `path.resolve` on a path from a different platform; the API may be running on Linux while the Runner is Windows. Use the live `selectedRunner.platform` to pick the comparator.
+- Because `binding.platform` must equal `selectedRunner.platform` before dispatch, the comparator platform is unambiguous. An identity/platform mismatch is `PROJECT_BINDING_NOT_READY` and must be rejected before any `canonicalPath` comparison, not downgraded to `REPOSITORY_CONTEXT_MISMATCH`.
 
 ### 8.8 `execution.repository.rejected` (Runner → server)
 
@@ -1027,6 +1062,8 @@ The API persists `failureReason = code: message` and fails the execution. It doe
 | `retryable`   | boolean     | yes      | usually false for a pre-start rejection                                                    |
 
 The API only accepts this message while `dispatchState='start_sent'`. It fails the execution with `failureReason = code: message`, sends cancel, and never retries `execution.start`.
+
+`REPO_DEFAULT_BRANCH_NOT_FOUND` is **not** a valid `execution.start.rejected` code. Branch existence must already have been checked by `execution.repository`; if start ever sees a missing branch, that is a `REPOSITORY_CONTEXT_NOT_READY` condition (the context is no longer valid), never a new branch-specific start rejection.
 
 **CLI capability race:** if the CLI disappears between the API precheck and `execution.start`, the Runner must still not send `execution.accepted`. Because `execution.start.rejected.code` is restricted to the frozen P2 error enum, use `REPOSITORY_CONTEXT_NOT_READY` with a message prefixed `CLI_NOT_INSTALLED:` or `CLI_NOT_AUTHENTICATED:`. Do not add a new error code in P2-02; if the team wants a dedicated code, it must be added to the P2-00 registry first.
 
@@ -1078,10 +1115,13 @@ The current `RealExecutor.start()` performs checks 4–6 _after_ the old immedia
 | ------------------------ | ------------------------------------ | ---------------------------------------- | ----------------------------- |
 | Allowed repository roots | `--allowed-root <path>` (repeatable) | `HAFT_RUNNER_ALLOWED_ROOTS` (JSON array) | `[]` (fail closed)            |
 | Allow UNC paths          | `--allow-unc`                        | `HAFT_RUNNER_ALLOW_UNC=1`                | `false`                       |
-| Allow device paths       | `--allow-device-paths`               | `HAFT_RUNNER_ALLOW_DEVICE_PATHS=1`       | `false`                       |
 | Worktree root            | existing                             | `HAFT_RUNNER_WORKTREE_ROOT`              | `~/.haft/worktrees`           |
 | Recovery root            | existing                             | `HAFT_RUNNER_RECOVERY_ROOT`              | `~/.haft/recovery/<runnerId>` |
 | Git binary               | existing                             | `HAFT_GIT_BIN`                           | `git`                         |
+
+**Device paths are not configurable.** Windows device paths (`\\?\` and `\\.\`, including `\\?\GLOBALROOT\...`, `\\?\Volume{...}`, `\\.\PhysicalDrive...` and `\\?\UNC\...`) are **always** rejected with the existing `REPO_PATH_INVALID`. The plan defines no `allowDevicePaths` field, no `--allow-device-paths` flag, no `HAFT_RUNNER_ALLOW_DEVICE_PATHS` environment variable, and no positive test branch. Do not add one during implementation.
+
+**Worktree/recovery roots are policy inputs.** `worktreeRoot` and `recoveryRoot` must be absolute and mutually disjoint at policy construction. They are additionally checked against every validated repository canonical path in both directions (§9.4 step 7). A configuration that nests one inside the other is invalid and fails closed with `REPOSITORY_POLICY_NOT_CONFIGURED`.
 
 Deleted from the formal execution path:
 
@@ -1100,8 +1140,8 @@ export interface RunnerConfig {
   // ...existing fields...
   allowedRepositoryRoots: string[];
   allowUnc: boolean;
-  allowDevicePaths: boolean;
   // projectPaths: REMOVED
+  // allowDevicePaths: DELIBERATELY ABSENT — device paths are always rejected.
 }
 ```
 
@@ -1115,7 +1155,6 @@ New file: `apps/runner/src/repository-policy.ts`.
 export interface RepositoryPolicyConfig {
   allowedRepositoryRoots: string[];
   allowUnc: boolean;
-  allowDevicePaths: boolean;
   worktreeRoot: string;
   recoveryRoot: string;
   gitBinary: string;
@@ -1134,13 +1173,17 @@ export interface RepositoryValidationResult {
 
 export class RepositoryPathPolicy {
   readonly policyVersion: string;
+  /** Set when the policy configuration itself is unusable (for example overlapping roots). */
+  readonly configError: ErrorCode | null;
   constructor(config: RepositoryPolicyConfig);
-  async validate(path: string, defaultBranch?: string): Promise<RepositoryValidationResult>;
+  /** Path-only validation; the frozen validate payload has no defaultBranch. */
+  async validate(path: string): Promise<RepositoryValidationResult>;
+  /** Re-runs containment plus bidirectional worktree/recovery isolation before a write. */
   async assertStillAllowed(canonicalPath: string): Promise<void>;
 }
 ```
 
-The policy is constructed once at Runner startup and passed to `RunnerClient`, `RealExecutor` and `RepositoryContextManager`. It must be cheap to call repeatedly; Git commands are the expensive part.
+The constructor validates that `worktreeRoot` and `recoveryRoot` are absolute, distinct and non-overlapping; a violation sets `configError=REPOSITORY_POLICY_NOT_CONFIGURED` while still computing a `policyVersion` so the Runner can report a well-formed failure. The policy is constructed once at Runner startup and passed to `RunnerClient`, `RealExecutor`, `GitWorktreeManager` and `RepositoryContextManager`. It must be cheap to call repeatedly; Git commands are the expensive part.
 
 ### 9.3 `policyVersion`
 
@@ -1148,7 +1191,6 @@ Compute once at startup and recompute only if configuration changes (it does not
 
 ```ts
 const canonical = {
-  allowDevicePaths: config.allowDevicePaths,
   allowUnc: config.allowUnc,
   allowedRepositoryRoots: [...config.allowedRepositoryRoots].sort(),
   recoveryRoot: normalizeForPolicy(config.recoveryRoot),
@@ -1163,11 +1205,14 @@ const policyVersion = createHash('sha256')
 Rules:
 
 - Roots are sorted; order must not change the hash.
-- Use normalized absolute paths. If a root exists, use its `realpath`; otherwise use `resolve`.
-- `allowUnc` / `allowDevicePaths` participate in the hash; flipping either must change the version.
-- `worktreeRoot` / `recoveryRoot` participate because they affect the nesting rejection.
+- Use normalized absolute paths. If a root exists, use its `realpath`; otherwise canonicalize the longest existing prefix with `realpath` and append the non-existing remainder with `resolve`, so parent junctions/symlinks cannot hide an overlap.
+- `allowUnc` participates in the hash; flipping it must change the version.
+- `worktreeRoot` / `recoveryRoot` participate because they affect bidirectional isolation.
+- Device paths do not participate because there is no device-path option: they are always rejected. Their rejection is constant policy, not state.
 - Do not include the Runner ID, hostname, time, or environment variables that do not affect path decisions.
-- Test: same config → same hash; reordered roots → same hash; changed root/flag → different hash.
+- Test: same config → same hash; reordered roots → same hash; changed root or `allowUnc` → different hash; overlapping `worktreeRoot`/`recoveryRoot` → invalid config with a stable `policyVersion`.
+
+**Frozen-roadmap note.** The P2-02 card lists `allowDevicePaths` as a `policyVersion` input. The independent review removes that option entirely, so there is no device-path policy state to hash. This is a fail-closed narrowing of the card's path policy, not a change to the frozen protocol, schema or error-code registry; `docs/phase-2-technical-roadmap.md` itself is not edited.
 
 ### 9.4 Validation algorithm and error precedence
 
@@ -1175,12 +1220,11 @@ The order matters for deterministic tests. Return the first failure.
 
 1. **Policy configured**
    - If there are no usable allowed roots → `REPOSITORY_POLICY_NOT_CONFIGURED`.
+   - If `worktreeRoot` or `recoveryRoot` is not absolute, or the two overlap (equal or one inside the other) → `REPOSITORY_POLICY_NOT_CONFIGURED`.
 2. **Input shape**
    - Empty/whitespace, NUL → `REPO_PATH_INVALID`.
-   - On Windows, device path prefix `\\?\` or `\\.\`:
-     - if `allowDevicePaths=false` → `REPO_PATH_INVALID` (message: device paths are not allowed);
-     - if true, strip the prefix for canonicalization but continue to enforce containment.
-   - On Windows, UNC path `\\server\share`:
+   - On Windows, device path prefix `\\?\` or `\\.\` → `REPO_PATH_INVALID` (message: device paths are always rejected). This is unconditional: there is no flag, no prefix stripping, and no containment fallback for device paths.
+   - On Windows, UNC path `\\server\share` (a `\\?\UNC\...` path is already rejected as a device path):
      - if `allowUnc=false` → `REPO_UNC_NOT_ALLOWED`.
 3. **Absolute**
    - `path.isAbsolute` must be true; otherwise `REPO_PATH_NOT_ABSOLUTE`.
@@ -1198,23 +1242,27 @@ The order matters for deterministic tests. Return the first failure.
    - Windows: case-insensitive comparison; POSIX: exact.
    - No string-prefix checks (`startsWith(root)`) — a sibling `C:\repos-evil` must not pass for root `C:\repos`.
    - No match → `REPO_PATH_OUTSIDE_ALLOWED_ROOTS`.
-7. **Worktree/recovery exclusion**
-   - If target is inside `worktreeRoot` or `recoveryRoot` (including equality) → `REPO_PATH_NESTED_IN_WORKTREE_ROOT`.
-   - Use the same `path.relative` containment helper; realpath roots when they exist.
+7. **Bidirectional worktree/recovery isolation**
+   - Let `repo = canonicalPath`. Canonicalize `worktreeRoot` and `recoveryRoot` with `realpath` when they exist, or with `realpath(longest existing prefix)` plus the `resolve`d remainder when they do not.
+   - Reject with `REPO_PATH_NESTED_IN_WORKTREE_ROOT` if **any** of the following is true (equality counts as overlap):
+     - `repo` is inside `worktreeRoot` or `recoveryRoot`;
+     - `worktreeRoot` is inside `repo`;
+     - `recoveryRoot` is inside `repo`.
+   - `worktreeRoot` and `recoveryRoot` overlapping each other is a **policy configuration** error and returns `REPOSITORY_POLICY_NOT_CONFIGURED` (normally detected at construction; step 7 must not relabel it as `REPO_PATH_NESTED_IN_WORKTREE_ROOT`).
+   - Use the same `path.relative` containment helper in both directions; never compare string prefixes. Do not rely on a lexical `startsWith` and do not skip the reverse direction because the forward direction passed.
+   - The message must identify which pair overlapped (for example `worktreeRoot is inside repository`, `recoveryRoot is inside repository`, `repository is inside recoveryRoot`) so the operator can fix the configuration.
+   - This is the invariant that keeps all four guarantees true: worktrees are never created inside the user's repository; recovery journals are never written into the repository; the main repository can never become the execution cwd; all execution happens in an independent worktree outside the repository.
 8. **Git shape**
    - `git -C <canonical> rev-parse --is-bare-repository` → `true` → `REPO_BARE_UNSUPPORTED`.
    - `git -C <canonical> rev-parse --show-toplevel`; realpath the output and require equality with the canonical path → otherwise `REPO_NOT_GIT_ROOT`.
    - `git -C <canonical> rev-parse --show-superproject-working-tree`; non-empty → `REPO_PATH_IS_WORKTREE` (submodule).
    - `git -C <canonical> rev-parse --git-dir` and `--git-common-dir`; if realpaths differ → `REPO_PATH_IS_WORKTREE` (linked worktree).
-9. **Branch**
-   - If `defaultBranch` is provided, first run `git check-ref-format --branch <defaultBranch>`; a non-zero exit → `REPO_DEFAULT_BRANCH_NOT_FOUND`. This closes the gap where the wire contract allows rev-syntax characters such as `~`, `^`, `:`, `?`, `*` or `[`.
-   - Then run `git rev-parse --verify --quiet refs/heads/<defaultBranch>` (no `^{commit}` suffix and no shell interpolation); non-zero → `REPO_DEFAULT_BRANCH_NOT_FOUND`.
-   - Detached or unborn HEAD is handled by step 10, not by the branch check.
-   - Pass the branch as an argv element; never interpolate it into a shell string. The contract already forbids whitespace, `..`, leading `-`, and `HEAD`, but the Runner must not rely on the client-side schema alone.
-10. **HEAD**
-    - `git rev-parse HEAD`; empty/failure → `REPO_VALIDATION_FAILED` (empty repository or detached/unborn HEAD).
-11. **Unexpected Git failure**
+9. **HEAD**
+   - `git rev-parse HEAD`; empty/failure → `REPO_VALIDATION_FAILED` (empty repository or detached/unborn HEAD).
+10. **Unexpected Git failure**
     - Any other non-zero exit / spawn error → `REPO_VALIDATION_FAILED` with a summarized message.
+
+**There is deliberately no branch step.** `repository.validate` receives no `defaultBranch`, so this algorithm must not run `check-ref-format` or `rev-parse refs/heads/<branch>`, and must not return `REPO_DEFAULT_BRANCH_NOT_FOUND`. The default-branch existence check lives in `execution.repository` (§8.6) and in `RepositoryContextManager.prepare` (§9.8).
 
 Return:
 
@@ -1232,9 +1280,9 @@ Return:
 
 - Drive letters: compare paths case-insensitively; preserve the realpath's actual case in `canonicalPath`.
 - `path.relative` on Windows is case-insensitive for the common prefix; still normalize separators and trailing separators before comparing.
-- Reject `\\?\GLOBALROOT\...`, `\\?\Volume{...}`, `\\.\PhysicalDrive...` unless `allowDevicePaths=true`; even then, containment applies.
+- **Device paths are always rejected** with `REPO_PATH_INVALID`: `\\?\GLOBALROOT\...`, `\\?\Volume{...}`, `\\?\C:\...`, `\\?\UNC\...`, `\\.\PhysicalDrive...`, and any other `\\?\`/`\\.\` form. There is no allow flag, no prefix stripping, and no containment fallback. Do not add a test that expects a device path to succeed.
 - Reject UNC by default. A UNC path can be slow and can cross trust boundaries; allowing it must be an explicit operator decision and must change `policyVersion`.
-- Junctions/symlinks: `realpath` follows them. A junction inside an allowed root pointing outside must fail containment. Test with `fs.symlink(target, path, 'junction')` on Windows; this usually does not require admin rights.
+- Junctions/symlinks: `realpath` follows them. A junction inside an allowed root pointing outside must fail containment. A junction that makes `worktreeRoot` or `recoveryRoot` appear outside the repository while physically pointing inside it must fail the bidirectional isolation check. Test with `fs.symlink(target, path, 'junction')` on Windows; this usually does not require admin rights.
 - Case-only differences (`C:\Repo` vs `c:\repo`) must be accepted.
 - Do not lowercase the stored canonical path; only the comparator lowercases.
 
@@ -1242,20 +1290,23 @@ Return:
 
 - Case-sensitive comparison.
 - `//server/share` is not treated as UNC; it is a normal absolute path. Still enforce realpath containment.
-- Symlinks are followed by `realpath`; a symlink escaping an allowed root fails containment.
-- Device paths (`/dev/...`) are not automatically rejected, but they will fail the directory/Git checks. If the operator wants to reject them explicitly, rely on `REPO_PATH_INVALID` after `stat`.
+- Symlinks are followed by `realpath`; a symlink escaping an allowed root fails containment. The same realpath comparison enforces bidirectional worktree/recovery isolation, so a symlinked `worktreeRoot`/`recoveryRoot` cannot hide an overlap with the repository.
+- Device paths (`/dev/...`) are not a Windows-device-path concept. They are not automatically rejected by name, but they will fail the directory/Git checks and return `REPO_PATH_INVALID` after `stat`.
 
 ### 9.7 TOCTOU and worktree creation
 
 The policy is checked:
 
-1. During `repository.validate`.
-2. During `execution.repository` (context preparation).
+1. During `repository.validate` (path-only; no branch).
+2. During `execution.repository` (context preparation, including defaultBranch existence).
 3. Immediately before `git worktree add` in `RealExecutor.prepareAndRun`.
+4. Immediately before creating a recovery-journal directory or writing a journal entry.
 
-The third check is the mitigation for the validation→execution TOCTOU window. It must re-run `assertStillAllowed(canonicalPath)` and re-check the default branch. Residual risk remains: a local attacker with write access to the allowed root can swap a symlink between the final check and `git worktree add`. Document this explicitly in `docs/runner-setup.md`.
+The third and fourth checks are the mitigation for the validation→execution TOCTOU window. They must re-run `assertStillAllowed(canonicalPath)`, including the bidirectional isolation check, so a repository cannot become nested under `worktreeRoot`/`recoveryRoot` and a worktree/recovery path cannot become nested under the repository. Do **not** duplicate the default-branch existence check here: the handshake already verified it and the worktree is created from the context's validated `defaultBranch`/`baseCommit`. If the branch disappears between handshake and worktree creation, the executor fails asynchronously after accepted; this is a documented residual race, not a validation result.
 
-`GitWorktreeManager.prepare` keeps its existing worktree-root containment and branch-exists checks. Add a policy callback or pass the policy object so the pre-`worktree add` re-check is guaranteed, not optional.
+Residual risk remains: a local attacker with write access to the allowed root can swap a symlink between the final check and `git worktree add`. Document this explicitly in `docs/runner-setup.md`.
+
+`GitWorktreeManager.prepare` keeps its existing worktree-root containment check. Add a policy callback or pass the policy object so the pre-`worktree add` re-check is guaranteed, not optional, and assert that the final worktree path is under `worktreeRoot` and outside the repository canonical path. The recovery journal must similarly assert that its directory is under `recoveryRoot` and outside the repository canonical path before writing.
 
 ### 9.8 Repository context manager
 
@@ -1291,7 +1342,13 @@ Rules:
 - Key: `executionId`.
 - Idempotency: if a context exists and `projectId`, `bindingId`, `bindingVersion`, `policyVersion`, `canonicalPath`, and `defaultBranch` are identical → return the **same** `contextId`.
 - If any of those differ → throw `REPOSITORY_CONTEXT_CONFLICT`.
-- `prepare` must not spawn a CLI. It only validates, resolves, reads `HEAD`, and stores the context.
+- `prepare` is the **only** P2-02 stage that checks default-branch existence. It must:
+  - run `git check-ref-format --branch <defaultBranch>` and fail `REPO_DEFAULT_BRANCH_NOT_FOUND` on non-zero;
+  - run `git rev-parse --verify --quiet refs/heads/<defaultBranch>` with the branch as an argv element and fail `REPO_DEFAULT_BRANCH_NOT_FOUND` on non-zero;
+  - pass the default branch to `git worktree add` only after both checks pass.
+    `repository.validate` must not perform these checks, because it never receives `defaultBranch`.
+- `prepare` must not spawn a CLI. It only validates, resolves, checks the policy and default branch, reads `HEAD`, asserts bidirectional root isolation, and stores the context.
+- `prepare` must assert that `canonicalPath` is not inside `worktreeRoot`/`recoveryRoot`, that `worktreeRoot`/`recoveryRoot` are not inside `canonicalPath`, and that `worktreeRoot`/`recoveryRoot` do not overlap. A failure is `REPO_PATH_NESTED_IN_WORKTREE_ROOT` (or `REPOSITORY_POLICY_NOT_CONFIGURED` for a root/root overlap).
 - Pre-start TTL: 10 minutes. A context in `state='ready'` is swept after 10 minutes of inactivity. `state='started'` contexts are never swept by this TTL; a `starting` context is short-lived and must either become `started` or be released.
 - `beginStart` is atomic:
   - `ready` → set `starting` and return `acquired`;
@@ -1322,48 +1379,50 @@ Keep `process.cwd()` only for non-repository purposes such as resolving the toke
 
 ### 10.1 Validation-path mapping
 
-| Code                                | Produced by   | API HTTP                | Binding status | UI copy                                                                                                  | Retryable?               |
-| ----------------------------------- | ------------- | ----------------------- | -------------- | -------------------------------------------------------------------------------------------------------- | ------------------------ |
-| `REPOSITORY_POLICY_NOT_CONFIGURED`  | Runner        | 200 (validation result) | `error`        | “The runner has no allowed repository roots. Configure `--allowed-root` or `HAFT_RUNNER_ALLOWED_ROOTS`.” | no, until config changes |
-| `REPO_PATH_INVALID`                 | Runner        | 200                     | `error`        | “The path is not a usable directory (or is a device path).”                                              | no                       |
-| `REPO_PATH_NOT_ABSOLUTE`            | Runner        | 200                     | `error`        | “Use an absolute path on the runner host.”                                                               | no                       |
-| `REPO_PATH_TRAVERSAL`               | Runner        | 200                     | `error`        | “The path contains `..` or escapes the allowed root.”                                                    | no                       |
-| `REPO_UNC_NOT_ALLOWED`              | Runner        | 200                     | `error`        | “UNC paths are disabled on this runner.”                                                                 | operator decision        |
-| `REPO_PATH_OUTSIDE_ALLOWED_ROOTS`   | Runner        | 200                     | `error`        | “The path is outside the runner's allowed roots.”                                                        | no                       |
-| `REPO_PATH_NOT_FOUND`               | Runner        | 200                     | `missing`      | “The path does not exist on the runner host.”                                                            | yes after fixing         |
-| `REPO_NOT_GIT_ROOT`                 | Runner        | 200                     | `error`        | “The path is not the root of a Git repository.”                                                          | no                       |
-| `REPO_BARE_UNSUPPORTED`             | Runner        | 200                     | `error`        | “Bare repositories are not supported.”                                                                   | no                       |
-| `REPO_PATH_IS_WORKTREE`             | Runner        | 200                     | `error`        | “Linked worktrees and submodules are not supported; bind the main checkout.”                             | no                       |
-| `REPO_PATH_NESTED_IN_WORKTREE_ROOT` | Runner        | 200                     | `error`        | “The repository is inside the runner's worktree/recovery root.”                                          | no                       |
-| `REPO_DEFAULT_BRANCH_NOT_FOUND`     | Runner        | 200                     | `error`        | “The project default branch does not exist in this repository.”                                          | yes after branch fix     |
-| `REPO_VALIDATION_FAILED`            | Runner        | 200                     | `error`        | “Repository validation failed; see the runner message.”                                                  | maybe                    |
-| `REPOSITORY_VALIDATION_TIMEOUT`     | API           | 504                     | unchanged      | “The runner did not answer in time. The binding state was not changed.”                                  | yes                      |
-| `BINDING_VERSION_STALE`             | API           | 409                     | unchanged      | “The binding changed while validation was running; validate again.”                                      | yes                      |
-| `STALE_REPOSITORY_VALIDATION`       | API log/audit | —                       | unchanged      | not shown as a primary error                                                                             | —                        |
-| `RUNNER_OFFLINE`                    | API           | 409                     | unchanged      | “The runner for this computer is offline.”                                                               | yes when online          |
-| `RUNNER_FEATURE_UNSUPPORTED`        | API           | 409                     | unchanged      | “The runner does not support repository validation. Upgrade the runner.”                                 | no until upgrade         |
+| Code                                | Produced by   | API HTTP                | Binding status | UI copy                                                                                                             | Retryable?               |
+| ----------------------------------- | ------------- | ----------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| `REPOSITORY_POLICY_NOT_CONFIGURED`  | Runner        | 200 (validation result) | `error`        | “The runner has no allowed repository roots, or its worktree/recovery roots overlap. Fix the runner configuration.” | no, until config changes |
+| `REPO_PATH_INVALID`                 | Runner        | 200                     | `error`        | “The path is not a usable directory (or is a device path).”                                                         | no                       |
+| `REPO_PATH_NOT_ABSOLUTE`            | Runner        | 200                     | `error`        | “Use an absolute path on the runner host.”                                                                          | no                       |
+| `REPO_PATH_TRAVERSAL`               | Runner        | 200                     | `error`        | “The path contains `..` or escapes the allowed root.”                                                               | no                       |
+| `REPO_UNC_NOT_ALLOWED`              | Runner        | 200                     | `error`        | “UNC paths are disabled on this runner.”                                                                            | operator decision        |
+| `REPO_PATH_OUTSIDE_ALLOWED_ROOTS`   | Runner        | 200                     | `error`        | “The path is outside the runner's allowed roots.”                                                                   | no                       |
+| `REPO_PATH_NOT_FOUND`               | Runner        | 200                     | `missing`      | “The path does not exist on the runner host.”                                                                       | yes after fixing         |
+| `REPO_NOT_GIT_ROOT`                 | Runner        | 200                     | `error`        | “The path is not the root of a Git repository.”                                                                     | no                       |
+| `REPO_BARE_UNSUPPORTED`             | Runner        | 200                     | `error`        | “Bare repositories are not supported.”                                                                              | no                       |
+| `REPO_PATH_IS_WORKTREE`             | Runner        | 200                     | `error`        | “Linked worktrees and submodules are not supported; bind the main checkout.”                                        | no                       |
+| `REPO_PATH_NESTED_IN_WORKTREE_ROOT` | Runner        | 200                     | `error`        | “The repository and the runner's worktree/recovery roots overlap in either direction.”                              | no                       |
+| `REPO_VALIDATION_FAILED`            | Runner        | 200                     | `error`        | “Repository validation failed; see the runner message.”                                                             | maybe                    |
+| `REPOSITORY_VALIDATION_TIMEOUT`     | API           | 504                     | unchanged      | “The runner did not answer in time. The binding state was not changed.”                                             | yes                      |
+| `BINDING_VERSION_STALE`             | API           | 409                     | unchanged      | “The binding changed while validation was running; validate again.”                                                 | yes                      |
+| `STALE_REPOSITORY_VALIDATION`       | API log/audit | —                       | unchanged      | not shown as a primary error                                                                                        | —                        |
+| `RUNNER_OFFLINE`                    | API           | 409                     | unchanged      | “The runner for this computer is offline.”                                                                          | yes when online          |
+| `RUNNER_FEATURE_UNSUPPORTED`        | API           | 409                     | unchanged      | “The runner does not support repository validation. Upgrade the runner.”                                            | no until upgrade         |
+
+`REPO_DEFAULT_BRANCH_NOT_FOUND` is intentionally absent from this table. It is **not** a repository-validation result: the validation payload has no `defaultBranch`. It is produced only by `execution.repository`/`RepositoryContextManager.prepare`, and is listed in §10.2.
 
 ### 10.2 Execution/handshake mapping
 
-| Code                               | Source                | Execution result             | `dispatchState` | UI copy / action                                                                  | Cleanup            |
-| ---------------------------------- | --------------------- | ---------------------------- | --------------- | --------------------------------------------------------------------------------- | ------------------ |
-| `PROJECT_BINDING_MISSING`          | API precheck          | no Execution created         | —               | Create a binding for the computer.                                                | none               |
-| `PROJECT_BINDING_NOT_READY`        | API precheck          | no Execution created         | —               | Validate the binding first.                                                       | none               |
-| `PROJECT_BINDING_UNSUPPORTED`      | API precheck          | no Execution created         | —               | Upgrade the runner; old runners cannot execute real CLIs.                         | none               |
-| `RUNNER_OFFLINE`                   | API precheck          | no Execution created         | —               | Start/reconnect the runner.                                                       | none               |
-| `REPOSITORY_HANDSHAKE_TIMEOUT`     | API                   | failed                       | `terminal`      | “The runner did not accept the repository context in time.”                       | cancel + release   |
-| `REPOSITORY_CONTEXT_REJECTED`      | Runner/API            | failed                       | `terminal`      | See the Runner message; fix the repository/policy.                                | cancel + release   |
-| `REPOSITORY_CONTEXT_MISMATCH`      | API                   | failed                       | `terminal`      | “The runner returned a repository context that does not match the binding.”       | cancel + release   |
-| `REPOSITORY_CONTEXT_CONFLICT`      | Runner                | failed                       | `terminal`      | “The execution id is already bound to a different repository context.”            | cancel + release   |
-| `REPOSITORY_CONTEXT_NOT_READY`     | Runner                | failed                       | `terminal`      | “The runner did not have a ready repository context when start arrived.”          | release            |
-| `REPOSITORY_BINDING_CHANGED`       | API                   | failed                       | `terminal`      | “The binding changed during preparation; start again.”                            | cancel + release   |
-| `REPOSITORY_POLICY_CHANGED`        | Runner/API            | failed; Binding `unverified` | `terminal`      | “The runner path policy changed; revalidate the binding.”                         | cancel + release   |
-| `REPOSITORY_POLICY_NOT_CONFIGURED` | Runner                | failed                       | `terminal`      | Configure allowed roots on the runner.                                            | release            |
-| `START_ACCEPT_TIMEOUT`             | API                   | failed                       | `terminal`      | “The runner did not confirm that the CLI started.”                                | cancel             |
-| `RUNNER_START_UNCONFIRMED`         | API                   | failed                       | `terminal`      | “The runner reconnected but did not report this execution; it was not restarted.” | cancel/reconcile   |
-| `RUNNER_DISCONNECTED`              | API existing recovery | failed                       | `terminal`      | “The runner stayed offline past the recovery grace window.”                       | cancel best effort |
-| `RUNNER_RESTARTED`                 | API existing recovery | failed                       | `terminal`      | “The runner restarted and no longer owns this execution.”                         | none               |
-| `REPO_*`                           | Runner                | failed                       | `terminal`      | Show the concrete path/branch error from the Runner message.                      | cancel + release   |
+| Code                               | Source                | Execution result             | `dispatchState` | UI copy / action                                                                                              | Cleanup            |
+| ---------------------------------- | --------------------- | ---------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------- | ------------------ |
+| `PROJECT_BINDING_MISSING`          | API precheck          | no Execution created         | —               | Create a binding for the computer.                                                                            | none               |
+| `PROJECT_BINDING_NOT_READY`        | API precheck          | no Execution created         | —               | Validate/revalidate the binding on this runner; it may have been validated by a different runner or platform. | none               |
+| `PROJECT_BINDING_UNSUPPORTED`      | API precheck          | no Execution created         | —               | Upgrade the runner; old runners cannot execute real CLIs.                                                     | none               |
+| `RUNNER_OFFLINE`                   | API precheck          | no Execution created         | —               | Start/reconnect the runner.                                                                                   | none               |
+| `REPOSITORY_HANDSHAKE_TIMEOUT`     | API                   | failed                       | `terminal`      | “The runner did not accept the repository context in time.”                                                   | cancel + release   |
+| `REPOSITORY_CONTEXT_REJECTED`      | Runner/API            | failed                       | `terminal`      | See the Runner message; fix the repository/policy.                                                            | cancel + release   |
+| `REPOSITORY_CONTEXT_MISMATCH`      | API                   | failed                       | `terminal`      | “The runner returned a repository context that does not match the binding.”                                   | cancel + release   |
+| `REPOSITORY_CONTEXT_CONFLICT`      | Runner                | failed                       | `terminal`      | “The execution id is already bound to a different repository context.”                                        | cancel + release   |
+| `REPOSITORY_CONTEXT_NOT_READY`     | Runner                | failed                       | `terminal`      | “The runner did not have a ready repository context when start arrived.”                                      | release            |
+| `REPOSITORY_BINDING_CHANGED`       | API                   | failed                       | `terminal`      | “The binding changed during preparation; start again.”                                                        | cancel + release   |
+| `REPOSITORY_POLICY_CHANGED`        | Runner/API            | failed; Binding `unverified` | `terminal`      | “The runner path policy changed; revalidate the binding.”                                                     | cancel + release   |
+| `REPOSITORY_POLICY_NOT_CONFIGURED` | Runner                | failed                       | `terminal`      | Configure allowed roots and make worktree/recovery roots mutually disjoint.                                   | release            |
+| `REPO_DEFAULT_BRANCH_NOT_FOUND`    | Runner                | failed                       | `terminal`      | “The project default branch does not exist in this repository.”                                               | cancel + release   |
+| `START_ACCEPT_TIMEOUT`             | API                   | failed                       | `terminal`      | “The runner did not confirm that the CLI started.”                                                            | cancel             |
+| `RUNNER_START_UNCONFIRMED`         | API                   | failed                       | `terminal`      | “The runner reconnected but did not report this execution; it was not restarted.”                             | cancel/reconcile   |
+| `RUNNER_DISCONNECTED`              | API existing recovery | failed                       | `terminal`      | “The runner stayed offline past the recovery grace window.”                                                   | cancel best effort |
+| `RUNNER_RESTARTED`                 | API existing recovery | failed                       | `terminal`      | “The runner restarted and no longer owns this execution.”                                                     | none               |
+| `REPO_*`                           | Runner                | failed                       | `terminal`      | Show the concrete path/branch error from the Runner message.                                                  | cancel + release   |
 
 ### 10.3 Mapping rules
 
@@ -1371,8 +1430,9 @@ Keep `process.cwd()` only for non-repository purposes such as resolving the toke
 2. **Do not map validation failures to HTTP 500.** They are expected outcomes.
 3. **Do not map a timeout to a state change.** Timeout is not failure of the binding; it is failure to observe a result.
 4. **Do not reuse `REPOSITORY_CONTEXT_REJECTED` for path errors.** Prefer the concrete `REPO_*` code from `execution.repository.rejected`.
-5. **Do not add new codes.** The P2-00 registry is the single source of truth. If a condition truly has no code, use the closest existing code and document the message; do not fork the vocabulary.
-6. **HTTP status mapping:** `runtimeUnavailable` currently maps unknown reason codes to `422 UNPROCESSABLE_ENTITY`. Add `PROJECT_BINDING_UNSUPPORTED` to its `conflictCodes` set so the task-start response is `409` as specified in §4.2, or throw a direct `AppException(..., HttpStatus.CONFLICT)` from the new feature guard.
+5. **Do not emit `REPO_DEFAULT_BRANCH_NOT_FOUND` from validation.** It is exclusively a handshake/context-preparation code. A validation handler that returns it is a protocol violation.
+6. **Do not add new codes.** The P2-00 registry is the single source of truth. If a condition truly has no code, use the closest existing code and document the message; do not fork the vocabulary.
+7. **HTTP status mapping:** `runtimeUnavailable` currently maps unknown reason codes to `422 UNPROCESSABLE_ENTITY`. Add `PROJECT_BINDING_UNSUPPORTED` and `PROJECT_BINDING_NOT_READY` to its `conflictCodes` set so the task-start response is `409` as specified in §4.2, or throw a direct `AppException(..., HttpStatus.CONFLICT)` from the new feature/identity guard.
 
 ---
 
@@ -1455,12 +1515,18 @@ Recovered pre-start failures use `finishExecution` through a `failed` `RuntimeEv
 ### 11.5 Binding change semantics (frozen)
 
 - Execution captures `repositoryBindingVersion` at creation.
-- Before `execution.start`, the API re-reads the Binding and requires:
+- Before `execution.start`, the API performs a transactional re-check of the Binding and live Runner. It requires:
   - `status='ready'`
   - `bindingVersion === execution.repositoryBindingVersion`
   - `policyVersion` non-null and unchanged since the handshake payload
   - `canonicalPath` non-null and equal (platform-aware) to the accepted `repositoryPath`
-- If the binding changed → `REPOSITORY_BINDING_CHANGED`, fail, cancel. A changed `canonicalPath` at the same version is also `REPOSITORY_BINDING_CHANGED`; it means a revalidation resolved the path differently.
+  - the selected live Runner for `execution.computerId`, re-resolved inside the same transaction, is still the Runner that received the handshake (`selectedRunner.id === execution.runnerId`) and its live platform still equals `binding.platform`
+  - `binding.validatedByRunnerId === selectedRunner.id` (re-resolved live Runner, not a possibly deleted row)
+  - `binding.platform === selectedRunner.platform`
+  - the live Runner still advertises `project-binding-v1`, `repository-handshake-v1`, `repository-path-policy-v1`
+- If the path/version/policy changed → `REPOSITORY_BINDING_CHANGED` (or `REPOSITORY_POLICY_CHANGED` for policy), fail, cancel. A changed `canonicalPath` at the same version is also `REPOSITORY_BINDING_CHANGED`; it means a revalidation resolved the path differently.
+- If the live selected Runner is a replacement (different `runnerId`), or its identity/platform no longer matches the Binding → `PROJECT_BINDING_NOT_READY`, fail, cancel, and require revalidation. This is not a binding-content change, so it must not be reported as `REPOSITORY_BINDING_CHANGED`.
+- `defaultBranch` is not a Binding field and is not part of this Binding re-check. The ACK's `defaultBranch` is compared with the Execution snapshot; its existence was verified by the Runner during context preparation.
 - Once `execution.start` is sent, the current Execution continues with its snapshot. Binding edits/deletion only affect new executions.
 - Binding deletion cascades `repositoryBindingId` to null via `SetNull`, but the snapshot fields remain; an in-flight pre-start execution detects the missing binding and fails.
 
@@ -1525,7 +1591,8 @@ Do not introduce parallel `void handle...()` calls inside the inbound listener; 
 
 Then:
 
-- resume `created` / `repository_preparing` / `repository_ready` work for that runner;
+- before resuming each `created` / `repository_preparing` / `repository_ready` row, re-run the binding identity/platform precheck against the Runner that just registered: `status='ready'`, `validatedBindingVersion === bindingVersion`, `validatedByRunnerId === runnerId`, `binding.platform === runner.platform`, non-null `canonicalPath`/`policyVersion`, and the full live feature set. A row whose binding was validated by a different Runner (including a replacement Runner registered for the same Computer) is failed with `PROJECT_BINDING_NOT_READY`; do not send `execution.repository` and require revalidation;
+- resume only the rows that pass this re-check;
 - send `execution.reconcile` for `start_sent` and `running` executions (existing behavior for running, extended for start_sent).
 
 The `register()` recovery query at `runner-registry.service.ts:361-364` must change from `{ runnerId, status:'running' }` to `{ runnerId, status:'running', dispatchState: { in: ['start_sent','running'] } }`. Pre-start rows are resumed by the handshake service, not by `execution.reconcile`; including them in the reconcile message adds noise and can trigger stale-snapshot handling.
@@ -1582,6 +1649,9 @@ The migration backfills existing running executions to `dispatchState='running'`
 6. Runner process restart during `repository_preparing`; assert API resends and Runner creates a new context with the same executionId.
 7. Terminal state receives late accepted/rejected; assert ignored and no state rollback.
 8. Context TTL: prepare but never start; after 10 minutes the context is swept and a later start is rejected with `REPOSITORY_CONTEXT_NOT_READY`.
+9. Runner replacement: delete/replace the Runner that validated a binding, register a new Runner for the same Computer, then resume/start. For a new start, assert `PROJECT_BINDING_NOT_READY`, no `execution.repository`, and no Execution row; for an existing pre-start row, assert the row fails with `PROJECT_BINDING_NOT_READY` and no `execution.repository`/`execution.start` is sent. Revalidate on the new Runner and assert a subsequent execution proceeds.
+10. Platform mismatch: a binding validated by a Runner whose live `platform` differs from `binding.platform` is rejected with `PROJECT_BINDING_NOT_READY` before dispatch; after revalidation on the matching platform it succeeds.
+11. Missing default branch: a ready binding whose Project `defaultBranch` does not exist is accepted by validation but rejected by `execution.repository` with `REPO_DEFAULT_BRANCH_NOT_FOUND`; assert no `execution.start`, no CLI spawn, and `failureReason` starts with the code.
 
 ---
 
@@ -1682,15 +1752,16 @@ Current page (`apps/web/src/pages/execution-page.tsx:199-329`) has a progress pa
 
 ### 13.4 Task start gating
 
-The existing task UI likely disables real execution when no binding/ready binding. P2-02 adds two reasons:
+The existing task UI likely disables real execution when no binding/ready binding. P2-02 adds three reasons:
 
 - Runner lacks `project-binding-v1` / `repository-handshake-v1` / `repository-path-policy-v1` → “Upgrade the runner to enable project-aware execution.”
 - Runner has no allowed roots → the binding validation will fail; the task start button should remain disabled until `ready`.
+- Binding is `ready` but was validated by a different Runner or platform → “Revalidate the repository on this runner before starting.” The binding row must offer Revalidate; do not present the old `ready` badge as executable.
 
 Use `RuntimeAvailabilityDto.reasonCode`:
 
 - `PROJECT_BINDING_UNSUPPORTED` → upgrade message.
-- `PROJECT_BINDING_NOT_READY` / `PROJECT_BINDING_MISSING` → link to project binding.
+- `PROJECT_BINDING_NOT_READY` / `PROJECT_BINDING_MISSING` → link to project binding; for `NOT_READY`, include the revalidate action.
 
 If the task UI currently only consumes `available/reason`, add `reasonCode` handling without changing the DTO (the field already exists).
 
@@ -1715,15 +1786,16 @@ If the task UI currently only consumes `available/reason`, add `reasonCode` hand
 
 ### 13.6 UI states and edge cases
 
-| Binding status                 | Validate button               | Message                                                                           |
-| ------------------------------ | ----------------------------- | --------------------------------------------------------------------------------- |
-| `unverified`                   | enabled                       | “Validate the repository path on the runner before starting a real execution.”    |
-| `ready`                        | enabled as “Revalidate”       | “Validated on {date}. Revalidate if the path or runner policy changed.”           |
-| `missing`                      | enabled as “Retry validation” | “The path no longer exists on the runner. Fix the path or restore the directory.” |
-| `error`                        | enabled as “Retry validation” | Show code/message + suggested fix                                                 |
-| `ready` + last attempt timeout | enabled as “Revalidate”       | Warning about last timeout; keep ready badge                                      |
-| Runner offline                 | disabled                      | “The runner for this computer is offline.”                                        |
-| Feature missing                | disabled                      | “Upgrade the runner to support repository validation.”                            |
+| Binding status                                   | Validate button               | Message                                                                                                 |
+| ------------------------------------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `unverified`                                     | enabled                       | “Validate the repository path on the runner before starting a real execution.”                          |
+| `ready`                                          | enabled as “Revalidate”       | “Validated on {date}. Revalidate if the path or runner policy changed.”                                 |
+| `missing`                                        | enabled as “Retry validation” | “The path no longer exists on the runner. Fix the path or restore the directory.”                       |
+| `error`                                          | enabled as “Retry validation” | Show code/message + suggested fix                                                                       |
+| `ready` + last attempt timeout                   | enabled as “Revalidate”       | Warning about last timeout; keep ready badge                                                            |
+| `ready` but validated by another runner/platform | enabled as “Revalidate”       | “This binding was validated by a different runner (or platform). Revalidate on this runner to execute.” |
+| Runner offline                                   | disabled                      | “The runner for this computer is offline.”                                                              |
+| Feature missing                                  | disabled                      | “Upgrade the runner to support repository validation.”                                                  |
 
 ### 13.7 Do not
 
@@ -1746,52 +1818,65 @@ If the task UI currently only consumes `available/reason`, add `reasonCode` hand
 
 and the Playwright Fake Runner E2E suite on `ubuntu-latest`. P2-02 should use the existing matrix and add Windows-specific Runner policy tests to the unit layer. Do not add a Windows E2E job in this card unless the team explicitly accepts the cost; the Windows unit matrix plus Linux E2E is the required minimum.
 
-### 14.2 Path-policy matrix
+### 14.2 Path-policy and handshake matrix
 
-| Case                                                   | Windows        | Linux         | Expected code                                                  |
-| ------------------------------------------------------ | -------------- | ------------- | -------------------------------------------------------------- |
-| Allowed root contains repo                             | yes            | yes           | `ok=true`                                                      |
-| Same path with different case (`C:\Repo` vs `c:\repo`) | yes            | n/a           | `ok=true` (Windows) / `REPO_PATH_NOT_FOUND` or outside (Linux) |
-| Relative path `repo`                                   | yes            | yes           | `REPO_PATH_NOT_ABSOLUTE`                                       |
-| Drive-relative `C:repo`                                | yes            | n/a           | `REPO_PATH_NOT_ABSOLUTE`                                       |
-| `..` traversal                                         | yes            | yes           | `REPO_PATH_TRAVERSAL`                                          |
-| NUL in path                                            | yes            | yes           | `REPO_PATH_INVALID` (contract also rejects)                    |
-| UNC `\\server\share`                                   | yes            | n/a           | `REPO_UNC_NOT_ALLOWED` (default)                               |
-| Device `\\?\C:\repo`                                   | yes            | n/a           | `REPO_PATH_INVALID` (default)                                  |
-| Junction/symlink escaping root                         | yes (junction) | yes (symlink) | `REPO_PATH_OUTSIDE_ALLOWED_ROOTS`                              |
-| Nonexistent path                                       | yes            | yes           | `REPO_PATH_NOT_FOUND`                                          |
-| File instead of directory                              | yes            | yes           | `REPO_PATH_INVALID`                                            |
-| Path outside allowed roots                             | yes            | yes           | `REPO_PATH_OUTSIDE_ALLOWED_ROOTS`                              |
-| Repo inside worktree root                              | yes            | yes           | `REPO_PATH_NESTED_IN_WORKTREE_ROOT`                            |
-| Non-Git directory                                      | yes            | yes           | `REPO_NOT_GIT_ROOT`                                            |
-| Bare repo                                              | yes            | yes           | `REPO_BARE_UNSUPPORTED`                                        |
-| Linked worktree                                        | yes            | yes           | `REPO_PATH_IS_WORKTREE`                                        |
-| Submodule                                              | yes            | yes           | `REPO_PATH_IS_WORKTREE`                                        |
-| Missing default branch                                 | yes            | yes           | `REPO_DEFAULT_BRANCH_NOT_FOUND`                                |
-| Empty repo / no HEAD                                   | yes            | yes           | `REPO_VALIDATION_FAILED` or `REPO_DEFAULT_BRANCH_NOT_FOUND`    |
-| Policy version stable across root order                | yes            | yes           | same hash                                                      |
-| Policy version changes with root/flags                 | yes            | yes           | different hash                                                 |
+The **Stage** column is normative: a row marked `validate` must be asserted through `repository.validate`; a row marked `handshake` must be asserted through `execution.repository`. Do not test a handshake-only condition through the validation route, and do not test a validation-only condition through the handshake.
+
+| Stage     | Case                                                   | Windows        | Linux         | Expected result                                                             |
+| --------- | ------------------------------------------------------ | -------------- | ------------- | --------------------------------------------------------------------------- |
+| validate  | Allowed root contains repo                             | yes            | yes           | `ok=true`                                                                   |
+| validate  | Same path with different case (`C:\Repo` vs `c:\repo`) | yes            | n/a           | `ok=true` (Windows) / `REPO_PATH_NOT_FOUND` or outside (Linux)              |
+| validate  | Relative path `repo`                                   | yes            | yes           | `REPO_PATH_NOT_ABSOLUTE`                                                    |
+| validate  | Drive-relative `C:repo`                                | yes            | n/a           | `REPO_PATH_NOT_ABSOLUTE`                                                    |
+| validate  | `..` traversal                                         | yes            | yes           | `REPO_PATH_TRAVERSAL`                                                       |
+| validate  | NUL in path                                            | yes            | yes           | `REPO_PATH_INVALID` (contract also rejects)                                 |
+| validate  | UNC `\\server\share`                                   | yes            | n/a           | `REPO_UNC_NOT_ALLOWED` (default)                                            |
+| validate  | Device `\\?\C:\repo`                                   | yes            | n/a           | `REPO_PATH_INVALID` — **always**, no opt-in                                 |
+| validate  | Device `\\.\PhysicalDrive0`                            | yes            | n/a           | `REPO_PATH_INVALID` — **always**, no opt-in                                 |
+| validate  | Device `\\?\UNC\server\share`                          | yes            | n/a           | `REPO_PATH_INVALID` — device namespace wins over UNC allow                  |
+| validate  | Junction/symlink escaping root                         | yes (junction) | yes (symlink) | `REPO_PATH_OUTSIDE_ALLOWED_ROOTS`                                           |
+| validate  | Nonexistent path                                       | yes            | yes           | `REPO_PATH_NOT_FOUND`                                                       |
+| validate  | File instead of directory                              | yes            | yes           | `REPO_PATH_INVALID`                                                         |
+| validate  | Path outside allowed roots                             | yes            | yes           | `REPO_PATH_OUTSIDE_ALLOWED_ROOTS`                                           |
+| validate  | Repo inside worktreeRoot                               | yes            | yes           | `REPO_PATH_NESTED_IN_WORKTREE_ROOT`                                         |
+| validate  | Repo inside recoveryRoot                               | yes            | yes           | `REPO_PATH_NESTED_IN_WORKTREE_ROOT`                                         |
+| validate  | worktreeRoot inside repo                               | yes            | yes           | `REPO_PATH_NESTED_IN_WORKTREE_ROOT`                                         |
+| validate  | recoveryRoot inside repo                               | yes            | yes           | `REPO_PATH_NESTED_IN_WORKTREE_ROOT`                                         |
+| validate  | worktreeRoot/recoveryRoot overlap each other           | yes            | yes           | `REPOSITORY_POLICY_NOT_CONFIGURED`                                          |
+| validate  | repo, worktreeRoot, recoveryRoot mutually disjoint     | yes            | yes           | `ok=true`                                                                   |
+| validate  | Non-Git directory                                      | yes            | yes           | `REPO_NOT_GIT_ROOT`                                                         |
+| validate  | Bare repo                                              | yes            | yes           | `REPO_BARE_UNSUPPORTED`                                                     |
+| validate  | Linked worktree                                        | yes            | yes           | `REPO_PATH_IS_WORKTREE`                                                     |
+| validate  | Submodule                                              | yes            | yes           | `REPO_PATH_IS_WORKTREE`                                                     |
+| validate  | Empty repo / no HEAD                                   | yes            | yes           | `REPO_VALIDATION_FAILED`                                                    |
+| validate  | Missing Project.defaultBranch is **not** checked       | yes            | yes           | `ok=true` even when `refs/heads/<defaultBranch>` is absent                  |
+| validate  | Policy version stable across root order                | yes            | yes           | same hash                                                                   |
+| validate  | Policy version changes with root/`allowUnc`            | yes            | yes           | different hash                                                              |
+| handshake | Missing default branch                                 | yes            | yes           | `execution.repository.rejected` + `REPO_DEFAULT_BRANCH_NOT_FOUND`; no start |
+| handshake | Invalid ref syntax in default branch                   | yes            | yes           | `REPO_DEFAULT_BRANCH_NOT_FOUND`; no start                                   |
+| handshake | Valid default branch                                   | yes            | yes           | accepted → start                                                            |
+| handshake | Policy changed after validation                        | yes            | yes           | `REPOSITORY_POLICY_CHANGED`; Binding `unverified`                           |
 
 ### 14.3 Test files and responsibilities
 
-| Layer           | File                                                            | Coverage                                                                            |
-| --------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| Contracts       | `packages/contracts/test/phase2-vocabulary.test.ts` (extend)    | `DISPATCH_STATES` frozen; no duplicates; labels complete                            |
-| Contracts       | existing `runner-protocol-additive-messages.test.ts`            | Re-run; no schema change; v1 strictness                                             |
-| Runner unit     | `apps/runner/test/repository-policy.spec.ts` (new)              | All path cases; policyVersion; Git shape                                            |
-| Runner unit     | `apps/runner/test/repository-context.spec.ts` (new)             | Idempotency, conflict, TTL, start gating                                            |
-| Runner unit     | `apps/runner/test/repository-validation.spec.ts` (new)          | Cache/replay, requestId reuse, result mapping                                       |
-| Runner unit     | `apps/runner/test/config.spec.ts` (update)                      | `allowedRepositoryRoots`, removed `projectPaths`, ignored `HAFT_RUNNER_PROJECTS`    |
-| Runner unit     | `apps/runner/test/git-worktree.spec.ts` (extend)                | Pre-worktree policy re-check, worktree root containment unchanged                   |
-| Runner unit     | `apps/runner/test/real-executor.spec.ts` (update)               | Uses context path, not `config.projectPaths`; spawn count remains 0 before start    |
-| API integration | `apps/api/test/repository-validation.integration.spec.ts` (new) | Validate route, messages, success/failure/stale/timeout/offline/feature             |
-| API integration | `apps/api/test/runner.integration.spec.ts` (extend)             | Handshake order, state machine, no-start-without-accepted, recovery, start.rejected |
-| API integration | `apps/api/test/projects.integration.spec.ts` (extend)           | Binding DTO fields, validation route auth/404, no P2-02 fields in P2-01 CRUD        |
-| Web component   | existing web tests                                              | Validate button, status/metadata, execution repository card, error copy             |
-| E2E functional  | `tests/e2e/functional/repository-validation.spec.ts` (new)      | UI validate → ready → start                                                         |
-| E2E functional  | `tests/e2e/functional/runner-execution.spec.ts` (update)        | Handshake success, failure, main checkout unchanged                                 |
-| E2E functional  | `tests/e2e/functional/runner-recovery.spec.ts` (new or extend)  | Reconnect states                                                                    |
-| E2E real        | `tests/e2e-real/*` (update)                                     | Real validation + handshake, no `HAFT_RUNNER_PROJECTS`                              |
+| Layer           | File                                                            | Coverage                                                                                                                                            |
+| --------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Contracts       | `packages/contracts/test/phase2-vocabulary.test.ts` (extend)    | `DISPATCH_STATES` frozen; no duplicates; labels complete                                                                                            |
+| Contracts       | existing `runner-protocol-additive-messages.test.ts`            | Re-run; no schema change; v1 strictness                                                                                                             |
+| Runner unit     | `apps/runner/test/repository-policy.spec.ts` (new)              | All path cases; device-path unconditional rejection; bidirectional root isolation; policyVersion; Git shape                                         |
+| Runner unit     | `apps/runner/test/repository-context.spec.ts` (new)             | Idempotency, conflict, TTL, start gating; defaultBranch existence checked here only                                                                 |
+| Runner unit     | `apps/runner/test/repository-validation.spec.ts` (new)          | Cache/replay, requestId reuse, result mapping                                                                                                       |
+| Runner unit     | `apps/runner/test/config.spec.ts` (update)                      | `allowedRepositoryRoots`, removed `projectPaths`, ignored `HAFT_RUNNER_PROJECTS`                                                                    |
+| Runner unit     | `apps/runner/test/git-worktree.spec.ts` (extend)                | Pre-worktree policy re-check, worktree root containment unchanged                                                                                   |
+| Runner unit     | `apps/runner/test/real-executor.spec.ts` (update)               | Uses context path, not `config.projectPaths`; spawn count remains 0 before start                                                                    |
+| API integration | `apps/api/test/repository-validation.integration.spec.ts` (new) | Validate route, messages, success/failure/stale/timeout/offline/feature                                                                             |
+| API integration | `apps/api/test/runner.integration.spec.ts` (extend)             | Handshake order, state machine, no-start-without-accepted, recovery, start.rejected, defaultBranch rejection, runner replacement, platform mismatch |
+| API integration | `apps/api/test/projects.integration.spec.ts` (extend)           | Binding DTO fields, validation route auth/404, no P2-02 fields in P2-01 CRUD                                                                        |
+| Web component   | existing web tests                                              | Validate button, status/metadata, execution repository card, error copy                                                                             |
+| E2E functional  | `tests/e2e/functional/repository-validation.spec.ts` (new)      | UI validate → ready → start                                                                                                                         |
+| E2E functional  | `tests/e2e/functional/runner-execution.spec.ts` (update)        | Handshake success, missing-default-branch failure, main checkout unchanged                                                                          |
+| E2E functional  | `tests/e2e/functional/runner-recovery.spec.ts` (new or extend)  | Reconnect states                                                                                                                                    |
+| E2E real        | `tests/e2e-real/*` (update)                                     | Real validation + handshake, no `HAFT_RUNNER_PROJECTS`                                                                                              |
 
 ### 14.4 Windows test implementation notes
 
@@ -1817,14 +1902,16 @@ and the Playwright Fake Runner E2E suite on `ubuntu-latest`. P2-02 should use th
   ```
 - Remove `HAFT_RUNNER_PROJECTS`.
 - Ensure the binding created by `ensureReadyRepositoryBinding` uses the same path.
+- `repository`, `worktrees` and `recovery` must be **siblings**, never nested inside one another. If the fixture puts `worktrees` or `recovery` under `repository`, the new bidirectional isolation check will reject the fixture by design.
 - Capture the main repo `HEAD` before the test and assert it is unchanged after the execution. The Fake Runner is synthetic but must not touch the main checkout; the handshake context only reads `HEAD`.
 
 `playwright.real.config.ts`:
 
 - Replace `HAFT_RUNNER_PROJECTS` with `HAFT_RUNNER_ALLOWED_ROOTS: JSON.stringify([PROJECT_DIR])`.
 - Keep `PROJECT_DIR` as `test-results/real-e2e/workspace`.
+- Set `HAFT_RUNNER_WORKTREE_ROOT` to `test-results/real-e2e/worktrees` and `HAFT_RUNNER_RECOVERY_ROOT` to `test-results/real-e2e/recovery`; both must be siblings of `workspace`, not children of it.
 - Ensure `prepare-project.mjs` creates the Git repo before the Runner starts (it already does).
-- Update `ensureReadyRepositoryBinding` to call the real validate endpoint, not the test-only fixture.
+- Update `ensureReadyRepositoryBinding` to call the real validate endpoint, not the test-only fixture, and to assert `binding.validatedByRunnerId` equals the live Runner id.
 
 `tests/support/repository.ts`:
 
@@ -1855,6 +1942,27 @@ pnpm --filter @raft-lite/api test -- repository-validation
 ```
 
 CI must show unit suites green on both `ubuntu-latest` and `windows-latest`, and Playwright Fake Runner E2E green on `ubuntu-latest`.
+
+### 14.7 Execution-gate matrix (API integration)
+
+This matrix is mandatory and maps directly to the independent-review scenario A–E.
+
+| #   | Setup                                                                                                                        | Action              | Expected                                                                                |
+| --- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------- | --------------------------------------------------------------------------------------- |
+| G1  | Runner A validates binding B on Computer C; A is selected                                                                    | Start task          | `200`; handshake proceeds                                                               |
+| G2  | Runner A validated B; Runner A is deleted and Runner D registers for the same Computer C                                     | Start task          | `409 PROJECT_BINDING_NOT_READY`; zero Execution rows; no `execution.repository`         |
+| G3  | Runner A validated B; binding.platform is `win32`, live Runner platform is `linux`                                           | Start task          | `409 PROJECT_BINDING_NOT_READY`; zero Execution rows                                    |
+| G4  | Same as G2/G3, then B is revalidated by the new Runner/platform                                                              | Start task          | `200`; handshake proceeds                                                               |
+| G5  | Runner A validates B and sends `execution.repository.accepted`; before `execution.start`, A is replaced by D (same Computer) | Handshake continues | `PROJECT_BINDING_NOT_READY`; no `execution.start`; `execution.cancel`; execution failed |
+| G6  | Same as G5, but the live platform changes to one that differs from `binding.platform`                                        | Handshake continues | `PROJECT_BINDING_NOT_READY`; no `execution.start`                                       |
+| G7  | Binding `ready`, but live Runner loses `repository-handshake-v1`                                                             | Start task          | `409 PROJECT_BINDING_UNSUPPORTED`; zero Execution rows                                  |
+| G8  | Binding `ready`, live features complete, identity/platform match                                                             | Start task          | `200`; success order `execution.repository` → accepted → `execution.start` → accepted   |
+| G9  | Binding `ready` with `validatedByRunnerId = NULL` (old Runner deleted, no replacement registered)                            | Start task          | `409 PROJECT_BINDING_NOT_READY`; zero Execution rows; revalidate required               |
+| G10 | Same Runner reconnects/registers again (same `runnerId`, same `platform`)                                                    | Start task          | `200`; binding remains executable without revalidation                                  |
+
+The key assertion for G2–G6 and G9 is not only the HTTP/status result but also that **no `execution.start` message is emitted and `spawnCount === 0`**.
+
+The A–E review variants map as follows: (A) same Runner re-registration → G10 stays executable; (B) old Runner deleted and validator becomes NULL → G9 rejects; (C) replacement Runner on the same Computer → G2 rejects until G4 revalidates; (D) platform mismatch → G3/G6 reject; (E) replacement/mismatch during the handshake window → G5/G6 fail before start and cancel.
 
 ---
 
@@ -1888,8 +1996,9 @@ CI must show unit suites green on both `ubuntu-latest` and `windows-latest`, and
 3. In `RunnerClient.handleMessage`, add `case 'repository.validate'`:
    - call `cache.get(...)`; if hit, send `repository.validation` with a new envelope ID;
    - else call `pathPolicy.validate(payload.path)` and send the result;
+   - do **not** read, infer, or validate a default branch; the payload has none;
    - never throw; convert unexpected errors to `REPO_VALIDATION_FAILED`.
-4. In `RunnerRegistryService`, add `sendRepositoryValidate(runnerId, payload, messageId?)` and an inbound branch that emits a typed protocol event.
+4. In `RunnerRegistryService`, add `sendRepositoryValidate(runnerId, payload, messageId?)` and an inbound branch that emits a typed protocol event carrying the authenticated `runnerId` and `platform`.
 5. Implement `RepositoryValidationService.validate(projectId, bindingId)`:
    - load binding/project;
    - resolve runner by computer;
@@ -1897,8 +2006,8 @@ CI must show unit suites green on both `ubuntu-latest` and `windows-latest`, and
    - set `validationRequestId`;
    - send with retry at half-timeout;
    - await response or timeout;
-   - correlate requestId/project/computer/binding/version;
-   - conditional update;
+   - correlate requestId/project/computer/binding/version, and bind the result to the authenticated `runnerId` that produced it;
+   - conditional update, including `validatedByRunnerId` and `platform`;
    - return DTO.
 6. Add `ProjectsService.validateBinding` (or controller delegation) and the route:
    ```ts
@@ -1917,6 +2026,7 @@ CI must show unit suites green on both `ubuntu-latest` and `windows-latest`, and
 - Stale response cannot overwrite a newer request/version.
 - Old Runner returns 409 `RUNNER_FEATURE_UNSUPPORTED`.
 - The API never reads the filesystem.
+- Validation never checks `Project.defaultBranch` and never returns `REPO_DEFAULT_BRANCH_NOT_FOUND`; a missing branch is not a validation failure.
 
 ---
 
@@ -1937,24 +2047,26 @@ CI must show unit suites green on both `ubuntu-latest` and `windows-latest`, and
 
 **Implementation steps:**
 
-1. Add config fields and CLI/env parsing from §9.1.
+1. Add config fields and CLI/env parsing from §9.1. Do **not** add a device-path flag; device paths are always rejected.
 2. Remove `parseProjectPaths`, `projectPaths`, `--project`, `HAFT_RUNNER_PROJECTS`, `HAFT_RUNNER_PROJECT_ID`, `HAFT_RUNNER_WORKSPACE_ROOT`, and cwd fallback.
 3. Implement `RepositoryPathPolicy`:
-   - constructor validates roots are absolute; logs warnings for missing roots;
+   - constructor validates allowed roots are absolute; validates that `worktreeRoot` and `recoveryRoot` are absolute and mutually disjoint; sets `configError=REPOSITORY_POLICY_NOT_CONFIGURED` on overlap; logs warnings for missing roots;
    - computes `policyVersion`;
-   - `validate(path, defaultBranch?)` returns the algorithm from §9.4;
-   - `assertStillAllowed(canonicalPath)` for the pre-worktree re-check.
-4. Add a `comparablePath`/`containsPath` helper that uses `path.relative` and platform-aware case handling.
+   - `validate(path)` returns the algorithm from §9.4, with no branch parameter and no branch check;
+   - `assertStillAllowed(canonicalPath)` for the pre-worktree and pre-recovery-write re-check, including bidirectional root isolation.
+4. Add a `comparablePath`/`containsPath` helper that uses `path.relative` and platform-aware case handling. Add a `canonicalizeRoot` helper that realpaths the longest existing prefix and resolves the remainder; use it for both containment directions.
 5. Update `main.ts` logging.
-6. Unit tests for every row in §14.2 that does not require a full Runner.
+6. Unit tests for every `validate` row in §14.2 that does not require a full Runner, including all four overlap directions and the disjoint success case.
 
 **Exit criteria:**
 
 - No execution path reads `process.cwd()` or `INIT_CWD`.
 - Every path failure returns the expected `REPO_*` code.
+- Device paths always return `REPO_PATH_INVALID`; no test expects a device path to be accepted.
 - `policyVersion` is deterministic and changes when policy changes.
 - Windows and Linux unit tests pass.
-- A path inside `worktreeRoot`/`recoveryRoot` is rejected.
+- A path inside `worktreeRoot`/`recoveryRoot`, a root inside the repository, and a `worktreeRoot`/`recoveryRoot` overlap are all rejected.
+- `validate()` has no default-branch parameter and cannot return `REPO_DEFAULT_BRANCH_NOT_FOUND`.
 
 ---
 
@@ -1997,10 +2109,11 @@ CI must show unit suites green on both `ubuntu-latest` and `windows-latest`, and
    - register/disconnect/snapshot hooks.
 4. Implement `RepositoryHandshakeService`:
    - `dispatch(input)` with pending map, timers, retries;
-   - `onProtocolEvent` for accepted/rejected/start.rejected/accepted;
+   - `onProtocolEvent` for accepted/rejected/start.rejected/accepted, carrying the authenticated inbound `runnerId`;
    - conditional transitions;
-   - ACK correlation and binding re-check;
-   - start send;
+   - ACK correlation and a **transactional binding re-check**: re-resolve the live selected Runner; require it is still the inbound `runnerId`; then check status, version, policyVersion, canonicalPath, `validatedByRunnerId === selectedRunner.id`, `binding.platform === selectedRunner.platform`, and live features;
+   - start send only after the re-check passes;
+   - `PROJECT_BINDING_NOT_READY` for identity/platform mismatch, with cancel and no start;
    - failure cleanup/cancel;
    - `noteTerminal`.
 
@@ -2008,8 +2121,10 @@ CI must show unit suites green on both `ubuntu-latest` and `windows-latest`, and
 
 5. Wire `RunnerRuntimeService.start` to `handshake.dispatch`.
 6. In `ExecutionsService`:
-   - strengthen binding precheck (canonicalPath + policyVersion);
+   - strengthen binding precheck: `status='ready'`, `validatedBindingVersion === bindingVersion`, non-null `canonicalPath`/`policyVersion`/`platform`/`validatedByRunnerId`, `validatedByRunnerId === selectedRunner.id`, `binding.platform === selectedRunner.platform`;
+   - if the identity/platform guard fails, return `PROJECT_BINDING_NOT_READY` before creating the Execution; never fall back to a different Runner;
    - feature check before creation;
+   - snapshot `repositoryDefaultBranch` from the Project but do **not** check branch existence here;
    - create with `dispatchState='created'`;
    - mock path stays `runtimes.start` with `dispatchState='running'`;
    - `failExecutionStart` is the single writer for synchronous pre-start failure: `failureReason="<CODE>: <message>"`, `dispatchState='terminal'`, task/agent rollback, idempotent;
@@ -2017,17 +2132,18 @@ CI must show unit suites green on both `ubuntu-latest` and `windows-latest`, and
    - recovered pre-start failures go through `finishExecution`, never `failExecutionStart`.
 7. In `RuntimeRegistryService.availability`, remove the `projectIds` gate; add feature reasons.
 8. In the Runner:
-   - `RepositoryContextManager`;
+   - `RepositoryContextManager`, including the mandatory `defaultBranch` checks (`check-ref-format` + `rev-parse --verify refs/heads/<branch>`) and bidirectional root isolation;
    - handle `execution.repository` and send accepted/rejected;
    - remove the early `execution.accepted`;
    - `handleStart` checks context/policy/pre-accept admission (CLI, runtime enabled, capacity), sends `execution.start.rejected` or `execution.accepted`;
    - add `canStart(payload, context)` (or equivalent) to `RunnerExecutor` and implement it in both `RealExecutor` and `FakeExecutor`; `start()` must not perform an admission failure after accepted;
    - pass the context to executors;
-   - `RealExecutor` uses `context.canonicalPath`, re-checks policy before `git worktree add`;
+   - `RealExecutor` uses `context.canonicalPath`, re-checks policy and both containment directions before `git worktree add`, and asserts the final worktree path is under `worktreeRoot` and outside the repository;
    - `FakeExecutor` uses the context but remains synthetic;
+   - the recovery journal asserts its directory is under `recoveryRoot` and outside the repository before writing;
    - `execution.cancel` releases pre-start contexts.
    - `execution.reconcile` sends a fresh snapshot.
-9. Add integration tests for message order, no-start-without-accepted, start.rejected, ACK mismatch, binding change, policy change.
+9. Add integration tests for message order, no-start-without-accepted, start.rejected, ACK mismatch, binding change, policy change, missing default branch (handshake only), runner replacement and platform mismatch (§14.7).
 
 **Exit criteria:**
 
@@ -2037,6 +2153,8 @@ CI must show unit suites green on both `ubuntu-latest` and `windows-latest`, and
 - `execution.start.rejected` prevents spawn.
 - `RUNTIME_NOT_ENABLED`, `RUNNER_BUSY` and missing CLI produce `execution.start.rejected`, never accepted-then-failed.
 - Binding/policy changes fail before start, with cancel.
+- A missing `Project.defaultBranch` is caught by `execution.repository` with `REPO_DEFAULT_BRANCH_NOT_FOUND`, before `execution.start`; validation still succeeds.
+- A binding validated by another Runner or platform is rejected with `PROJECT_BINDING_NOT_READY`, both at the API precheck and at the post-accepted re-check.
 - Once start is sent, later binding edits do not affect the execution.
 - Old Runner returns 409 before Execution creation.
 
@@ -2062,7 +2180,7 @@ CI must show unit suites green on both `ubuntu-latest` and `windows-latest`, and
 
 1. Implement the retry schedules and same-messageId/payload rule.
 2. Implement the recovery matrix in §12.
-3. Fix `reconcileSnapshot` to exclude pre-start states and notify the handshake service for `start_sent`; change `register()` recovery to reconcile only `start_sent`/`running`.
+3. Fix `reconcileSnapshot` to exclude pre-start states and notify the handshake service for `start_sent`; change `register()` recovery to reconcile only `start_sent`/`running`. Before resuming any pre-start row, re-check the binding identity/platform against the newly registered Runner; a replacement Runner fails the row with `PROJECT_BINDING_NOT_READY` and requires revalidation.
 4. Make `RunnerClient` respond to `execution.reconcile` with a fresh snapshot.
 5. Implement context TTL sweep and cancel/release.
 6. Add structured audit logs (or the audit table) for every transition.
@@ -2077,6 +2195,7 @@ CI must show unit suites green on both `ubuntu-latest` and `windows-latest`, and
 - Duplicate accepted/rejected is harmless.
 - Disconnect/reconnect at each state follows the matrix.
 - API restart does not leave executions stuck or restart them.
+- Runner replacement during recovery fails pre-start rows with `PROJECT_BINDING_NOT_READY`; no `execution.repository`/`execution.start` is sent to the replacement without revalidation.
 - Context TTL releases pre-start contexts.
 - No double CLI spawn.
 - Main checkout HEAD unchanged.
@@ -2112,13 +2231,15 @@ CI must show unit suites green on both `ubuntu-latest` and `windows-latest`, and
 2. Extract `BindingValidationPanel`; wire validate/revalidate; invalidate queries; show metadata/errors.
 3. Add `RepositoryPanel` to the execution page; show dispatch state, path, branch, binding version, policy, context, base commit, prepared time.
 4. Add `describeRepositoryError` and use it in both places.
-5. Update the task start gating for `PROJECT_BINDING_UNSUPPORTED`.
-6. Update the Fake Runner E2E config to a temp Git repo + allowed roots.
-7. Update `ensureReadyRepositoryBinding` to use real validation.
+5. Update the task start gating for `PROJECT_BINDING_UNSUPPORTED` and `PROJECT_BINDING_NOT_READY` (including the “validated by another runner/platform” case); the binding row must offer Revalidate.
+6. Update the Fake Runner E2E config to a temp Git repo + allowed roots, with worktree/recovery roots as disjoint siblings.
+7. Update `ensureReadyRepositoryBinding` to use real validation and assert the validating Runner id.
 8. Add E2E tests:
    - validate from the UI → binding ready → start → execution completes;
    - invalid path → error code shown;
    - runner offline/feature missing → disabled/409;
+   - binding ready but validated by another runner → start gated with revalidate action;
+   - missing default branch → execution failed with `REPO_DEFAULT_BRANCH_NOT_FOUND`, no CLI;
    - handshake failure → execution failed, no CLI;
    - reconnect during preparing/start_sent;
    - main checkout HEAD unchanged.
@@ -2130,8 +2251,9 @@ CI must show unit suites green on both `ubuntu-latest` and `windows-latest`, and
 - A user can validate a binding from the Project drawer and see canonical path/policy/error.
 - An execution detail shows the repository snapshot and dispatch phase.
 - E2E success path uses real validation, not the test-only fixture.
+- A replacement-Runner or platform mismatch is visible as “revalidate on this runner”, not as a silently executable binding.
 - Windows unit + Linux E2E green.
-- Docs describe the migration away from `HAFT_RUNNER_PROJECTS`.
+- Docs describe the migration away from `HAFT_RUNNER_PROJECTS`, the unconditional device-path rejection, and the bidirectional root isolation.
 
 ---
 
@@ -2220,13 +2342,13 @@ Assuming one branch `feature/p2-02-project-aware-runner`:
 
 ### Phase 1 — WP-B Path Policy
 
-- Add config fields/CLI/env parsing.
+- Add config fields/CLI/env parsing (no device-path flag).
 - Remove the old project map and cwd fallback.
-- Implement `repository-policy.ts`.
-- Add unit tests for the full path matrix.
+- Implement `repository-policy.ts`, including unconditional device-path rejection and bidirectional worktree/recovery/repository isolation.
+- Add unit tests for the full path matrix, including all overlap directions and the disjoint success case.
 - Update `main.ts` logging.
 
-**Exit:** Runner policy tests green on Windows and Linux; `rg HAFT_RUNNER_PROJECTS apps/runner/src` returns nothing.
+**Exit:** Runner policy tests green on Windows and Linux; `rg HAFT_RUNNER_PROJECTS apps/runner/src` returns nothing; `rg -i "allow.?device" apps/runner` returns nothing.
 
 ### Phase 2 — WP-A Validation API and Runner handler
 
@@ -2244,23 +2366,25 @@ Assuming one branch `feature/p2-02-project-aware-runner`:
 - Add `DISPATCH_STATES` and `ExecutionDto` fields; update serializer.
 - Implement live feature cache and outbound helpers in `RunnerRegistryService`.
 - Implement `RepositoryHandshakeService` happy path + failure path.
+- Add the mandatory `defaultBranch` check in `RepositoryContextManager.prepare` (handshake only).
+- Add the identity/platform precheck in `ExecutionsService` and the transactional re-check in `RepositoryHandshakeService`.
 - Wire `RunnerRuntimeService`.
 - Implement Runner context manager and start gating.
 - Remove the early accepted and the old `projectIds` gate.
-- Add message-order/no-start-without-accepted tests.
+- Add message-order/no-start-without-accepted tests, plus missing-branch, runner-replacement and platform-mismatch tests.
 
-**Exit:** one Fake Runner execution completes through the handshake; no start before accepted; old Runner gets 409.
+**Exit:** one Fake Runner execution completes through the handshake; no start before accepted; old Runner gets 409; missing default branch fails before start; replacement Runner/platform is rejected with `PROJECT_BINDING_NOT_READY`.
 
 ### Phase 4 — WP-D Reliability and Recovery
 
 - Add retries/timeouts/idempotency.
 - Fix snapshot/reconcile filtering.
-- Implement reconnect/restart recovery.
+- Implement reconnect/restart recovery, including the identity/platform re-check before resuming pre-start rows.
 - Implement context TTL and cancel cleanup.
 - Make failure/terminal handling idempotent.
-- Add recovery tests.
+- Add recovery tests, including replacement Runner and missing default branch.
 
-**Exit:** reconnect matrix green; no double spawn; no stuck states; main checkout unchanged.
+**Exit:** reconnect matrix green; no double spawn; no stuck states; main checkout unchanged; replacement Runner cannot resume without revalidation.
 
 ### Phase 5 — WP-E UI and E2E
 
@@ -2280,6 +2404,10 @@ Assuming one branch `feature/p2-02-project-aware-runner`:
 - Run opt-in real E2E if CLIs/auth are available (otherwise record `NOT_VERIFIED` with a reason).
 - Verify migration on empty and existing DBs.
 - Verify no `HAFT_RUNNER_PROJECTS` / cwd fallback in the execution path.
+- Verify no device-path allow flag and that every device-path test returns `REPO_PATH_INVALID`.
+- Verify `defaultBranch` is checked only in `execution.repository`/context preparation, never in `repository.validate`.
+- Verify `validatedByRunnerId` and `platform` are enforced at both execution gates.
+- Verify bidirectional worktree/recovery/repository isolation on Windows and Linux.
 - Verify invariant tests.
 - Prepare PR description with evidence (Appendix B).
 
@@ -2300,66 +2428,76 @@ Each criterion must have an automated test or a reproducible command in the PR. 
 
 ### 18.1 Validation
 
-| ID    | Criterion                                                                                                                                                                                    | Test                                                     |
-| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| AC-01 | A valid path on a supported Runner moves the binding to `ready` and stores `canonicalPath`, `platform`, `policyVersion`, `validatedByRunnerId`, `validatedBindingVersion`, `lastValidatedAt` | `repository-validation.integration.spec.ts` success case |
-| AC-02 | A nonexistent path moves the binding to `missing` with `REPO_PATH_NOT_FOUND` and clears `canonicalPath`                                                                                      | integration + policy unit                                |
-| AC-03 | Non-Git/bare/linked-worktree/submodule/outside-root paths move the binding to `error` with the exact `REPO_*` code                                                                           | policy unit + integration                                |
-| AC-04 | A stale validation response (older requestId or bindingVersion) never overwrites the current binding                                                                                         | integration stale-response test                          |
-| AC-05 | Two concurrent validations: only the newest requestId can write                                                                                                                              | integration concurrency test                             |
-| AC-06 | Validation timeout returns 504 and leaves `status`, `canonicalPath`, `validatedBindingVersion` unchanged                                                                                     | integration timeout test                                 |
-| AC-07 | Runner offline → 409 `RUNNER_OFFLINE`                                                                                                                                                        | integration                                              |
-| AC-08 | Old Runner features `[]` → 409 `RUNNER_FEATURE_UNSUPPORTED`                                                                                                                                  | integration                                              |
-| AC-09 | The API never reads/stats/realpaths the binding path                                                                                                                                         | code review + spy test (no `fs` in API module)           |
-| AC-10 | Binding CRUD still sends zero Runner messages                                                                                                                                                | extend `runner.integration.spec.ts`                      |
+| ID     | Criterion                                                                                                                                                                                                                                                                                                         | Test                                                                              |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| AC-01  | A valid path on a supported Runner moves the binding to `ready` and stores `canonicalPath`, `platform`, `policyVersion`, `validatedByRunnerId`, `validatedBindingVersion`, `lastValidatedAt`. Validation does **not** check `Project.defaultBranch`; `ok=true` is allowed even when the default branch is absent. | `repository-validation.integration.spec.ts` success case + branch-separation case |
+| AC-02  | A nonexistent path moves the binding to `missing` with `REPO_PATH_NOT_FOUND` and clears `canonicalPath`                                                                                                                                                                                                           | integration + policy unit                                                         |
+| AC-03  | Non-Git/bare/linked-worktree/submodule/outside-root paths move the binding to `error` with the exact `REPO_*` code                                                                                                                                                                                                | policy unit + integration                                                         |
+| AC-03B | Windows device paths (`\\?\`, `\\.\`, including `\\?\UNC\...`) always return `REPO_PATH_INVALID`; no flag, env var or positive test branch exists                                                                                                                                                                 | policy unit (Windows) + grep evidence                                             |
+| AC-03C | Bidirectional isolation: repo inside worktreeRoot/recoveryRoot, worktreeRoot/recoveryRoot inside repo, and worktree/recovery overlap are rejected; a disjoint three-root layout succeeds                                                                                                                          | policy unit (Windows + Linux)                                                     |
+| AC-04  | A stale validation response (older requestId or bindingVersion) never overwrites the current binding                                                                                                                                                                                                              | integration stale-response test                                                   |
+| AC-05  | Two concurrent validations: only the newest requestId can write                                                                                                                                                                                                                                                   | integration concurrency test                                                      |
+| AC-06  | Validation timeout returns 504 and leaves `status`, `canonicalPath`, `validatedBindingVersion` unchanged                                                                                                                                                                                                          | integration timeout test                                                          |
+| AC-07  | Runner offline → 409 `RUNNER_OFFLINE`                                                                                                                                                                                                                                                                             | integration                                                                       |
+| AC-08  | Old Runner features `[]` → 409 `RUNNER_FEATURE_UNSUPPORTED`                                                                                                                                                                                                                                                       | integration                                                                       |
+| AC-09  | The API never reads/stats/realpaths the binding path                                                                                                                                                                                                                                                              | code review + spy test (no `fs` in API module)                                    |
+| AC-10  | Binding CRUD still sends zero Runner messages                                                                                                                                                                                                                                                                     | extend `runner.integration.spec.ts`                                               |
 
 ### 18.2 Execution gating
 
-| ID     | Criterion                                                                                                               | Test                                                                                 |
-| ------ | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| AC-11  | Missing/unverified/stale/canonical-null/policy-null binding → 409 before Execution creation                             | API integration                                                                      |
-| AC-12  | Old Runner (no features) → 409 `PROJECT_BINDING_UNSUPPORTED` before Execution creation                                  | API integration                                                                      |
-| AC-13  | Execution success order is `execution.repository` → accepted → `execution.start` → accepted                             | API integration message log                                                          |
-| AC-14  | **No `execution.start` is sent before a valid accepted**                                                                | spy + assertion on message order; must fail if the handshake is bypassed             |
-| AC-15  | **No CLI spawn before accepted**                                                                                        | Runner unit with `spawnProcess` spy; `RealExecutor.start` not called before accepted |
-| AC-15B | Runtime-disabled, runner-busy, CLI-missing and context-not-ready are rejected **before** accepted                       | Runner unit admission test                                                           |
-| AC-16  | `execution.start.rejected` fails the execution and never spawns                                                         | API + Runner unit                                                                    |
-| AC-17  | ACK mismatch (wrong canonicalPath/bindingVersion/policy/defaultBranch) → `REPOSITORY_CONTEXT_MISMATCH`, failed, cancel  | API integration                                                                      |
-| AC-18  | Binding changed during preparing → `REPOSITORY_BINDING_CHANGED`, failed, cancel                                         | API integration                                                                      |
-| AC-19  | policyVersion changed → `REPOSITORY_POLICY_CHANGED`, failed, Binding `unverified`                                       | API integration                                                                      |
-| AC-20  | Once `execution.start` is sent, a Binding edit does not change the execution path/branch                                | API integration                                                                      |
-| AC-21  | Binding deletion during preparing → failed, no CLI, snapshot retained                                                   | API integration                                                                      |
-| AC-21B | A synchronous handshake failure restores Task/Agent to their pre-start state; a recovered failure marks the Task failed | API integration                                                                      |
+| ID     | Criterion                                                                                                                                                                                                                                                                                                        | Test                                                                                 |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| AC-11  | Missing/unverified/stale/canonical-null/policy-null/validator-null/platform-null binding → 409 before Execution creation                                                                                                                                                                                         | API integration                                                                      |
+| AC-11B | Runner replacement scenario A–E: Runner A validates; A is deleted/replaced by B on the same Computer; execution is rejected with `PROJECT_BINDING_NOT_READY`; only revalidation by B allows execution; a NULL validator (A deleted, no replacement) also rejects; same-Runner re-registration remains executable | API integration (§14.7 G2/G4/G9/G10)                                                 |
+| AC-11C | Platform mismatch: `binding.platform !== selectedRunner.platform` → 409 `PROJECT_BINDING_NOT_READY` before Execution creation                                                                                                                                                                                    | API integration (§14.7 G3)                                                           |
+| AC-12  | Old Runner (no features) → 409 `PROJECT_BINDING_UNSUPPORTED` before Execution creation                                                                                                                                                                                                                           | API integration                                                                      |
+| AC-13  | Execution success order is `execution.repository` → accepted → `execution.start` → accepted                                                                                                                                                                                                                      | API integration message log                                                          |
+| AC-14  | **No `execution.start` is sent before a valid accepted**                                                                                                                                                                                                                                                         | spy + assertion on message order; must fail if the handshake is bypassed             |
+| AC-15  | **No CLI spawn before accepted**                                                                                                                                                                                                                                                                                 | Runner unit with `spawnProcess` spy; `RealExecutor.start` not called before accepted |
+| AC-15B | Runtime-disabled, runner-busy, CLI-missing and context-not-ready are rejected **before** accepted                                                                                                                                                                                                                | Runner unit admission test                                                           |
+| AC-16  | `execution.start.rejected` fails the execution and never spawns                                                                                                                                                                                                                                                  | API + Runner unit                                                                    |
+| AC-17  | ACK mismatch (wrong canonicalPath/bindingVersion/policy/defaultBranch) → `REPOSITORY_CONTEXT_MISMATCH`, failed, cancel                                                                                                                                                                                           | API integration                                                                      |
+| AC-17B | Missing default branch → `execution.repository.rejected` with `REPO_DEFAULT_BRANCH_NOT_FOUND`; no `execution.start`, no CLI; validation had succeeded                                                                                                                                                            | API integration + Runner unit (§14.2 handshake rows)                                 |
+| AC-17C | Runner identity/platform changes after accepted but before start → `PROJECT_BINDING_NOT_READY`, no `execution.start`, cancel                                                                                                                                                                                     | API integration (§14.7 G5/G6)                                                        |
+| AC-18  | Binding changed during preparing → `REPOSITORY_BINDING_CHANGED`, failed, cancel                                                                                                                                                                                                                                  | API integration                                                                      |
+| AC-19  | policyVersion changed → `REPOSITORY_POLICY_CHANGED`, failed, Binding `unverified`                                                                                                                                                                                                                                | API integration                                                                      |
+| AC-20  | Once `execution.start` is sent, a Binding edit does not change the execution path/branch                                                                                                                                                                                                                         | API integration                                                                      |
+| AC-21  | Binding deletion during preparing → failed, no CLI, snapshot retained                                                                                                                                                                                                                                            | API integration                                                                      |
+| AC-21B | A synchronous handshake failure restores Task/Agent to their pre-start state; a recovered failure marks the Task failed                                                                                                                                                                                          | API integration                                                                      |
 
 ### 18.3 Idempotency and recovery
 
-| ID     | Criterion                                                                                               | Test            |
-| ------ | ------------------------------------------------------------------------------------------------------- | --------------- |
-| AC-22  | `execution.repository` retry reuses the same messageId and byte-identical payload                       | API integration |
-| AC-23  | Runner returns the same `contextId` for duplicate repository messages                                   | Runner unit     |
-| AC-24  | Different bindingVersion/path for the same executionId → `REPOSITORY_CONTEXT_CONFLICT`                  | Runner unit     |
-| AC-25  | Duplicate `execution.accepted` only transitions `start_sent → running` once                             | API integration |
-| AC-26  | ACK loss → retry → exactly one `repository_ready` transition                                            | API integration |
-| AC-27  | Disconnect/reconnect in `repository_preparing`, `repository_ready`, `start_sent`, `running` follows §12 | integration/E2E |
-| AC-27B | `runner.snapshot` and `register()` reconcile do not fail pre-start executions                           | integration     |
-| AC-28  | Runner reports absent after `start_sent` → 30 s grace → `RUNNER_START_UNCONFIRMED`, no restart          | integration     |
-| AC-29  | Pre-start context TTL expires after 10 minutes; later start is rejected                                 | Runner unit     |
-| AC-30  | No double CLI spawn across duplicate start/accepted                                                     | Runner unit     |
-| AC-31  | API restart does not leave stuck preparing states or false `RUNNER_RESTARTED`                           | integration/E2E |
+| ID     | Criterion                                                                                                                                                                     | Test            |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| AC-22  | `execution.repository` retry reuses the same messageId and byte-identical payload                                                                                             | API integration |
+| AC-23  | Runner returns the same `contextId` for duplicate repository messages                                                                                                         | Runner unit     |
+| AC-24  | Different bindingVersion/path for the same executionId → `REPOSITORY_CONTEXT_CONFLICT`                                                                                        | Runner unit     |
+| AC-25  | Duplicate `execution.accepted` only transitions `start_sent → running` once                                                                                                   | API integration |
+| AC-26  | ACK loss → retry → exactly one `repository_ready` transition                                                                                                                  | API integration |
+| AC-27  | Disconnect/reconnect in `repository_preparing`, `repository_ready`, `start_sent`, `running` follows §12                                                                       | integration/E2E |
+| AC-27B | `runner.snapshot` and `register()` reconcile do not fail pre-start executions                                                                                                 | integration     |
+| AC-27C | A replacement Runner registering for the same Computer cannot resume pre-start rows validated by the old Runner; they fail with `PROJECT_BINDING_NOT_READY` until revalidated | integration     |
+| AC-27D | A ready binding with a missing default branch recovers as `REPO_DEFAULT_BRANCH_NOT_FOUND`, never as a validation failure                                                      | integration/E2E |
+| AC-28  | Runner reports absent after `start_sent` → 30 s grace → `RUNNER_START_UNCONFIRMED`, no restart                                                                                | integration     |
+| AC-29  | Pre-start context TTL expires after 10 minutes; later start is rejected                                                                                                       | Runner unit     |
+| AC-30  | No double CLI spawn across duplicate start/accepted                                                                                                                           | Runner unit     |
+| AC-31  | API restart does not leave stuck preparing states or false `RUNNER_RESTARTED`                                                                                                 | integration/E2E |
 
 ### 18.4 Isolation, compatibility, migration, UI
 
-| ID    | Criterion                                                                                   | Test                                                        |
-| ----- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| AC-32 | Main checkout HEAD unchanged after a Fake Runner execution                                  | E2E                                                         |
-| AC-33 | No `HAFT_RUNNER_PROJECTS` or cwd fallback in the execution path                             | `rg` + config unit test                                     |
-| AC-34 | Old Runner connects, mock works, real execution 409                                         | integration                                                 |
-| AC-35 | New API + old Runner does not send repository messages; new Runner + new API succeeds       | integration                                                 |
-| AC-36 | Migration works on an empty DB and an existing DB; backfill sets terminal/running correctly | migration test/manual SQL verification with recorded output |
-| AC-37 | `execution.start` v1 contract still rejects unknown repository fields                       | existing contracts test                                     |
-| AC-38 | UI shows validation status/canonical/policy/error and execution repository/dispatch state   | web/E2E                                                     |
-| AC-39 | Windows path matrix passes on `windows-latest`                                              | CI unit                                                     |
-| AC-40 | Linux path matrix passes on `ubuntu-latest`                                                 | CI unit                                                     |
+| ID     | Criterion                                                                                                                                                                                | Test                                                                           |
+| ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| AC-32  | Main checkout HEAD unchanged after a Fake Runner execution                                                                                                                               | E2E                                                                            |
+| AC-33  | No `HAFT_RUNNER_PROJECTS` or cwd fallback in the execution path                                                                                                                          | `rg` + config unit test                                                        |
+| AC-33B | No live `allowDevicePaths` / `HAFT_RUNNER_ALLOW_DEVICE_PATHS` / `--allow-device-paths` surface in code, tests or config; mentions are limited to prohibition statements in planning docs | `rg` evidence (scoped to `apps`, `packages`, `tests`, `playwright*.config.ts`) |
+| AC-33C | `defaultBranch` existence is checked only in `execution.repository`/context preparation; validation code has no branch check                                                             | `rg` + integration branch-separation test                                      |
+| AC-34  | Old Runner connects, mock works, real execution 409                                                                                                                                      | integration                                                                    |
+| AC-35  | New API + old Runner does not send repository messages; new Runner + new API succeeds                                                                                                    | integration                                                                    |
+| AC-36  | Migration works on an empty DB and an existing DB; backfill sets terminal/running correctly                                                                                              | migration test/manual SQL verification with recorded output                    |
+| AC-37  | `execution.start` v1 contract still rejects unknown repository fields                                                                                                                    | existing contracts test                                                        |
+| AC-38  | UI shows validation status/canonical/policy/error and execution repository/dispatch state                                                                                                | web/E2E                                                                        |
+| AC-39  | Windows path matrix passes on `windows-latest`                                                                                                                                           | CI unit                                                                        |
+| AC-40  | Linux path matrix passes on `ubuntu-latest`                                                                                                                                              | CI unit                                                                        |
 
 ### 18.5 The core invariant test (must be obvious in the PR)
 
@@ -2372,12 +2510,13 @@ it('never sends execution.start without a valid execution.repository.accepted', 
 It must:
 
 1. Register a Runner with the required features.
-2. Create a ready binding through the validation route.
+2. Create a ready binding through the validation route; assert `validatedByRunnerId` equals that Runner and `platform` matches.
 3. Start a task.
 4. Capture every outbound server message.
 5. Assert that the index of `execution.start` is greater than the index of `execution.repository.accepted`.
 6. Assert that no `execution.start` appears when the repository is rejected/timeout/mismatched.
 7. Assert that the Runner's `spawnProcess`/CLI start count is 0 before accepted.
+8. Assert that replacing the Runner or changing the platform causes `PROJECT_BINDING_NOT_READY` and no `execution.start`.
 
 This test is the primary evidence for the roadmap’s acceptance criterion “未收到有效 `execution.repository.accepted` 时绝不发送 `execution.start`”.
 
@@ -2391,13 +2530,13 @@ Each risk is analyzed with: trigger, existing protection, missing protection, pr
 
 #### R1 — TOCTOU between validation and worktree creation
 
-| Field               | Detail                                                                                                                                                                                                                                             |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Trigger             | The path is valid during `repository.validate`/`execution.repository`, then a local process replaces a directory or symlink before `git worktree add`.                                                                                             |
-| Existing protection | `GitWorktreeManager.prepare` checks existence, Git root, HEAD, branch, and worktree-root containment at execution time.                                                                                                                            |
-| Missing protection  | No allowed-root/realpath re-check immediately before `git worktree add`; validation and execution use separate moments.                                                                                                                            |
-| Proposed solution   | Re-run `policy.assertStillAllowed(canonicalPath)` and branch existence immediately before `git worktree add`; fail closed with `REPO_PATH_OUTSIDE_ALLOWED_ROOTS`/`REPO_PATH_INVALID`. Document the residual race; do not claim OS-level isolation. |
-| Test method         | Unit test with a policy mock that changes its answer between context preparation and worktree preparation; assert no `git worktree add` and a concrete failure.                                                                                    |
+| Field               | Detail                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Trigger             | The path is valid during `repository.validate`/`execution.repository`, then a local process replaces a directory or symlink before `git worktree add`.                                                                                                                                                                                                                                |
+| Existing protection | `GitWorktreeManager.prepare` checks existence, Git root, HEAD, branch, and worktree-root containment at execution time.                                                                                                                                                                                                                                                               |
+| Missing protection  | No allowed-root/realpath/bidirectional-isolation re-check immediately before `git worktree add`; validation and execution use separate moments.                                                                                                                                                                                                                                       |
+| Proposed solution   | Re-run `policy.assertStillAllowed(canonicalPath)` (including both containment directions) immediately before `git worktree add`; fail closed with `REPO_PATH_OUTSIDE_ALLOWED_ROOTS`/`REPO_PATH_INVALID`/`REPO_PATH_NESTED_IN_WORKTREE_ROOT`. Do **not** re-run the branch check here; the handshake already verified it. Document the residual race; do not claim OS-level isolation. |
+| Test method         | Unit test with a policy mock that changes its answer between context preparation and worktree preparation; assert no `git worktree add` and a concrete failure.                                                                                                                                                                                                                       |
 
 #### R2 — Windows case/drive normalization mismatch
 
@@ -2405,19 +2544,19 @@ Each risk is analyzed with: trigger, existing protection, missing protection, pr
 | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Trigger             | API and Runner disagree on `C:\Repo` vs `c:\repo`; `startsWith` or exact string comparison produces false mismatch or false containment.                                |
 | Existing protection | `comparablePath` in `git-worktree.ts` normalizes some paths for the Git-root check.                                                                                     |
-| Missing protection  | No shared platform-aware comparator for allowed roots, ACK canonicalPath, or worktree/recovery exclusion.                                                               |
+| Missing protection  | No shared platform-aware comparator for allowed roots, ACK canonicalPath, or bidirectional worktree/recovery/repository isolation.                                      |
 | Proposed solution   | Centralize a `compareRepositoryPath(a, b, platform)` using `path.relative` + case folding on `win32`; never use string prefixes; store canonical path with actual case. |
 | Test method         | Windows unit tests for case-only differences, trailing separators, `/` vs `\`, drive-relative `C:repo`, and sibling roots (`C:\repo-evil`).                             |
 
 #### R3 — UNC and device path handling
 
-| Field               | Detail                                                                                                                                                                          |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Trigger             | A binding path uses `\\server\share` or `\\?\C:\...`; realpath/containment behaves unexpectedly.                                                                                |
-| Existing protection | `repositoryPathSchema` rejects NUL/length only; Git may accept UNC.                                                                                                             |
-| Missing protection  | No explicit UNC/device rejection or opt-in; no policy version sensitivity.                                                                                                      |
-| Proposed solution   | Reject UNC unless `allowUnc=true`; reject `\\?\`/`\\.\` unless `allowDevicePaths=true`; include both flags in `policyVersion`; still enforce containment after prefix handling. |
-| Test method         | Windows-only policy tests for UNC default reject, allowed UNC, device default reject, allowed device path with containment.                                                     |
+| Field               | Detail                                                                                                                                                                                                                                                                             |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Trigger             | A binding path uses `\\server\share`, `\\?\C:\...`, `\\.\PhysicalDrive...`, or another Windows device namespace; realpath/containment behaves unexpectedly.                                                                                                                        |
+| Existing protection | `repositoryPathSchema` rejects NUL/length only; Git may accept UNC.                                                                                                                                                                                                                |
+| Missing protection  | No explicit device-path rejection; no policy version sensitivity for UNC.                                                                                                                                                                                                          |
+| Proposed solution   | **Always** reject `\\?\` and `\\.\` (including `\\?\UNC\...`) with `REPO_PATH_INVALID`; there is no flag, no prefix stripping and no containment fallback. Reject UNC unless `allowUnc=true`; include `allowUnc`, allowed roots, worktreeRoot and recoveryRoot in `policyVersion`. |
+| Test method         | Windows-only policy tests: device forms always reject; UNC default reject; allowed UNC succeeds; no test expects a device path to be accepted.                                                                                                                                     |
 
 #### R4 — Symlink/junction escape from allowed roots
 
@@ -2439,35 +2578,35 @@ Each risk is analyzed with: trigger, existing protection, missing protection, pr
 | Proposed solution   | Add all four checks with the precedence in §9.4; return `REPO_BARE_UNSUPPORTED` / `REPO_PATH_IS_WORKTREE`.                              |
 | Test method         | Git fixtures: bare repo, linked worktree, submodule; assert exact codes; a normal repo succeeds.                                        |
 
-#### R6 — Repository nested inside worktree/recovery root
+#### R6 — Worktree/recovery/repository overlap (both directions)
 
-| Field               | Detail                                                                                                                                                       |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Trigger             | The allowed root contains `worktreeRoot` or `recoveryRoot`, and a binding points inside one of them; execution could create a worktree inside a worktree.    |
-| Existing protection | `GitWorktreeManager` checks the new worktree path is inside `worktreeRoot`, but not that the project path is outside it.                                     |
-| Missing protection  | No target-vs-worktree/recovery-root exclusion.                                                                                                               |
-| Proposed solution   | Reject target paths equal to or nested inside `worktreeRoot`/`recoveryRoot` with `REPO_PATH_NESTED_IN_WORKTREE_ROOT`; include both roots in `policyVersion`. |
-| Test method         | Policy tests for equality and nesting in both roots; assert exact code; a sibling path succeeds.                                                             |
+| Field               | Detail                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Trigger             | Any overlap: a binding points inside `worktreeRoot`/`recoveryRoot`; `worktreeRoot`/`recoveryRoot` is inside the repository; the repository is inside either root; or `worktreeRoot` and `recoveryRoot` overlap each other.                                                                                                                                                                                                                                                              |
+| Existing protection | `GitWorktreeManager` checks the new worktree path is inside `worktreeRoot`, but not that the project path is outside it, and not the reverse direction.                                                                                                                                                                                                                                                                                                                                 |
+| Missing protection  | No bidirectional repository/root check and no worktreeRoot/recoveryRoot disjointness check.                                                                                                                                                                                                                                                                                                                                                                                             |
+| Proposed solution   | At policy construction, reject overlapping `worktreeRoot`/`recoveryRoot` with `REPOSITORY_POLICY_NOT_CONFIGURED`. At validation/context preparation, reject every repository/root overlap in both directions with `REPO_PATH_NESTED_IN_WORKTREE_ROOT`. Use `realpath` + `path.relative`, including the longest existing prefix for roots that do not exist yet. This guarantees the main repository cannot become the execution cwd and the recovery journal cannot be written into it. |
+| Test method         | Policy tests for all four overlap directions, root/root overlap, equality, and a disjoint three-root success case on Windows and Linux.                                                                                                                                                                                                                                                                                                                                                 |
 
 #### R7 — Missing default branch or empty repository
 
-| Field               | Detail                                                                                                                                                                              |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Trigger             | Project `defaultBranch` does not exist, or the repo has no commits/unborn HEAD.                                                                                                     |
-| Existing protection | Contract validates branch syntax; `GitWorktreeManager` checks HEAD and branch existence at execution time.                                                                          |
-| Missing protection  | Validation does not check branch existence; a binding can become `ready` with a bad branch.                                                                                         |
-| Proposed solution   | During validation and context preparation, `git rev-parse --verify refs/heads/<branch>^{commit}`; return `REPO_DEFAULT_BRANCH_NOT_FOUND`. Empty/no HEAD → `REPO_VALIDATION_FAILED`. |
-| Test method         | Git fixture with `main` vs a project default `release/missing`; empty repo fixture; assert exact codes and no ready status.                                                         |
+| Field               | Detail                                                                                                                                                                                                                                                                                                                                           |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Trigger             | Project `defaultBranch` does not exist, or the repo has no commits/unborn HEAD.                                                                                                                                                                                                                                                                  |
+| Existing protection | Contract validates branch syntax; the Runner context manager can check branch existence during execution preparation.                                                                                                                                                                                                                            |
+| Missing protection  | `repository.validate` has no `defaultBranch` field and cannot check branch existence; a binding can legitimately be `ready` with a bad branch until the handshake.                                                                                                                                                                               |
+| Proposed solution   | Check `defaultBranch` **only** in the `execution.repository` handshake/context preparation: `git check-ref-format --branch`, then `git rev-parse --verify --quiet refs/heads/<branch>`; return `REPO_DEFAULT_BRANCH_NOT_FOUND` before accepted. Do not add a branch check to validation. Empty/no HEAD at validation → `REPO_VALIDATION_FAILED`. |
+| Test method         | Git fixture where validation succeeds but the project default `release/missing` does not exist; assert validation `ok=true`, handshake `REPO_DEFAULT_BRANCH_NOT_FOUND`, no `execution.start`, no CLI. Empty repo fixture fails validation with `REPO_VALIDATION_FAILED`.                                                                         |
 
-#### R8 — Stale binding version / concurrent path edit
+#### R8 — Stale binding version, concurrent path edit, or Runner replacement
 
-| Field               | Detail                                                                                                                                                            |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Trigger             | A user edits/deletes a binding while validation or handshake is in flight.                                                                                        |
-| Existing protection | P2-01 increments `bindingVersion` and clears validation metadata on path change; the Execution snapshots the version.                                             |
-| Missing protection  | Validation/handshake do not consistently re-read and compare the version; stale results can overwrite.                                                            |
-| Proposed solution   | Conditional DB updates with `bindingVersion` + `validationRequestId`; pre-start re-read; fail with `BINDING_VERSION_STALE`/`REPOSITORY_BINDING_CHANGED`; cancel.  |
-| Test method         | Integration test edits the binding after sending `execution.repository`/`repository.validate`; assert stale result is discarded and execution fails before start. |
+| Field               | Detail                                                                                                                                                                                                                                                                                                            |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Trigger             | A user edits/deletes a binding while validation or handshake is in flight; or the Runner row that validated the binding is deleted/replaced, or a new Runner registers for the same Computer.                                                                                                                     |
+| Existing protection | P2-01 increments `bindingVersion` and clears validation metadata on path change; the Execution snapshots the version.                                                                                                                                                                                             |
+| Missing protection  | Validation/handshake do not consistently re-read and compare the version or the validator identity/platform; stale results can overwrite; a replacement Runner could inherit a `ready` binding it never validated.                                                                                                |
+| Proposed solution   | Conditional DB updates with `bindingVersion` + `validationRequestId`; pre-start re-read; fail with `BINDING_VERSION_STALE`/`REPOSITORY_BINDING_CHANGED`; cancel. Mandatory identity/platform checks at both the API precheck and the post-accepted transactional re-check, returning `PROJECT_BINDING_NOT_READY`. |
+| Test method         | Integration test edits the binding after sending `execution.repository`/`repository.validate`; assert stale result is discarded and execution fails before start. Replacement scenario A–E (§14.7) asserts reject-until-revalidated.                                                                              |
 
 #### R9 — Stale/out-of-order validation response
 
@@ -2551,24 +2690,24 @@ Each risk is analyzed with: trigger, existing protection, missing protection, pr
 
 ### 19.2 Open questions and recommended decisions
 
-| #   | Question                                                                                | Recommended decision                                                                                                                                                                                                | Owner / when                                                                                                                                                             |
-| --- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---- |
-| Q1  | Should a validation failure return HTTP 200 or 422?                                     | **200** with `status='missing'                                                                                                                                                                                      | 'error'`, `errorCode`, `message`. The validation ran successfully; the repository failed. This keeps UI error handling simple and matches the roadmap's 200/201 wording. | WP-A |
-| Q2  | Is `RepositoryHandshakeEvent` required?                                                 | **Recommended** for supportability. If omitted, structured logs must be equivalent and included in CI artifacts.                                                                                                    | WP-D                                                                                                                                                                     |
-| Q3  | How to report a CLI capability race in `execution.start.rejected` when no P2 code fits? | Use `REPOSITORY_CONTEXT_NOT_READY` + message prefix `CLI_NOT_INSTALLED:`/`CLI_NOT_AUTHENTICATED:`. Do not add a new code in P2-02.                                                                                  | WP-C                                                                                                                                                                     |
-| Q4  | Should `ready` with `validatedByRunnerId = null` (runner deleted) be executable?        | **No.** Treat as not executable and require revalidation. Add this to the execution precheck.                                                                                                                       | WP-C                                                                                                                                                                     |
-| Q5  | Multi-API-instance support?                                                             | Out of scope for the SQLite single-instance demo. DB conditional updates prevent double transitions, but in-memory pending maps/timers and `startForTask` lock are not distributed. Document as a Phase 3+ concern. | Architecture                                                                                                                                                             |
-| Q6  | Is displaying `repositoryPath` in the UI acceptable?                                    | Yes for P2-02; P2-03 authentication must protect it. Do not log it at info level or send it to analytics.                                                                                                           | WP-E                                                                                                                                                                     |
-| Q7  | `repositoryPreparedAt`: Runner `acceptedAt` or API receipt time?                        | **API receipt time** to avoid clock skew; log `acceptedAt` separately for diagnostics.                                                                                                                              | WP-C                                                                                                                                                                     |
-| Q8  | Should validation `headCommit` be persisted?                                            | It is not necessary for execution (the context re-reads HEAD), but it is useful for audit. Persist it in the optional handshake/validation audit table, not as a new Binding column.                                | WP-A/D                                                                                                                                                                   |
-| Q9  | Should Runner capabilities include `policyVersion` for a proactive API check?           | Not in the frozen schema. The handshake detects policy changes. Do not add a capability field in P2-02.                                                                                                             | WP-B/C                                                                                                                                                                   |
-| Q10 | What is the exact rollback order?                                                       | Runner → old Runner config, then API → old API. Prefer Runner first; an accidental API-first rollback is fail-closed (`projectIds=[]` blocks real starts) but non-functional. See §20.                              | Release                                                                                                                                                                  |
+| #   | Question                                                                                                                                         | Recommended decision                                                                                                                                                                                                                                                | Owner / when |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| Q1  | Should a validation failure return HTTP 200 or 422?                                                                                              | **200** with `status='missing'` or `'error'`, plus `errorCode` and `message`. The validation ran successfully; the repository failed. This keeps UI error handling simple and matches the roadmap's 200/201 wording.                                                | WP-A         |
+| Q2  | Is `RepositoryHandshakeEvent` required?                                                                                                          | **Recommended** for supportability. If omitted, structured logs must be equivalent and included in CI artifacts.                                                                                                                                                    | WP-D         |
+| Q3  | How to report a CLI capability race in `execution.start.rejected` when no P2 code fits?                                                          | Use `REPOSITORY_CONTEXT_NOT_READY` + message prefix `CLI_NOT_INSTALLED:`/`CLI_NOT_AUTHENTICATED:`. Do not add a new code in P2-02.                                                                                                                                  | WP-C         |
+| Q4  | Should `ready` be executable when `validatedByRunnerId` is null, points to a deleted Runner, or `binding.platform` differs from the live Runner? | **No — mandatory, not a recommendation.** Require `validatedByRunnerId === selectedRunner.id` and `binding.platform === selectedRunner.platform` at both the API precheck and the post-accepted re-check; otherwise `409 PROJECT_BINDING_NOT_READY` and revalidate. | WP-C         |
+| Q5  | Multi-API-instance support?                                                                                                                      | Out of scope for the SQLite single-instance demo. DB conditional updates prevent double transitions, but in-memory pending maps/timers and `startForTask` lock are not distributed. Document as a Phase 3+ concern.                                                 | Architecture |
+| Q6  | Is displaying `repositoryPath` in the UI acceptable?                                                                                             | Yes for P2-02; P2-03 authentication must protect it. Do not log it at info level or send it to analytics.                                                                                                                                                           | WP-E         |
+| Q7  | `repositoryPreparedAt`: Runner `acceptedAt` or API receipt time?                                                                                 | **API receipt time** to avoid clock skew; log `acceptedAt` separately for diagnostics.                                                                                                                                                                              | WP-C         |
+| Q8  | Should validation `headCommit` be persisted?                                                                                                     | It is not necessary for execution (the context re-reads HEAD), but it is useful for audit. Persist it in the optional handshake/validation audit table, not as a new Binding column.                                                                                | WP-A/D       |
+| Q9  | Should Runner capabilities include `policyVersion` for a proactive API check?                                                                    | Not in the frozen schema. The handshake detects policy changes. Do not add a capability field in P2-02.                                                                                                                                                             | WP-B/C       |
+| Q10 | What is the exact rollback order?                                                                                                                | Runner → old Runner config, then API → old API. Prefer Runner first; an accidental API-first rollback is fail-closed (`projectIds=[]` blocks real starts) but non-functional. See §20.                                                                              | Release      |
 
 ### 19.3 Top three technical risks
 
-1. **Windows path policy correctness (R2/R3/R4).** A single normalization bug can either reject legitimate paths or allow an escape. Mitigation: one policy module, one comparator, a full Windows/Linux matrix, junction tests, and no string-prefix checks.
+1. **Windows path policy and root isolation correctness (R2/R3/R4/R6).** A single normalization bug can either reject legitimate paths or allow an escape; a one-direction containment check can put worktrees or recovery journals inside the user's repository. Mitigation: one policy module, one bidirectional comparator, realpath + longest-existing-prefix canonicalization, a full Windows/Linux matrix, junction tests, and no string-prefix checks.
 2. **Handshake idempotency and recovery (R10/R11/R14).** The inbound dedupe, in-memory pending maps, reconnect snapshots and API restarts interact in non-obvious ways. Mitigation: payload-key idempotency, response replay with new envelope IDs, DB conditional transitions, state-filtered snapshots, and explicit recovery tests for every state.
-3. **Stale binding/policy during handshake (R8/R12/R13/R15).** The window between validation, context preparation and start is where correctness is most likely to rot. Mitigation: re-read the Binding before start, compare policyVersion, fail closed, and prove with race tests plus old-Runner compatibility tests.
+3. **Stale binding/policy/validator during handshake (R8/R12/R13/R15).** The window between validation, context preparation and start is where correctness is most likely to rot, including a replacement Runner inheriting a ready binding. Mitigation: re-read the Binding and live Runner before start, compare `validatedByRunnerId`/`platform`/`policyVersion`, fail closed, and prove with race tests plus old-Runner compatibility tests.
 
 ---
 
@@ -2594,8 +2733,9 @@ Each risk is analyzed with: trigger, existing protection, missing protection, pr
    - no pending execution is stuck in `repository_preparing`.
 4. Deploy the new Runner with:
    - `HAFT_RUNNER_ALLOWED_ROOTS` configured;
-   - `HAFT_RUNNER_WORKTREE_ROOT`/`RECOVERY_ROOT` configured;
-   - `HAFT_RUNNER_PROJECTS` removed (or left in the environment but ignored; log the warning).
+   - `HAFT_RUNNER_WORKTREE_ROOT`/`RECOVERY_ROOT` configured as mutually disjoint directories outside every repository;
+   - `HAFT_RUNNER_PROJECTS` removed (or left in the environment but ignored; log the warning);
+   - no device-path allow flag (it does not exist).
 5. Validate a disposable binding; start a disposable execution; verify the handshake order.
 6. Only then enable real execution for users.
 
@@ -2642,8 +2782,12 @@ P2-02 is done only when all of the following are true.
 - [ ] A real Runner can validate a binding through `POST /api/projects/:id/bindings/:bindingId/validate`.
 - [ ] Only a matching successful `repository.validation` can write `status='ready'`.
 - [ ] Validation failure writes `missing` or `error` with the exact code/message; timeout does not change the binding status.
-- [ ] A real execution requires a ready binding, matching `bindingVersion`, non-null `canonicalPath`, non-null `policyVersion`, and a Runner with the required live features.
+- [ ] Validation is path-only: it never reads/checks `Project.defaultBranch` and never returns `REPO_DEFAULT_BRANCH_NOT_FOUND`.
+- [ ] Windows device paths (`\\?\`, `\\.\`, including `\\?\UNC\...`) always return `REPO_PATH_INVALID`; no allow flag/env var exists.
+- [ ] A real execution requires a ready binding, matching `bindingVersion`, non-null `canonicalPath`, non-null `policyVersion`, non-null `platform`, non-null `validatedByRunnerId`, matching Runner identity, matching platform, and the required live features.
+- [ ] A binding validated by a different or replacement Runner is rejected with `409 PROJECT_BINDING_NOT_READY` at both execution gates until revalidated.
 - [ ] An old Runner can connect but real execution returns `409 PROJECT_BINDING_UNSUPPORTED` before an Execution is created.
+- [ ] A missing `Project.defaultBranch` is rejected by the `execution.repository` handshake with `REPO_DEFAULT_BRANCH_NOT_FOUND` before `execution.start` and before any CLI spawn.
 - [ ] The success order is `execution.repository` → accepted → `execution.start` → accepted.
 - [ ] **No `execution.start` is sent without a valid accepted.**
 - [ ] **No CLI process is spawned before accepted.**
@@ -2651,6 +2795,7 @@ P2-02 is done only when all of the following are true.
 - [ ] Binding/policy changes during preparation fail closed.
 - [ ] Once `execution.start` is sent, later binding edits do not change the current execution.
 - [ ] The main checkout and user working tree are never modified; the CLI runs in an isolated worktree.
+- [ ] `worktreeRoot`, `recoveryRoot` and the repository are mutually disjoint in both directions; a worktree is never created inside the repository and a recovery journal is never written into it.
 - [ ] `HAFT_RUNNER_PROJECTS`, `--project`, `INIT_CWD` and `process.cwd()` are not repository-selection mechanisms.
 - [ ] Mock executions still work without a binding or Runner.
 
@@ -2667,11 +2812,11 @@ P2-02 is done only when all of the following are true.
 ### 21.3 Tests
 
 - [ ] Contracts tests pass, including v1 strictness and feature parsing.
-- [ ] Runner policy tests pass on Windows and Linux (CI matrix).
-- [ ] Runner context/idempotency/TTL tests pass.
-- [ ] API validation integration tests pass (success/failure/stale/timeout/offline/feature).
-- [ ] API handshake integration tests pass (order, no-start-without-accepted, mismatch, binding/policy change, start.rejected, duplicates, recovery).
-- [ ] Fake Runner E2E passes (validate → start → complete; failure; reconnect).
+- [ ] Runner policy tests pass on Windows and Linux (CI matrix), including unconditional device-path rejection and all four bidirectional isolation directions.
+- [ ] Runner context/idempotency/TTL tests pass, including defaultBranch existence checked only at context preparation.
+- [ ] API validation integration tests pass (success/failure/stale/timeout/offline/feature, plus the branch-separation case).
+- [ ] API handshake integration tests pass (order, no-start-without-accepted, mismatch, binding/policy change, start.rejected, duplicates, recovery, missing default branch, Runner replacement, platform mismatch).
+- [ ] Fake Runner E2E passes (validate → start → complete; failure; reconnect; replacement-gated start).
 - [ ] Real CLI E2E is either green or recorded as `NOT_VERIFIED` with a concrete reason (CLI/auth unavailable), not silently skipped.
 - [ ] The core invariant test named `never sends execution.start without a valid execution.repository.accepted` exists and passes.
 - [ ] Main checkout HEAD unchanged E2E passes.
@@ -2681,6 +2826,7 @@ P2-02 is done only when all of the following are true.
 ### 21.4 UI
 
 - [ ] Project binding row has Validate/Revalidate, canonical path, platform, policy, last validated, and actionable errors.
+- [ ] A `ready` binding validated by another Runner/platform is shown with a Revalidate action, not as executable.
 - [ ] Execution detail shows repository path/branch/binding version/policy/context/base commit/prepared time and `dispatchState`.
 - [ ] Failure reasons are visible with actionable `PROJECT_BINDING_*` / `REPO_*` copy.
 - [ ] Buttons are disabled when the runner is offline/unsupported; no “force ready” path.
@@ -2690,8 +2836,8 @@ P2-02 is done only when all of the following are true.
 
 - [ ] This plan is updated if implementation decisions diverge.
 - [ ] `docs/api.md` documents the validation endpoint and the new Execution DTO fields.
-- [ ] `docs/runner-protocol.md` documents the P2-02 messages, feature advertisement, and replay/messageId rules.
-- [ ] `docs/runner-setup.md` replaces `HAFT_RUNNER_PROJECTS` with `HAFT_RUNNER_ALLOWED_ROOTS`, explains the policy and migration, and documents the API-first deployment order.
+- [ ] `docs/runner-protocol.md` documents the P2-02 messages, feature advertisement, replay/messageId rules, the path-only validation semantics, and the handshake-only defaultBranch check.
+- [ ] `docs/runner-setup.md` replaces `HAFT_RUNNER_PROJECTS` with `HAFT_RUNNER_ALLOWED_ROOTS`, explains unconditional device-path rejection, bidirectional root isolation, the policy and migration, and the API-first deployment order.
 - [ ] `docs/data-model.md` documents the new Execution fields and the optional audit table.
 - [ ] `docs/execution-recovery.md` documents the dispatch-state recovery matrix.
 - [ ] `docs/testing.md` lists the new Windows/Linux and E2E tests.
@@ -2704,6 +2850,9 @@ P2-02 is done only when all of the following are true.
 - [ ] Message-order trace for a successful execution.
 - [ ] Failure trace for `execution.repository.rejected`, `execution.start.rejected`, timeout, binding change, policy change.
 - [ ] Windows and Linux unit test reports.
+- [ ] Evidence that device paths always return `REPO_PATH_INVALID` and no allow flag exists (`rg` output).
+- [ ] Evidence that `defaultBranch` is checked only in the handshake (`rg` + branch-separation test).
+- [ ] Runner replacement and platform mismatch test output (scenario A–E and §14.7).
 - [ ] Fake Runner E2E report.
 - [ ] Old Runner compatibility result.
 - [ ] Migration before/after row counts and `dispatchState` backfill evidence.
@@ -2726,7 +2875,7 @@ P2-02 is done only when all of the following are true.
 
 **Yes.** The contract layer is already frozen and complete; P2-01 already provides the Binding model and the execution snapshot fields. The remaining work is a bounded implementation of path policy, validation orchestration, handshake state, recovery and UI. No protocol redesign is required.
 
-The only genuinely hard parts are the Windows path policy, the handshake idempotency/recovery matrix, and stale binding/policy handling. They are addressed by WP-B, WP-C/WP-D and the risk register, respectively.
+The only genuinely hard parts are the Windows path policy and bidirectional root isolation, the handshake idempotency/recovery matrix, and stale binding/policy/validator handling. They are addressed by WP-B, WP-C/WP-D and the risk register, respectively.
 
 ### 22.2 Reusable protocols
 
@@ -2737,8 +2886,8 @@ Reuse without modification:
 - `execution.start` v1 — **no new fields**.
 - `execution.accepted` — same schema, tightened semantics.
 - `execution.cancel`, `execution.reconcile`, `runner.snapshot`.
-- `repository.validate` / `repository.validation`.
-- `execution.repository` / `execution.repository.accepted` / `execution.repository.rejected`.
+- `repository.validate` / `repository.validation` — path-only; the payload has no `defaultBranch`.
+- `execution.repository` / `execution.repository.accepted` / `execution.repository.rejected` — the handshake is the only stage that checks `defaultBranch` existence.
 - `execution.start.rejected`.
 - `runner.register.capabilities.features`.
 - `repositoryPathSchema`, `repositoryDefaultBranchSchema`.
@@ -2748,19 +2897,19 @@ Do **not** add: new messages, new payload fields, new feature names, new error c
 
 ### 22.3 Modules to modify
 
-| Module                               | Change                                                                                                                                               |
-| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/contracts`                 | Add `DISPATCH_STATES`, `ExecutionDto` fields, `RepositoryValidationResultDto`; no protocol schema changes                                            |
-| `apps/api/prisma`                    | Add six Execution columns, indexes, optional audit table, migration/backfill                                                                         |
-| `apps/api/src/modules/runners`       | Live feature cache, typed outbound helpers, validation service, handshake service, protocol event bus, recovery hooks                                |
-| `apps/api/src/modules/projects`      | Validate route/service, conditional binding updates                                                                                                  |
-| `apps/api/src/modules/executions`    | Stronger binding precheck, feature gate, `dispatchState`, concrete failure reasons, idempotent failure/terminal handling                             |
-| `apps/api/src/modules/runtime`       | Remove `projectIds` gate; route runner starts through the handshake service                                                                          |
-| `apps/api/src/common/serializers.ts` | Map the new Execution fields                                                                                                                         |
-| `apps/runner/src`                    | Config/allowed roots, `repository-policy.ts`, `repository-context.ts`, validation cache, handshake handling, remove early accepted, executor context |
-| `apps/web/src`                       | Validation panel, execution repository card, error copy, API client                                                                                  |
-| `tests/*`, `playwright*.config.ts`   | Real validation in fixtures, temp Git repo, Windows/Linux policy tests, recovery E2E                                                                 |
-| `docs/*`                             | Protocol, setup, data model, recovery, testing, P2-01 cross-link                                                                                     |
+| Module                               | Change                                                                                                                                                                                                                    |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/contracts`                 | Add `DISPATCH_STATES`, `ExecutionDto` fields, `RepositoryValidationResultDto`; no protocol schema changes                                                                                                                 |
+| `apps/api/prisma`                    | Add six Execution columns, indexes, optional audit table, migration/backfill                                                                                                                                              |
+| `apps/api/src/modules/runners`       | Live feature cache, typed outbound helpers, validation service, handshake service, protocol event bus, recovery hooks                                                                                                     |
+| `apps/api/src/modules/projects`      | Validate route/service, conditional binding updates                                                                                                                                                                       |
+| `apps/api/src/modules/executions`    | Stronger binding precheck (including validator identity/platform), feature gate, `dispatchState`, concrete failure reasons, idempotent failure/terminal handling                                                          |
+| `apps/api/src/modules/runtime`       | Remove `projectIds` gate; route runner starts through the handshake service                                                                                                                                               |
+| `apps/api/src/common/serializers.ts` | Map the new Execution fields                                                                                                                                                                                              |
+| `apps/runner/src`                    | Config/allowed roots, `repository-policy.ts` with bidirectional isolation, `repository-context.ts` with handshake-only defaultBranch check, validation cache, handshake handling, remove early accepted, executor context |
+| `apps/web/src`                       | Validation panel, execution repository card, error copy, API client                                                                                                                                                       |
+| `tests/*`, `playwright*.config.ts`   | Real validation in fixtures, temp Git repo, Windows/Linux policy tests, recovery E2E                                                                                                                                      |
+| `docs/*`                             | Protocol, setup, data model, recovery, testing, P2-01 cross-link                                                                                                                                                          |
 
 ### 22.4 DB fields to add
 
@@ -2830,17 +2979,19 @@ Do not start with the UI; it will encode assumptions that the handshake may inva
 
 ### 22.8 Top three technical risks
 
-1. **Windows path policy correctness (R2/R3/R4).**
+1. **Windows path policy and bidirectional root isolation (R2/R3/R4/R6).**
 2. **Handshake idempotency and reconnect/restart recovery (R10/R11/R14).**
-3. **Stale binding/policy handling and the old-Runner deployment window (R8/R12/R13/R15).**
+3. **Stale binding/policy/validator handling and the old-Runner deployment window (R8/R12/R13/R15).**
 
 ### 22.9 Final go/no-go
 
 **Go**, subject to the following gates:
 
-- WP-B policy tests green on Windows and Linux before WP-A acceptance.
+- WP-B policy tests green on Windows and Linux before WP-A acceptance, including unconditional device-path rejection and all four bidirectional isolation directions.
 - The core invariant test exists and fails if `execution.start` is sent without accepted.
 - The Runner never sends `execution.accepted` before context/policy/CLI/runtime/capacity admission.
+- `defaultBranch` is checked only by `execution.repository`/context preparation; validation remains path-only.
+- `validatedByRunnerId` and `platform` are enforced at both execution gates; a replacement Runner cannot inherit a ready binding.
 - The migration is proven additive on an existing DB.
 - The old Runner compatibility path is proven to return 409 before Execution creation.
 - The team accepts the documented residual TOCTOU and multi-instance limitations.
@@ -2861,74 +3012,74 @@ Do not start with the UI; it will encode assumptions that the handshake may inva
 
 ### A.2 API
 
-| File                                                                    | Change                                                                                                                              |
-| ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `apps/api/prisma/schema.prisma`                                         | Execution fields/indexes; optional audit model                                                                                      |
-| `apps/api/prisma/migrations/…_p2_02_repository_handshake/migration.sql` | Add columns/indexes/backfill                                                                                                        |
-| `apps/api/src/modules/runners/runner-registry.service.ts`               | Live features, typed sends, inbound branches, event bus, register/disconnect/snapshot hooks, remove `dispatchStart`/`pendingStarts` |
-| `apps/api/src/modules/runners/repository-validation.service.ts`         | New: validation orchestration, pending map, retry/timeout, conditional writes                                                       |
-| `apps/api/src/modules/runners/repository-handshake.service.ts`          | New: dispatch state machine, retries, ACK correlation, start gating, recovery                                                       |
-| `apps/api/src/modules/runners/repository-state.ts`                      | New: shared binding/state helpers                                                                                                   |
-| `apps/api/src/modules/runners/repository-errors.ts`                     | New: typed dispatch error                                                                                                           |
-| `apps/api/src/modules/runners/repository-audit.service.ts`              | Optional: audit table writer                                                                                                        |
-| `apps/api/src/modules/runners/runners.module.ts`                        | Register/export new providers                                                                                                       |
-| `apps/api/src/modules/projects/projects.controller.ts`                  | Add validate route                                                                                                                  |
-| `apps/api/src/modules/projects/projects.service.ts`                     | Delegate validation; keep CRUD semantics                                                                                            |
-| `apps/api/src/modules/projects/projects.module.ts`                      | Inject validation service if needed                                                                                                 |
-| `apps/api/src/modules/runtime/runner-runtime.service.ts`                | Delegate start to handshake service                                                                                                 |
-| `apps/api/src/modules/runtime/runtime-registry.service.ts`              | Remove `projectIds` gate; add feature reason                                                                                        |
-| `apps/api/src/modules/executions/executions.service.ts`                 | Stronger precheck, feature gate, `dispatchState`, concrete failure, idempotent terminal/failure                                     |
-| `apps/api/src/common/serializers.ts`                                    | Map new Execution fields                                                                                                            |
-| `apps/api/test/repository-validation.integration.spec.ts`               | New                                                                                                                                 |
-| `apps/api/test/runner.integration.spec.ts`                              | Rewrite success helper; add handshake/recovery tests                                                                                |
-| `apps/api/test/projects.integration.spec.ts`                            | Extend binding/validation tests                                                                                                     |
+| File                                                                    | Change                                                                                                                                     |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `apps/api/prisma/schema.prisma`                                         | Execution fields/indexes; optional audit model                                                                                             |
+| `apps/api/prisma/migrations/…_p2_02_repository_handshake/migration.sql` | Add columns/indexes/backfill                                                                                                               |
+| `apps/api/src/modules/runners/runner-registry.service.ts`               | Live features, typed sends, inbound branches, event bus, register/disconnect/snapshot hooks, remove `dispatchStart`/`pendingStarts`        |
+| `apps/api/src/modules/runners/repository-validation.service.ts`         | New: validation orchestration, pending map, retry/timeout, conditional writes                                                              |
+| `apps/api/src/modules/runners/repository-handshake.service.ts`          | New: dispatch state machine, retries, ACK correlation, transactional binding/runner identity re-check, start gating, recovery              |
+| `apps/api/src/modules/runners/repository-state.ts`                      | New: shared binding/state helpers                                                                                                          |
+| `apps/api/src/modules/runners/repository-errors.ts`                     | New: typed dispatch error                                                                                                                  |
+| `apps/api/src/modules/runners/repository-audit.service.ts`              | Optional: audit table writer                                                                                                               |
+| `apps/api/src/modules/runners/runners.module.ts`                        | Register/export new providers                                                                                                              |
+| `apps/api/src/modules/projects/projects.controller.ts`                  | Add validate route                                                                                                                         |
+| `apps/api/src/modules/projects/projects.service.ts`                     | Delegate validation; keep CRUD semantics                                                                                                   |
+| `apps/api/src/modules/projects/projects.module.ts`                      | Inject validation service if needed                                                                                                        |
+| `apps/api/src/modules/runtime/runner-runtime.service.ts`                | Delegate start to handshake service                                                                                                        |
+| `apps/api/src/modules/runtime/runtime-registry.service.ts`              | Remove `projectIds` gate; add feature reason                                                                                               |
+| `apps/api/src/modules/executions/executions.service.ts`                 | Stronger precheck (including `validatedByRunnerId`/platform), feature gate, `dispatchState`, concrete failure, idempotent terminal/failure |
+| `apps/api/src/common/serializers.ts`                                    | Map new Execution fields                                                                                                                   |
+| `apps/api/test/repository-validation.integration.spec.ts`               | New                                                                                                                                        |
+| `apps/api/test/runner.integration.spec.ts`                              | Rewrite success helper; add handshake/recovery, missing-default-branch, Runner-replacement and platform-mismatch tests                     |
+| `apps/api/test/projects.integration.spec.ts`                            | Extend binding/validation tests                                                                                                            |
 
 ### A.3 Runner
 
-| File                                             | Change                                                                                          |
-| ------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
-| `apps/runner/src/config.ts`                      | Allowed roots/UNC/device flags; remove project map/cwd fallback                                 |
-| `apps/runner/src/main.ts`                        | Log allowed roots/policyVersion; remove projectIds log                                          |
-| `apps/runner/src/repository-policy.ts`           | New                                                                                             |
-| `apps/runner/src/repository-context.ts`          | New                                                                                             |
-| `apps/runner/src/repository-validation-cache.ts` | New                                                                                             |
-| `apps/runner/src/runner-client.ts`               | Handle validation/repository/start; remove early accepted; advertise features; release contexts |
-| `apps/runner/src/executor.ts`                    | `start(payload, context)` signature                                                             |
-| `apps/runner/src/real-executor.ts`               | Use context canonical path; re-check policy before worktree add; remove `projectPaths`          |
-| `apps/runner/src/fake-executor.ts`               | Use context; remain synthetic; no main-checkout writes                                          |
-| `apps/runner/src/git-worktree.ts`                | Optional policy hook; keep containment                                                          |
-| `apps/runner/test/repository-policy.spec.ts`     | New                                                                                             |
-| `apps/runner/test/repository-context.spec.ts`    | New                                                                                             |
-| `apps/runner/test/repository-validation.spec.ts` | New                                                                                             |
-| `apps/runner/test/config.spec.ts`                | Update                                                                                          |
-| `apps/runner/test/real-executor.spec.ts`         | Update context path/spawn assertions                                                            |
-| `apps/runner/test/git-worktree.spec.ts`          | Extend pre-worktree re-check                                                                    |
+| File                                             | Change                                                                                                                 |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| `apps/runner/src/config.ts`                      | Allowed roots/UNC flags; unconditional device-path rejection; remove project map/cwd fallback                          |
+| `apps/runner/src/main.ts`                        | Log allowed roots/policyVersion; remove projectIds log                                                                 |
+| `apps/runner/src/repository-policy.ts`           | New: path policy, unconditional device rejection, bidirectional root isolation                                         |
+| `apps/runner/src/repository-context.ts`          | New: context lifecycle; handshake-only defaultBranch existence check                                                   |
+| `apps/runner/src/repository-validation-cache.ts` | New                                                                                                                    |
+| `apps/runner/src/runner-client.ts`               | Handle validation/repository/start; remove early accepted; advertise features; release contexts                        |
+| `apps/runner/src/executor.ts`                    | `start(payload, context)` signature                                                                                    |
+| `apps/runner/src/real-executor.ts`               | Use context canonical path; re-check policy and both containment directions before worktree add; remove `projectPaths` |
+| `apps/runner/src/fake-executor.ts`               | Use context; remain synthetic; no main-checkout writes                                                                 |
+| `apps/runner/src/git-worktree.ts`                | Policy hook; enforce worktree path under `worktreeRoot` and outside repository                                         |
+| `apps/runner/test/repository-policy.spec.ts`     | New: device paths, all overlap directions, policyVersion, Git shape                                                    |
+| `apps/runner/test/repository-context.spec.ts`    | New: idempotency/TTL; defaultBranch check at prepare only                                                              |
+| `apps/runner/test/repository-validation.spec.ts` | New                                                                                                                    |
+| `apps/runner/test/config.spec.ts`                | Update                                                                                                                 |
+| `apps/runner/test/real-executor.spec.ts`         | Update context path/spawn assertions                                                                                   |
+| `apps/runner/test/git-worktree.spec.ts`          | Extend pre-worktree re-check                                                                                           |
 
 ### A.4 Web, tests, docs
 
-| File                                                          | Change                                           |
-| ------------------------------------------------------------- | ------------------------------------------------ |
-| `apps/web/src/features/projects/binding-validation-panel.tsx` | New                                              |
-| `apps/web/src/features/projects/project-detail-drawer.tsx`    | Use panel; invalidate queries                    |
-| `apps/web/src/features/executions/repository-panel.tsx`       | New                                              |
-| `apps/web/src/pages/execution-page.tsx`                       | Add repository card                              |
-| `apps/web/src/services/api.ts`                                | Add validate call                                |
-| `apps/web/src/lib/repository-error-copy.ts`                   | New                                              |
-| `tests/fixtures/test-data-factory.ts`                         | Add validate call                                |
-| `tests/support/repository.ts`                                 | Real validation helper                           |
-| `playwright.config.ts`                                        | Temp Git repo; allowed roots; remove project map |
-| `playwright.real.config.ts`                                   | Allowed roots; remove project map                |
-| `tests/e2e/functional/repository-validation.spec.ts`          | New                                              |
-| `tests/e2e/functional/runner-execution.spec.ts`               | Update for handshake                             |
-| `tests/e2e/functional/runner-recovery.spec.ts`                | New/extend                                       |
-| `tests/e2e-real/*`                                            | Update helper/config                             |
-| `docs/api.md`                                                 | Validation endpoint + new Execution fields       |
-| `docs/runner-protocol.md`                                     | P2-02 messages/features/replay rules             |
-| `docs/runner-setup.md`                                        | Allowed roots migration/deployment order         |
-| `docs/data-model.md`                                          | Execution fields/audit                           |
-| `docs/execution-recovery.md`                                  | Dispatch recovery matrix                         |
-| `docs/testing.md`                                             | New test matrix                                  |
-| `docs/p2-01-project-repository-binding.md`                    | Cross-link/update pending list                   |
+| File                                                          | Change                                                                                   |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `apps/web/src/features/projects/binding-validation-panel.tsx` | New                                                                                      |
+| `apps/web/src/features/projects/project-detail-drawer.tsx`    | Use panel; invalidate queries                                                            |
+| `apps/web/src/features/executions/repository-panel.tsx`       | New                                                                                      |
+| `apps/web/src/pages/execution-page.tsx`                       | Add repository card                                                                      |
+| `apps/web/src/services/api.ts`                                | Add validate call                                                                        |
+| `apps/web/src/lib/repository-error-copy.ts`                   | New                                                                                      |
+| `tests/fixtures/test-data-factory.ts`                         | Add validate call                                                                        |
+| `tests/support/repository.ts`                                 | Real validation helper                                                                   |
+| `playwright.config.ts`                                        | Temp Git repo; allowed roots; disjoint worktree/recovery roots; remove project map       |
+| `playwright.real.config.ts`                                   | Allowed roots; disjoint worktree/recovery roots; remove project map                      |
+| `tests/e2e/functional/repository-validation.spec.ts`          | New                                                                                      |
+| `tests/e2e/functional/runner-execution.spec.ts`               | Update for handshake                                                                     |
+| `tests/e2e/functional/runner-recovery.spec.ts`                | New/extend                                                                               |
+| `tests/e2e-real/*`                                            | Update helper/config                                                                     |
+| `docs/api.md`                                                 | Validation endpoint + new Execution fields                                               |
+| `docs/runner-protocol.md`                                     | P2-02 messages/features/replay rules; path-only validation; handshake-only defaultBranch |
+| `docs/runner-setup.md`                                        | Allowed roots migration/deployment order; device-path rejection; disjoint roots          |
+| `docs/data-model.md`                                          | Execution fields/audit                                                                   |
+| `docs/execution-recovery.md`                                  | Dispatch recovery matrix                                                                 |
+| `docs/testing.md`                                             | New test matrix                                                                          |
+| `docs/p2-01-project-repository-binding.md`                    | Cross-link/update pending list; identity/platform-scoped `ready`                         |
 
 ---
 
@@ -2971,18 +3122,21 @@ pnpm test:e2e:real
 The PR should include a test trace similar to:
 
 ```
-[server] → execution.repository {executionId: exec_1, bindingVersion: 3, policyVersion: abc...}
+[server] → execution.repository {executionId: exec_1, bindingVersion: 3, defaultBranch: main, policyVersion: abc...}
 [runner] → execution.repository.accepted {executionId: exec_1, contextId: ctx_1, canonicalPath: ...}
 [server] → execution.start {executionId: exec_1}
 [runner] → execution.accepted {executionId: exec_1}
 assert index(execution.start) > index(execution.repository.accepted)
+assert binding.validatedByRunnerId === selectedRunner.id
+assert binding.platform === selectedRunner.platform
 assert spawnCount === 1
 ```
 
-And a failure trace:
+And a failure trace (validation succeeded; only the handshake checks the branch):
 
 ```
-[server] → execution.repository
+[server] → repository.validate → ok=true (path/repository policy only; no defaultBranch)
+[server] → execution.repository {defaultBranch: release/missing}
 [runner] → execution.repository.rejected {code: REPO_DEFAULT_BRANCH_NOT_FOUND}
 assert no execution.start
 assert spawnCount === 0
@@ -2994,6 +3148,15 @@ assert execution.failureReason === "REPO_DEFAULT_BRANCH_NOT_FOUND: ..."
 ```bash
 # Must return no execution-path reads
 rg "HAFT_RUNNER_PROJECTS|INIT_CWD|projectPaths" apps/runner/src apps/api/src
+
+# Must return nothing: no device-path allow surface in code, tests or config
+rg "allowDevicePaths|HAFT_RUNNER_ALLOW_DEVICE_PATHS|--allow-device-paths" apps packages tests playwright*.config.ts
+
+# Branch existence checks must be confined to the Runner handshake/context
+rg "REPO_DEFAULT_BRANCH_NOT_FOUND|check-ref-format" apps/runner/src apps/api/src
+
+# Validator identity/platform must be enforced in both execution gates
+rg "validatedByRunnerId" apps/api/src/modules/executions apps/api/src/modules/runners
 
 # Allowed: docs migration notes and negative tests
 rg "HAFT_RUNNER_PROJECTS" docs tests
@@ -3016,4 +3179,4 @@ Record:
 
 ---
 
-_End of plan. This document is a planning artifact. No product code, schema, migration, commit, push or PR was created by writing it._
+_End of plan. This document is a planning artifact. It is revised and committed on the planning branch only; no product code, schema, migration or PR is created by the revision._
