@@ -27,7 +27,6 @@ vi.mock('../services/api', () => {
       createProjectBinding: vi.fn(),
       updateProjectBinding: vi.fn(),
       deleteProjectBinding: vi.fn(),
-      validateProjectBinding: vi.fn(),
     },
   };
 });
@@ -71,7 +70,7 @@ describe('ProjectsPage', () => {
     });
   });
 
-  it('renders project repository metadata, counts, and archived state', async () => {
+  it('renders project branch metadata, counts, and archived state', async () => {
     listProjectsMock.mockResolvedValue(projectList([testProject, testArchivedProject]));
     renderProjectsPage();
 
@@ -80,7 +79,6 @@ describe('ProjectsPage', () => {
     const active = cards.find((card) => card.getAttribute('data-project-id') === 'project_demo');
     expect(active).toBeDefined();
     expect(within(active as HTMLElement).getByText('Raft Lite')).toBeVisible();
-    expect(within(active as HTMLElement).getByText('No repository URL')).toBeVisible();
     expect(within(active as HTMLElement).getByText('main')).toBeVisible();
     expect(within(active as HTMLElement).getByTestId('project-task-count')).toHaveTextContent('4');
     expect(within(active as HTMLElement).getByTestId('project-execution-count')).toHaveTextContent(
@@ -96,18 +94,13 @@ describe('ProjectsPage', () => {
     expect(within(archived as HTMLElement).getByTestId('project-archived-badge')).toBeVisible();
   });
 
-  it('searches projects by repository URL and handles a filter miss', async () => {
+  it('searches projects by name and handles a filter miss', async () => {
     const user = userEvent.setup();
-    listProjectsMock.mockResolvedValue(
-      projectList([
-        { ...testProject, repoUrl: 'git@github.com:org/haft.git' },
-        testArchivedProject,
-      ]),
-    );
+    listProjectsMock.mockResolvedValue(projectList([testProject, testArchivedProject]));
     renderProjectsPage();
     await screen.findAllByTestId('project-card');
 
-    await user.type(screen.getByLabelText('Search projects'), 'github.com:org/haft');
+    await user.type(screen.getByLabelText('Search projects'), 'Raft');
     await waitFor(() => expect(screen.getAllByTestId('project-card')).toHaveLength(1));
     expect(screen.getByText('Raft Lite')).toBeVisible();
 
@@ -137,7 +130,7 @@ describe('ProjectsPage', () => {
     expect(screen.getByTestId('projects-retry-button')).toBeVisible();
   });
 
-  it('creates a project with the repository URL and default branch through the real API client', async () => {
+  it('creates a project with the default branch through the real API client', async () => {
     const user = userEvent.setup();
     listProjectsMock.mockResolvedValue(projectList([]));
     createProjectMock.mockImplementation(async (input: CreateProjectInput) => ({
@@ -156,7 +149,6 @@ describe('ProjectsPage', () => {
 
     await user.type(screen.getByTestId('project-key-input'), 'haft');
     await user.type(screen.getByTestId('project-name-input'), 'Haft Platform');
-    await user.type(screen.getByTestId('project-repo-url-input'), 'git@github.com:org/haft.git');
     await user.clear(screen.getByTestId('project-default-branch-input'));
     await user.type(screen.getByTestId('project-default-branch-input'), 'develop');
     await user.click(screen.getByTestId('project-submit-button'));
@@ -166,7 +158,6 @@ describe('ProjectsPage', () => {
       expect.objectContaining({
         key: 'HAFT',
         name: 'Haft Platform',
-        repoUrl: 'git@github.com:org/haft.git',
         defaultBranch: 'develop',
       }),
     );

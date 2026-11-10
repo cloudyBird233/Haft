@@ -35,10 +35,7 @@ export function ProjectsPage(): JSX.Element {
     const needle = search.trim().toLowerCase();
     if (!needle) return projects;
     return projects.filter((project) =>
-      [project.name, project.key, project.description, project.repoUrl ?? '']
-        .join(' ')
-        .toLowerCase()
-        .includes(needle),
+      [project.name, project.key, project.description].join(' ').toLowerCase().includes(needle),
     );
   }, [projects, search]);
 
@@ -74,7 +71,6 @@ export function ProjectsPage(): JSX.Element {
         name: values.name,
         description: values.description,
         color: values.color,
-        repoUrl: values.repoUrl,
         defaultBranch: values.defaultBranch,
       });
       invalidateProjects();
@@ -89,7 +85,6 @@ export function ProjectsPage(): JSX.Element {
         name: values.name,
         description: values.description,
         color: values.color,
-        repoUrl: values.repoUrl,
         defaultBranch: values.defaultBranch,
       });
       invalidateProjects();

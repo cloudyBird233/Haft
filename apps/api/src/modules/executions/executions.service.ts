@@ -90,6 +90,17 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     if (!task) {
       throw new AppException('TASK_NOT_FOUND', 'Task not found', HttpStatus.NOT_FOUND);
     }
+    if (task.project.archivedAt) {
+      throw new AppException(
+        ERROR_CODES.PROJECT_ARCHIVED,
+        'Archived projects cannot start new executions',
+        HttpStatus.CONFLICT,
+        {
+          projectId: task.projectId,
+          archivedAt: task.project.archivedAt.toISOString(),
+        },
+      );
+    }
     const active = await this.prisma.execution.findFirst({
       where: { taskId, status: 'running' },
     });
@@ -180,31 +191,10 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         },
       });
       if (!repositoryBinding) {
-        throw new AppException(
-          ERROR_CODES.PROJECT_BINDING_MISSING,
-          'This project has no repository binding for the assigned computer',
-          HttpStatus.CONFLICT,
-          {
-            projectId: task.projectId,
-            computerId: task.assignee.computerId,
-          },
-        );
+        throw bindingMissing(task.projectId, task.assignee.computerId);
       }
-      if (
-        repositoryBinding.status !== 'ready' ||
-        repositoryBinding.validatedBindingVersion !== repositoryBinding.bindingVersion
-      ) {
-        throw new AppException(
-          ERROR_CODES.PROJECT_BINDING_NOT_READY,
-          'The repository binding must be validated before a real execution can start',
-          HttpStatus.CONFLICT,
-          {
-            bindingId: repositoryBinding.id,
-            bindingStatus: repositoryBinding.status,
-            bindingVersion: repositoryBinding.bindingVersion,
-            validatedBindingVersion: repositoryBinding.validatedBindingVersion,
-          },
-        );
+      if (!isReadyBinding(repositoryBinding)) {
+        throw bindingNotReady(repositoryBinding);
       }
       const availability = await this.runtimes.getAvailability(
         runtimeType,
@@ -224,15 +214,81 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
+    const runnerComputerId = requiresRunner ? task.assignee.computerId : null;
+
     const execution = await this.prisma.$transaction(async (tx) => {
+      // The pre-check above runs outside the transaction. Re-read the archived
+      // flag and the binding inside the same transaction that creates the
+      // Execution so a concurrent archive, path change, or re-validation cannot
+      // leak into a stale execution snapshot.
+      const projectState = await tx.project.findUnique({
+        where: { id: task.projectId },
+        select: { archivedAt: true },
+      });
+      if (!projectState || projectState.archivedAt) {
+        throw new AppException(
+          ERROR_CODES.PROJECT_ARCHIVED,
+          'Archived projects cannot start new executions',
+          HttpStatus.CONFLICT,
+          {
+            projectId: task.projectId,
+            ...(projectState?.archivedAt
+              ? { archivedAt: projectState.archivedAt.toISOString() }
+              : {}),
+          },
+        );
+      }
+
+      let bindingSnapshot: {
+        id: string;
+        bindingVersion: number;
+        validatedBindingVersion: number | null;
+        status: string;
+      } | null = null;
+      if (requiresRunner) {
+        if (!runnerComputerId) {
+          throw new AppException(
+            'COMPUTER_NOT_ASSIGNED',
+            'Assign the agent to a computer with a connected runner',
+            HttpStatus.CONFLICT,
+          );
+        }
+        const currentBinding = await tx.projectRepositoryBinding.findUnique({
+          where: {
+            projectId_computerId: {
+              projectId: task.projectId,
+              computerId: runnerComputerId,
+            },
+          },
+          select: {
+            id: true,
+            bindingVersion: true,
+            validatedBindingVersion: true,
+            status: true,
+          },
+        });
+        if (!currentBinding) {
+          throw bindingMissing(task.projectId, runnerComputerId);
+        }
+        if (
+          !repositoryBinding ||
+          currentBinding.id !== repositoryBinding.id ||
+          currentBinding.bindingVersion !== repositoryBinding.bindingVersion ||
+          !isReadyBinding(currentBinding)
+        ) {
+          throw bindingNotReady(currentBinding);
+        }
+        bindingSnapshot = currentBinding;
+      }
+
       const created = await tx.execution.create({
         data: {
           taskId,
           agentId: assigneeAgentId,
           runnerId,
           repositoryProjectId: requiresRunner ? task.projectId : null,
-          repositoryBindingId: repositoryBinding?.id ?? null,
-          repositoryBindingVersion: repositoryBinding?.bindingVersion ?? null,
+          repositoryBindingId: bindingSnapshot?.id ?? null,
+          repositoryBindingVersion: bindingSnapshot?.bindingVersion ?? null,
           repositoryDefaultBranch: requiresRunner ? task.project.defaultBranch : null,
           runtime: runtimeType,
           status: 'running',
@@ -1020,6 +1076,40 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       }
     }
   }
+}
+
+interface BindingState {
+  id: string;
+  bindingVersion: number;
+  validatedBindingVersion: number | null;
+  status: string;
+}
+
+function isReadyBinding(binding: BindingState): boolean {
+  return binding.status === 'ready' && binding.validatedBindingVersion === binding.bindingVersion;
+}
+
+function bindingMissing(projectId: string, computerId: string): AppException {
+  return new AppException(
+    ERROR_CODES.PROJECT_BINDING_MISSING,
+    'This project has no repository binding for the assigned computer',
+    HttpStatus.CONFLICT,
+    { projectId, computerId },
+  );
+}
+
+function bindingNotReady(binding: BindingState): AppException {
+  return new AppException(
+    ERROR_CODES.PROJECT_BINDING_NOT_READY,
+    'The repository binding must be validated before a real execution can start',
+    HttpStatus.CONFLICT,
+    {
+      bindingId: binding.id,
+      bindingStatus: binding.status,
+      bindingVersion: binding.bindingVersion,
+      validatedBindingVersion: binding.validatedBindingVersion,
+    },
+  );
 }
 
 function runtimeUnavailable(

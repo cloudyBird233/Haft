@@ -9,7 +9,7 @@ import { ApiError } from '../services/api';
 import { testProject } from './fixtures';
 
 describe('ProjectFormDialog', () => {
-  it('creates a project with a normalised key and repository metadata', async () => {
+  it('creates a project with a normalised key and metadata', async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn<(values: ProjectFormSubmission) => Promise<void>>().mockResolvedValue();
     const onOpenChange = vi.fn();
@@ -19,17 +19,6 @@ describe('ProjectFormDialog', () => {
 
     await user.type(screen.getByTestId('project-key-input'), 'haft');
     await user.type(screen.getByTestId('project-name-input'), 'Haft Platform');
-    await user.type(screen.getByTestId('project-repo-url-input'), 'not a url');
-    await user.click(screen.getByTestId('project-submit-button'));
-    expect(
-      await screen.findByText(
-        'Repository URL must be an http(s), ssh, git URL, or git@host:path address',
-      ),
-    ).toBeVisible();
-    expect(onSubmit).not.toHaveBeenCalled();
-
-    await user.clear(screen.getByTestId('project-repo-url-input'));
-    await user.type(screen.getByTestId('project-repo-url-input'), 'git@github.com:org/haft.git');
     await user.click(screen.getByTestId('project-submit-button'));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
@@ -38,7 +27,6 @@ describe('ProjectFormDialog', () => {
       name: 'Haft Platform',
       description: '',
       color: '#6b7280',
-      repoUrl: 'git@github.com:org/haft.git',
       defaultBranch: 'main',
     });
     expect(onOpenChange).toHaveBeenCalledWith(false);
@@ -52,7 +40,7 @@ describe('ProjectFormDialog', () => {
         open
         onOpenChange={vi.fn()}
         mode="edit"
-        initial={{ ...testProject, repoUrl: 'git@github.com:org/haft.git' }}
+        initial={testProject}
         onSubmit={onSubmit}
       />,
     );
@@ -73,7 +61,6 @@ describe('ProjectFormDialog', () => {
         key: 'RAFT',
         name: 'Haft 2.0',
         defaultBranch: 'release/2026',
-        repoUrl: 'git@github.com:org/haft.git',
       }),
     );
   });

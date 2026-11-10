@@ -19,7 +19,6 @@ export interface ProjectFormSubmission {
   name: string;
   description: string;
   color: string;
-  repoUrl: string | null;
   defaultBranch: string;
 }
 
@@ -40,7 +39,6 @@ export function ProjectFormDialog({
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [color, setColor] = useState('#6b7280');
-  const [repoUrl, setRepoUrl] = useState('');
   const [defaultBranch, setDefaultBranch] = useState('main');
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [formError, setFormError] = useState<string | null>(null);
@@ -52,7 +50,6 @@ export function ProjectFormDialog({
     setName(initial?.name ?? '');
     setDescription(initial?.description ?? '');
     setColor(initial?.color ?? '#6b7280');
-    setRepoUrl(initial?.repoUrl ?? '');
     setDefaultBranch(initial?.defaultBranch ?? 'main');
     setErrors({});
     setFormError(null);
@@ -72,7 +69,6 @@ export function ProjectFormDialog({
       name: name.trim(),
       description: description.trim(),
       color: color.trim(),
-      repoUrl: repoUrl.trim() || null,
       defaultBranch: defaultBranch.trim(),
     };
     const parsed =
@@ -189,24 +185,6 @@ export function ProjectFormDialog({
                 value={description}
                 onChange={(event) => setDescription(event.target.value)}
                 placeholder="What this project delivers, and any shared context…"
-                disabled={submitting}
-              />
-            </Field>
-            <Field
-              label="Repository URL"
-              htmlFor="project-repo-url"
-              error={errors.repoUrl}
-              hint="Optional. Used for display and future clone operations; bindings hold the local path."
-            >
-              <Input
-                id="project-repo-url"
-                name="repoUrl"
-                data-testid="project-repo-url-input"
-                value={repoUrl}
-                onChange={(event) => setRepoUrl(event.target.value)}
-                placeholder="git@github.com:org/repo.git"
-                autoComplete="off"
-                aria-invalid={Boolean(errors.repoUrl)}
                 disabled={submitting}
               />
             </Field>

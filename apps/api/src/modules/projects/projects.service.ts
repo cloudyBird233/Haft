@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { HttpStatus, Injectable } from '@nestjs/common';
 import {
   ERROR_CODES,
@@ -7,17 +7,13 @@ import {
   type CreateProjectInput,
   type ListDto,
   type ProjectBindingDto,
-  type ProjectBindingStatus,
   type ProjectDetailDto,
   type ProjectDto,
-  type RepositoryValidationPayload,
-  type RunnerFeature,
   type UpdateProjectInput,
 } from '@raft-lite/contracts';
 import type { Prisma } from '@prisma/client';
 import { DEFAULT_WORKSPACE_ID } from '../../common/constants';
 import { AppException } from '../../common/errors/app.exception';
-import { AppLogger } from '../../common/logger/app-logger';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import {
   projectBindingRelations,
@@ -25,13 +21,6 @@ import {
   toProjectDetailDto,
   toProjectDto,
 } from '../../common/serializers';
-import { RunnerRegistryService } from '../runners/runner-registry.service';
-
-const REQUIRED_VALIDATION_FEATURES: readonly RunnerFeature[] = [
-  'project-binding-v1',
-  'repository-validation-v1',
-  'repository-path-policy-v1',
-];
 
 const IMMUTABLE_BINDING_FIELDS = new Set([
   'id',
@@ -43,7 +32,6 @@ const IMMUTABLE_BINDING_FIELDS = new Set([
   'status',
   'validationRequestId',
   'canonicalPath',
-  'headCommit',
   'validationErrorCode',
   'validationError',
   'lastValidatedAt',
@@ -59,13 +47,7 @@ const IMMUTABLE_BINDING_FIELDS = new Set([
 
 @Injectable()
 export class ProjectsService {
-  private readonly validationsInFlight = new Set<string>();
-
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly runners: RunnerRegistryService,
-    private readonly logger: AppLogger,
-  ) {}
+  constructor(private readonly prisma: PrismaService) {}
 
   async list(): Promise<ListDto<ProjectDto>> {
     const projects = await this.prisma.project.findMany({
@@ -128,7 +110,6 @@ export class ProjectsService {
           name: input.name,
           description: input.description,
           color: input.color,
-          repoUrl: input.repoUrl ?? null,
           defaultBranch: input.defaultBranch,
         },
       });
@@ -147,9 +128,6 @@ export class ProjectsService {
     if (input.name !== undefined) data.name = input.name;
     if (input.description !== undefined) data.description = input.description;
     if (input.color !== undefined) data.color = input.color;
-    if (Object.prototype.hasOwnProperty.call(input, 'repoUrl')) {
-      data.repoUrl = input.repoUrl ?? null;
-    }
     if (input.defaultBranch !== undefined) data.defaultBranch = input.defaultBranch;
     if (input.archived !== undefined) {
       data.archivedAt = input.archived ? new Date() : null;
@@ -257,7 +235,6 @@ export class ProjectsService {
         status: 'unverified',
         validationRequestId: null,
         canonicalPath: null,
-        headCommit: null,
         validationErrorCode: null,
         validationError: null,
         lastValidatedAt: null,
@@ -276,211 +253,6 @@ export class ProjectsService {
     const binding = await this.findBindingRecord(projectId, bindingId);
     await this.prisma.projectRepositoryBinding.delete({ where: { id: binding.id } });
     return { id: binding.id };
-  }
-
-  /**
-   * Validates a binding through the connected runner. The API never inspects
-   * the local filesystem; `ready` is written only from a matching runner
-   * response for the exact binding version that was requested.
-   */
-  async validateBinding(projectId: string, bindingId: string): Promise<ProjectBindingDto> {
-    await this.findProjectRecord(projectId);
-    const binding = await this.findBindingRecord(projectId, bindingId);
-    if (this.validationsInFlight.has(binding.id)) {
-      throw new AppException(
-        ERROR_CODES.STALE_REPOSITORY_VALIDATION,
-        'A repository validation is already running for this binding',
-        HttpStatus.CONFLICT,
-        { bindingId: binding.id },
-      );
-    }
-    this.validationsInFlight.add(binding.id);
-    try {
-      return await this.validateBindingWithRunner(binding);
-    } finally {
-      this.validationsInFlight.delete(binding.id);
-    }
-  }
-
-  private async validateBindingWithRunner(binding: {
-    id: string;
-    projectId: string;
-    computerId: string;
-    path: string;
-    pathHash: string;
-    bindingVersion: number;
-  }): Promise<ProjectBindingDto> {
-    const runner = await this.runners.findByComputer(binding.computerId);
-    if (!runner) {
-      throw new AppException(
-        ERROR_CODES.RUNNER_OFFLINE,
-        'No runner is registered for this computer',
-        HttpStatus.CONFLICT,
-        { computerId: binding.computerId },
-      );
-    }
-    if (!this.runners.isConnected(runner.id)) {
-      throw new AppException(
-        ERROR_CODES.RUNNER_OFFLINE,
-        'The runner for this computer is offline',
-        HttpStatus.CONFLICT,
-        { computerId: binding.computerId, runnerId: runner.id },
-      );
-    }
-    const missingFeatures = REQUIRED_VALIDATION_FEATURES.filter(
-      (feature) => !runner.capabilities.features.includes(feature),
-    );
-    if (missingFeatures.length > 0) {
-      throw new AppException(
-        ERROR_CODES.PROJECT_BINDING_UNSUPPORTED,
-        'The connected runner does not support repository validation',
-        HttpStatus.CONFLICT,
-        { runnerId: runner.id, missingFeatures },
-      );
-    }
-
-    const requestId = randomUUID();
-    await this.prisma.projectRepositoryBinding.update({
-      where: { id: binding.id },
-      data: { validationRequestId: requestId },
-    });
-
-    let response: RepositoryValidationPayload;
-    try {
-      response = await this.runners.dispatchRepositoryValidation({
-        runnerId: runner.id,
-        requestId,
-        projectId: binding.projectId,
-        computerId: binding.computerId,
-        bindingId: binding.id,
-        bindingVersion: binding.bindingVersion,
-        path: binding.path,
-      });
-    } catch (error) {
-      await this.prisma.projectRepositoryBinding.updateMany({
-        where: { id: binding.id, bindingVersion: binding.bindingVersion },
-        data: { validationRequestId: null },
-      });
-      throw error;
-    }
-
-    const current = await this.prisma.projectRepositoryBinding.findFirst({
-      where: { id: binding.id, projectId: binding.projectId },
-      include: projectBindingRelations,
-    });
-    if (
-      !current ||
-      current.pathHash !== binding.pathHash ||
-      current.bindingVersion !== binding.bindingVersion ||
-      current.validationRequestId !== requestId
-    ) {
-      throw new AppException(
-        ERROR_CODES.STALE_REPOSITORY_VALIDATION,
-        'The binding changed or another validation superseded this request',
-        HttpStatus.CONFLICT,
-        { bindingId: binding.id, requestId },
-      );
-    }
-
-    const validatedAt = new Date();
-    const successful =
-      response.ok && Boolean(response.canonicalPath) && Boolean(response.headCommit);
-    if (successful) {
-      const written = await this.prisma.projectRepositoryBinding.updateMany({
-        where: {
-          id: binding.id,
-          bindingVersion: binding.bindingVersion,
-          validationRequestId: requestId,
-        },
-        data: {
-          status: 'ready',
-          canonicalPath: response.canonicalPath,
-          headCommit: response.headCommit,
-          platform: response.platform,
-          policyVersion: response.policyVersion,
-          lastValidatedAt: validatedAt,
-          validatedByRunnerId: runner.id,
-          validatedBindingVersion: binding.bindingVersion,
-          validationRequestId: requestId,
-          validationErrorCode: null,
-          validationError: null,
-        },
-      });
-      if (written.count === 0) {
-        throw this.staleValidation(binding.id, requestId);
-      }
-      const updated = await this.prisma.projectRepositoryBinding.findUniqueOrThrow({
-        where: { id: binding.id },
-        include: projectBindingRelations,
-      });
-      this.logger.info({
-        eventType: 'project.binding_validated',
-        message: 'Repository binding validated',
-        projectId: binding.projectId,
-        status: 'ready',
-        error: undefined,
-      });
-      return toProjectBindingDto(updated);
-    }
-
-    const errorCode = response.errorCode ?? ERROR_CODES.REPO_VALIDATION_FAILED;
-    const status: ProjectBindingStatus =
-      errorCode === ERROR_CODES.REPO_PATH_NOT_FOUND ? 'missing' : 'error';
-    const validationError = response.message ?? 'The runner rejected this repository path';
-    const written = await this.prisma.projectRepositoryBinding.updateMany({
-      where: {
-        id: binding.id,
-        bindingVersion: binding.bindingVersion,
-        validationRequestId: requestId,
-      },
-      data: {
-        status,
-        canonicalPath: null,
-        headCommit: null,
-        platform: response.platform,
-        policyVersion: response.policyVersion,
-        lastValidatedAt: validatedAt,
-        validatedByRunnerId: runner.id,
-        validatedBindingVersion: null,
-        validationRequestId: requestId,
-        validationErrorCode: errorCode,
-        validationError,
-      },
-    });
-    if (written.count === 0) {
-      throw this.staleValidation(binding.id, requestId);
-    }
-    const updated = await this.prisma.projectRepositoryBinding.findUniqueOrThrow({
-      where: { id: binding.id },
-      include: projectBindingRelations,
-    });
-    this.logger.warn({
-      eventType: 'project.binding_validation_failed',
-      message: 'Repository binding validation failed',
-      projectId: binding.projectId,
-      status,
-      error: errorCode,
-    });
-    throw new AppException(
-      ERROR_CODES.PROJECT_BINDING_INVALID,
-      validationError,
-      HttpStatus.UNPROCESSABLE_ENTITY,
-      {
-        binding: toProjectBindingDto(updated),
-        bindingStatus: status,
-        bindingVersion: binding.bindingVersion,
-        errorCode,
-      },
-    );
-  }
-
-  private staleValidation(bindingId: string, requestId: string): AppException {
-    return new AppException(
-      ERROR_CODES.STALE_REPOSITORY_VALIDATION,
-      'The binding changed or another validation superseded this request',
-      HttpStatus.CONFLICT,
-      { bindingId, requestId },
-    );
   }
 
   private async findProjectRecord(id: string) {

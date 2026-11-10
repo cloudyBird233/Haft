@@ -190,7 +190,6 @@ export class RaftTestFactory {
       description:
         overrides.description ?? 'Created by the Raft Lite deterministic test-data factory.',
       color: overrides.color ?? '#6b7280',
-      repoUrl: overrides.repoUrl ?? null,
       defaultBranch: overrides.defaultBranch ?? 'main',
     };
     return this.call('POST', '/api/projects', input);
@@ -215,8 +214,13 @@ export class RaftTestFactory {
     return this.call('POST', `/api/projects/${projectId}/bindings`, input);
   }
 
-  async validateProjectBinding(projectId: string, bindingId: string): Promise<ProjectBindingDto> {
-    return this.call('POST', `/api/projects/${projectId}/bindings/${bindingId}/validate`, {});
+  /**
+   * Test-only fixture. P2-01 never validates bindings; the `__test__` endpoint
+   * exists only when E2E_TEST_MODE=true so success-path tests can start from a
+   * ready binding without implementing P2-02's runner protocol.
+   */
+  async markProjectBindingReady(projectId: string, bindingId: string): Promise<ProjectBindingDto> {
+    return this.call('POST', `/__test__/projects/${projectId}/bindings/${bindingId}/ready`, {});
   }
 
   /**

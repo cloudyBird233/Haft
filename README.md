@@ -6,12 +6,13 @@ The repository is a complete, runnable product slice rather than a static protot
 
 ![Raft Lite dashboard](docs/screenshots/dashboard-1440x900.png)
 
-Projects carry repository metadata and per-computer repository bindings. A real
-execution only starts after the connected Runner has validated the binding:
+Projects carry a canonical default branch and per-computer repository
+bindings. P2-01 creates every binding as `unverified` and blocks real
+execution; Runner-based repository validation is deferred to P2-02:
 
 ![Projects and repository bindings](docs/screenshots/projects-1440x900.png)
 
-![Validated repository binding](docs/screenshots/project-detail-1440x900.png)
+![Unverified repository binding](docs/screenshots/project-detail-1440x900.png)
 
 ## What it does
 
@@ -108,7 +109,6 @@ paired Haft Agent Runner on the same machine (or on a reachable trusted host).
    HAFT_RUNNER_ID=runner_local \
    HAFT_RUNNER_COMPUTER_ID=computer_local \
    HAFT_RUNNER_MODE=fake \
-   HAFT_RUNNER_ALLOWED_ROOTS='["/home/me/src"]' \
    pnpm --filter @raft-lite/runner start
    ```
 
@@ -119,24 +119,24 @@ paired Haft Agent Runner on the same machine (or on a reachable trusted host).
    $env:HAFT_RUNNER_ID = "runner_local"
    $env:HAFT_RUNNER_COMPUTER_ID = "computer_local"
    $env:HAFT_RUNNER_MODE = "fake"
-   $env:HAFT_RUNNER_ALLOWED_ROOTS = '["D:\\code"]'
    pnpm --filter @raft-lite/runner start
    ```
 
-3. Open **Projects**, create a project, bind its repository path on
-   `computer_local`, and press **Validate**. The binding becomes `ready` only
-   after the Runner confirms a Git main-worktree root inside an allowed root; a
-   missing, escaped, bare, linked-worktree, or submodule path is rejected.
+3. Open **Projects**, create a project, and bind its repository path on
+   `computer_local`. P2-01 stores every binding as `unverified`; Runner-based
+   repository validation, and therefore real execution, arrives with P2-02.
 
-4. Create an agent with runtime `Codex CLI` or `OpenCode CLI`, assign it to
-   `computer_local`, create a task in the project, and start it. The task detail
-   drawer shows runtime availability, the repository binding status, and the
-   reason when execution is blocked.
+4. Create an agent with runtime `Mock`, assign it to the project, and start a
+   task. Mock execution works without a ready binding. For `Codex CLI` or
+   `OpenCode CLI` agents, task detail explains that real execution is blocked
+   until the binding is validated by P2-02.
 
 For real CLI execution, configure the runner's project allowlist, worktree root,
 CLI paths/models, and authentication once per host. See
 [docs/runner-setup.md](docs/runner-setup.md) for the full procedure and security
-rules. Real CLI E2E is opt-in:
+rules. Real CLI execution also requires a validated repository binding, which
+P2-01 intentionally does not provide; it stays blocked until P2-02. Real CLI E2E
+is opt-in:
 
 ```bash
 HAFT_REAL_CLI_E2E=1 pnpm test:e2e:real

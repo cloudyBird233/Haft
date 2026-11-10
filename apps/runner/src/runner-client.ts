@@ -3,10 +3,8 @@ import { io, type Socket } from 'socket.io-client';
 import {
   RUNNER_PROTOCOL_VERSION,
   runnerServerMessageSchema,
-  type RepositoryValidationPayload,
   type RunnerCapabilities,
   type RunnerEnvelope,
-  type RunnerFeature,
   type RunnerRuntimeCapability,
   type RunnerServerMessage,
 } from '@raft-lite/contracts';
@@ -18,7 +16,6 @@ import { log } from './logger';
 import { ProtocolEventQueue } from './protocol-event-queue';
 import { RealExecutor } from './real-executor';
 import { ExecutionRecovery, type RecoveredExecution } from './recovery';
-import { validateRepositoryPath } from './repository-policy';
 import { TokenStore } from './token-store';
 
 export interface RunnerClientOptions {
@@ -34,22 +31,6 @@ const AUTH_ERROR_CODES = new Set([
   'RUNNER_PROTOCOL_MISMATCH',
 ]);
 
-const RUNNER_FEATURES_IMPLEMENTED = [
-  'project-binding-v1',
-  'repository-validation-v1',
-  'repository-path-policy-v1',
-] as const satisfies readonly RunnerFeature[];
-
-const VALIDATION_CACHE_TTL_MS = 5 * 60 * 1000;
-const VALIDATION_CACHE_MAX_ENTRIES = 100;
-
-interface ValidatedRepository {
-  path: string;
-  bindingId: string;
-  bindingVersion: number;
-  policyVersion: string;
-}
-
 export class RunnerClient {
   private readonly config: RunnerConfig;
   private readonly tokenStore: TokenStore;
@@ -58,17 +39,6 @@ export class RunnerClient {
   private recoveredExecutions: RecoveredExecution[] = [];
   private readonly onFatal: (message: string) => void;
   private runtimeCapabilities: RunnerRuntimeCapability[] = [];
-  /**
-   * Repository paths learned through `repository.validate`. Execution routing
-   * still uses the legacy project map in P2-01; this cache exists so a newly
-   * validated project can be executed by the Fake Runner without pre-seeding
-   * `HAFT_RUNNER_PROJECTS`, and so re-registration advertises the project.
-   */
-  private readonly validatedRepositories = new Map<string, ValidatedRepository>();
-  private readonly validationResponses = new Map<
-    string,
-    { payload: RepositoryValidationPayload; expiresAt: number }
-  >();
   private socket: Socket | null = null;
   private token: string | null = null;
   private usedBootstrap = false;
@@ -316,9 +286,6 @@ export class RunnerClient {
       case 'execution.start':
         this.handleStart(message.payload);
         break;
-      case 'repository.validate':
-        void this.handleRepositoryValidate(message.payload);
-        break;
       case 'execution.cancel':
         this.executor.cancel(message.payload.executionId, message.payload.reason);
         break;
@@ -331,7 +298,10 @@ export class RunnerClient {
         break;
       case 'execution.log.ack':
         this.executor.acknowledge(message.payload.executionId, message.payload.throughSeq);
-        void this.recovery.acknowledgeLogs(message.payload.executionId, message.payload.throughSeq);
+        void this.recovery.acknowledgeLogs(
+          message.payload.executionId,
+          message.payload.throughSeq,
+        );
         break;
     }
   }
@@ -386,10 +356,7 @@ export class RunnerClient {
       acceptedAt: new Date().toISOString(),
     });
 
-    const projectPath =
-      this.validatedRepositories.get(payload.projectId)?.path ??
-      this.config.projectPaths[payload.projectId];
-    if (!projectPath) {
+    if (!this.config.projectPaths[payload.projectId]) {
       this.send('execution.failed', {
         executionId: payload.executionId,
         reason: `PROJECT_NOT_MAPPED: ${payload.projectId}`,
@@ -401,7 +368,9 @@ export class RunnerClient {
     }
 
     if (this.config.mode === 'real') {
-      const capability = this.runtimeCapabilities.find((item) => item.runtime === payload.runtime);
+      const capability = this.runtimeCapabilities.find(
+        (item) => item.runtime === payload.runtime,
+      );
       if (!capability?.installed) {
         this.send('execution.failed', {
           executionId: payload.executionId,
@@ -429,122 +398,6 @@ export class RunnerClient {
     }
 
     this.executor.start(payload);
-  }
-
-  private async handleRepositoryValidate(
-    payload: Extract<RunnerServerMessage, { type: 'repository.validate' }>['payload'],
-  ): Promise<void> {
-    const cached = this.validationResponses.get(payload.requestId);
-    if (cached && cached.expiresAt > Date.now()) {
-      // Retries reuse the same requestId; replay the exact previous result.
-      this.send('repository.validation', cached.payload as unknown as Record<string, unknown>);
-      return;
-    }
-    if (cached) {
-      this.validationResponses.delete(payload.requestId);
-    }
-
-    log('info', {
-      eventType: 'runner.repository_validate_received',
-      message: 'Validating a repository path for a project binding',
-      projectId: payload.projectId,
-      status: 'running',
-      bindingId: payload.bindingId,
-      bindingVersion: payload.bindingVersion,
-    });
-
-    const result = await validateRepositoryPath(payload.path, {
-      allowedRepositoryRoots: this.config.allowedRepositoryRoots,
-      worktreeRoot: this.config.worktreeRoot,
-      recoveryRoot: this.config.recoveryRoot,
-      gitBinary: this.config.gitBinary,
-    });
-
-    if (result.ok) {
-      this.validatedRepositories.set(payload.projectId, {
-        path: result.canonicalPath,
-        bindingId: payload.bindingId,
-        bindingVersion: payload.bindingVersion,
-        policyVersion: result.policyVersion,
-      });
-      // P2-01 still sends only projectId in execution.start. RealExecutor reads
-      // its project map, so bridge the validated canonical path into that map
-      // until the P2-02 execution.repository handshake replaces it.
-      this.config.projectPaths[payload.projectId] = result.canonicalPath;
-      // Advertise the newly validated project so execution availability checks
-      // can resolve this runner before the next full reconnect.
-      this.sendRegister();
-    } else {
-      const existing = this.validatedRepositories.get(payload.projectId);
-      if (
-        existing &&
-        existing.bindingId === payload.bindingId &&
-        existing.bindingVersion === payload.bindingVersion
-      ) {
-        this.validatedRepositories.delete(payload.projectId);
-      }
-    }
-
-    const response: RepositoryValidationPayload = result.ok
-      ? {
-          requestId: payload.requestId,
-          projectId: payload.projectId,
-          computerId: payload.computerId,
-          bindingId: payload.bindingId,
-          bindingVersion: payload.bindingVersion,
-          ok: true,
-          platform: result.platform,
-          policyVersion: result.policyVersion,
-          canonicalPath: result.canonicalPath,
-          headCommit: result.headCommit,
-        }
-      : {
-          requestId: payload.requestId,
-          projectId: payload.projectId,
-          computerId: payload.computerId,
-          bindingId: payload.bindingId,
-          bindingVersion: payload.bindingVersion,
-          ok: false,
-          platform: result.platform,
-          policyVersion: result.policyVersion,
-          errorCode: result.errorCode,
-          message: result.message,
-        };
-    this.rememberValidationResponse(payload.requestId, response);
-    this.send('repository.validation', response as unknown as Record<string, unknown>);
-
-    log(result.ok ? 'info' : 'warn', {
-      eventType: result.ok ? 'runner.repository_validated' : 'runner.repository_validation_failed',
-      message: result.ok
-        ? 'Repository path validation succeeded'
-        : 'Repository path validation failed',
-      projectId: payload.projectId,
-      status: result.ok ? 'ready' : 'error',
-      bindingId: payload.bindingId,
-      bindingVersion: payload.bindingVersion,
-      error: result.ok ? undefined : result.errorCode,
-    });
-  }
-
-  private rememberValidationResponse(
-    requestId: string,
-    payload: RepositoryValidationPayload,
-  ): void {
-    const now = Date.now();
-    for (const [key, entry] of this.validationResponses) {
-      if (entry.expiresAt <= now) {
-        this.validationResponses.delete(key);
-      }
-    }
-    this.validationResponses.set(requestId, {
-      payload,
-      expiresAt: now + VALIDATION_CACHE_TTL_MS,
-    });
-    while (this.validationResponses.size > VALIDATION_CACHE_MAX_ENTRIES) {
-      const oldest = this.validationResponses.keys().next().value;
-      if (typeof oldest !== 'string') break;
-      this.validationResponses.delete(oldest);
-    }
   }
 
   private async prepareCapabilities(): Promise<void> {
@@ -668,15 +521,10 @@ export class RunnerClient {
   }
 
   private capabilities(): RunnerCapabilities {
-    const projectIds = new Set([
-      ...Object.keys(this.config.projectPaths),
-      ...this.validatedRepositories.keys(),
-    ]);
     return {
       runtimes: this.runtimeCapabilities,
-      projectIds: [...projectIds],
+      projectIds: Object.keys(this.config.projectPaths),
       maxConcurrentExecutions: this.config.maxConcurrentExecutions,
-      features: [...RUNNER_FEATURES_IMPLEMENTED],
     };
   }
 

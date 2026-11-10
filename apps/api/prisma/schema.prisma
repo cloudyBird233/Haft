@@ -26,7 +26,6 @@ model Project {
   name               String
   description        String                     @default("")
   color              String                     @default("#6b7280")
-  repoUrl            String?
   defaultBranch      String                     @default("main")
   archivedAt         DateTime?
   createdAt          DateTime                   @default(now())
@@ -53,7 +52,6 @@ model ProjectRepositoryBinding {
   status                  String      @default("unverified")
   validationRequestId     String?
   canonicalPath           String?
-  headCommit              String?
   validationErrorCode     String?
   validationError         String?
   lastValidatedAt         DateTime?

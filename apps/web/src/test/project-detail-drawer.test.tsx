@@ -24,7 +24,6 @@ vi.mock('../services/api', () => {
       createProjectBinding: vi.fn(),
       updateProjectBinding: vi.fn(),
       deleteProjectBinding: vi.fn(),
-      validateProjectBinding: vi.fn(),
     },
   };
 });
@@ -78,7 +77,6 @@ describe('ProjectDetailDrawer', () => {
         {
           ...testBinding,
           status: 'error',
-          headCommit: null,
           validationErrorCode: 'REPO_NOT_GIT_ROOT',
           validationError: 'The path is not the root of a Git worktree',
         },
@@ -119,7 +117,7 @@ describe('ProjectDetailDrawer', () => {
     });
   });
 
-  it('changes a binding path and forces a new validation', async () => {
+  it('changes a binding path and resets it to unverified', async () => {
     const user = userEvent.setup();
     vi.mocked(api.updateProjectBinding).mockResolvedValue({
       ...testBinding,
@@ -144,22 +142,30 @@ describe('ProjectDetailDrawer', () => {
     });
   });
 
-  it('validates a binding through the runner endpoint', async () => {
-    const user = userEvent.setup();
-    vi.mocked(api.validateProjectBinding).mockResolvedValue({
-      ...testBinding,
-      status: 'ready',
-      validationErrorCode: null,
-      validationError: null,
+  it('shows unverified bindings as blocked without a P2-02 validation action', async () => {
+    renderDrawer({
+      bindings: [
+        {
+          ...testBinding,
+          status: 'unverified',
+          canonicalPath: null,
+          validatedBindingVersion: null,
+          lastValidatedAt: null,
+        },
+      ],
     });
-    renderDrawer({ bindings: [{ ...testBinding, status: 'unverified', headCommit: null }] });
     await screen.findByTestId('project-binding-row');
 
-    await user.click(screen.getByTestId('binding-validate-button'));
-    await waitFor(() =>
-      expect(api.validateProjectBinding).toHaveBeenCalledWith(testProject.id, testBinding.id),
+    expect(screen.getByTestId('project-binding-row')).toHaveAttribute(
+      'data-binding-status',
+      'unverified',
     );
-    expect(await screen.findByText('Repository validated')).toBeVisible();
+    expect(
+      screen.getByText(
+        'Unverified. P2-02 repository validation is required before real execution.',
+      ),
+    ).toBeVisible();
+    expect(screen.queryByTestId('binding-validate-button')).not.toBeInTheDocument();
   });
 
   it('deletes a binding only after confirmation', async () => {

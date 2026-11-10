@@ -41,20 +41,19 @@ describe('Projects and repository bindings API', () => {
       key: 'haft',
       name: 'Haft Platform',
       description: 'Phase 2 project management',
-      repoUrl: 'git@github.com:org/haft.git',
       defaultBranch: 'develop',
     });
     expect(project).toMatchObject({
       workspaceId: 'ws_demo',
       key: 'HAFT',
       name: 'Haft Platform',
-      repoUrl: 'git@github.com:org/haft.git',
       defaultBranch: 'develop',
       archivedAt: null,
       taskCount: 0,
       executionCount: 0,
       bindingCount: 0,
     });
+    expect(project).not.toHaveProperty('repoUrl');
     expect(project.updatedAt).toBeTruthy();
 
     const duplicate = await request(server)
@@ -85,14 +84,12 @@ describe('Projects and repository bindings API', () => {
       .send({
         name: 'Haft Platform v2',
         description: '',
-        repoUrl: null,
         defaultBranch: 'release/2026',
       })
       .expect(200);
     expect((updated.body as ApiSuccessBody<ProjectDetailDto>).data).toMatchObject({
       name: 'Haft Platform v2',
       description: '',
-      repoUrl: null,
       defaultBranch: 'release/2026',
     });
 
@@ -132,7 +129,8 @@ describe('Projects and repository bindings API', () => {
     for (const body of [
       { key: '1BAD', name: 'Invalid key' },
       { key: 'OK', name: 'x' },
-      { key: 'OK', name: 'Valid name', repoUrl: 'file:///tmp/repo' },
+      // P2-02 display metadata is not part of the frozen P2-01 project schema.
+      { key: 'OK', name: 'Valid name', repoUrl: 'git@github.com:org/repo.git' },
       { key: 'OK', name: 'Valid name', defaultBranch: 'release 1' },
       { key: 'OK', name: 'Valid name', color: 'red' },
       { key: 'OK', name: 'Valid name', archivedAt: null },
@@ -177,7 +175,6 @@ describe('Projects and repository bindings API', () => {
       bindingVersion: 1,
       status: 'unverified',
       canonicalPath: null,
-      headCommit: null,
       lastValidatedAt: null,
       validatedByRunnerId: null,
       validatedBindingVersion: null,
@@ -246,9 +243,6 @@ describe('Projects and repository bindings API', () => {
     await request(server)
       .delete(`/api/projects/${otherProject.id}/bindings/${binding.id}`)
       .expect(404);
-    await request(server)
-      .post(`/api/projects/${otherProject.id}/bindings/${binding.id}/validate`)
-      .expect(404);
 
     const list = await request(server).get(`/api/projects/${project.id}/bindings`).expect(200);
     expect((list.body as ApiSuccessBody<ListDto<ProjectBindingDto>>).data.total).toBe(2);
@@ -262,7 +256,7 @@ describe('Projects and repository bindings API', () => {
     expect((detail.body as ApiSuccessBody<ProjectDetailDto>).data.bindingCount).toBe(1);
   });
 
-  it('returns a typed conflict when validation has no connected runner', async () => {
+  it('keeps P2-02 binding validation out of the P2-01 API surface', async () => {
     const project = await createProject({ key: 'NORUN', name: 'No Runner Project' });
     const created = await request(server)
       .post(`/api/projects/${project.id}/bindings`)
@@ -270,10 +264,53 @@ describe('Projects and repository bindings API', () => {
       .expect(201);
     const binding = (created.body as ApiSuccessBody<ProjectBindingDto>).data;
 
-    const response = await request(server)
+    expect(binding.status).toBe('unverified');
+    await request(server)
       .post(`/api/projects/${project.id}/bindings/${binding.id}/validate`)
-      .expect(409);
-    expect(response.body.error.code).toBe('RUNNER_OFFLINE');
+      .send({})
+      .expect(404);
+    const after = await request(server).get(`/api/projects/${project.id}`).expect(200);
+    expect((after.body as ApiSuccessBody<ProjectDetailDto>).data.bindings[0]).toMatchObject({
+      status: 'unverified',
+      validatedBindingVersion: null,
+    });
+  });
+
+  it('rejects execution start for an archived project without side effects', async () => {
+    const project = await createProject({ key: 'ARCH', name: 'Archived Execution Project' });
+    const createdAgent = await request(server)
+      .post('/api/agents')
+      .send({
+        name: 'Archive Guard Agent',
+        role: 'Archive Guard',
+        runtime: 'codex',
+        computerId: 'computer_local',
+      })
+      .expect(201);
+    const agent = (createdAgent.body as ApiSuccessBody<{ id: string }>).data;
+    const createdTask = await request(server)
+      .post('/api/tasks')
+      .send({
+        title: 'Archived project execution guard',
+        projectId: project.id,
+        assigneeAgentId: agent.id,
+      })
+      .expect(201);
+    const task = (createdTask.body as ApiSuccessBody<TaskDto>).data;
+
+    await request(server).patch(`/api/projects/${project.id}`).send({ archived: true }).expect(200);
+
+    const blocked = await request(server).post(`/api/tasks/${task.id}/start`).send({}).expect(409);
+    expect(blocked.body.error.code).toBe('PROJECT_ARCHIVED');
+
+    expect(await prisma.execution.count({ where: { taskId: task.id } })).toBe(0);
+    const taskAfter = await request(server).get(`/api/tasks/${task.id}`).expect(200);
+    expect((taskAfter.body as ApiSuccessBody<TaskDto>).data).toMatchObject({
+      status: task.status,
+      latestExecution: null,
+    });
+    const agentAfter = await request(server).get(`/api/agents/${agent.id}`).expect(200);
+    expect((agentAfter.body as ApiSuccessBody<{ status: string }>).data.status).toBe('idle');
   });
 
   it('hides projects that belong to another workspace', async () => {

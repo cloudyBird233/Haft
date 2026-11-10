@@ -82,11 +82,4 @@ export class ProjectsController {
   removeBinding(@Param('id') id: string, @Param('bindingId') bindingId: string) {
     return this.projects.removeBinding(id, bindingId);
   }
-
-  @Post(':id/bindings/:bindingId/validate')
-  @HttpCode(200)
-  @ApiOperation({ summary: 'Validate a repository path through the connected runner' })
-  validateBinding(@Param('id') id: string, @Param('bindingId') bindingId: string) {
-    return this.projects.validateBinding(id, bindingId);
-  }
 }

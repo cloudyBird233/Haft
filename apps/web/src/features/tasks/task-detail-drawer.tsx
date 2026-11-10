@@ -99,9 +99,9 @@ export function TaskDetailDrawer({
         : !repositoryBinding
           ? 'This project has no repository binding on the assigned computer'
           : repositoryBinding.status !== 'ready'
-            ? `Repository binding: ${PROJECT_BINDING_STATUS_LABELS[repositoryBinding.status]}. Validate it in Projects before starting a real execution`
+            ? `Repository binding: ${PROJECT_BINDING_STATUS_LABELS[repositoryBinding.status]}. P2-02 repository validation is required before starting a real execution`
             : repositoryBinding.validatedBindingVersion !== repositoryBinding.bindingVersion
-              ? 'The repository binding changed after validation. Validate it again in Projects'
+              ? 'The repository binding changed after validation and must be revalidated by P2-02'
               : null;
   const runtimeBlockedReason = !requiresRunner
     ? null

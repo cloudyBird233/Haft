@@ -194,11 +194,6 @@
       "role": "textbox",
       "name": "Description"
     },
-    "projectForm.repoUrl": {
-      "testId": "project-repo-url-input",
-      "role": "textbox",
-      "name": "Repository URL"
-    },
     "projectForm.defaultBranch": {
       "testId": "project-default-branch-input",
       "role": "textbox",
@@ -246,7 +241,6 @@
     },
     "projectBindings.row": { "testId": "project-binding-row" },
     "projectBindings.validationError": { "testId": "binding-validation-error", "role": "alert" },
-    "projectBindings.validate": { "testId": "binding-validate-button", "role": "button" },
     "projectBindings.edit": {
       "testId": "binding-edit-button",
       "role": "button",
@@ -401,6 +395,11 @@
       "name": "Start execution"
     },
     "taskDetail.startHint": { "testId": "execution-start-hint" },
+    "taskDetail.projectBindingLink": {
+      "testId": "task-project-binding-link",
+      "role": "link",
+      "name": "Open project bindings"
+    },
     "taskDetail.error": { "testId": "task-detail-error" },
     "taskDetail.retry": { "testId": "task-detail-retry-button", "role": "button" },
     "taskDetail.notFound": { "testId": "task-detail-not-found" },
@@ -497,7 +496,6 @@
     "project-card",
     "project-detail-panel",
     "project-binding-create-button",
-    "binding-validate-button",
     "task-create-button",
     "task-board",
     "task-card",
@@ -531,7 +529,6 @@
       "click.projects.create",
       "fill.projectForm.key",
       "fill.projectForm.name",
-      "fill.projectForm.repoUrl",
       "fill.projectForm.defaultBranch",
       "click.projectForm.submit",
       "expect.toast",
@@ -544,11 +541,6 @@
       "fill.bindingForm.path",
       "click.bindingForm.submit",
       "expect.projectBindings.row"
-    ],
-    "validateRepositoryBinding": [
-      "click.projectBindings.validate",
-      "expect.toast",
-      "expect.projectBindings.row[data-binding-status=ready]"
     ],
     "createAgent": [
       "navigate.agents",

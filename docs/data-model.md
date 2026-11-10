@@ -50,16 +50,15 @@ recording.
 
 ### Project
 
-| Column                         | Type           | Notes                                                   |
-| ------------------------------ | -------------- | ------------------------------------------------------- |
-| `id`                           | String, PK     | `project_demo`                                          |
-| `workspaceId`                  | FK → Workspace | Cascade delete                                          |
-| `key`                          | String         | Short key, e.g. `RAFT`                                  |
-| `name`, `description`, `color` | String         | Display metadata                                        |
-| `repoUrl`                      | String?        | Display/validation metadata; never cloned by the server |
-| `defaultBranch`                | String         | Default `main`; sole authority for the branch           |
-| `archivedAt`                   | DateTime?      | `null` = active; archived projects cannot accept tasks  |
-| `createdAt`, `updatedAt`       | DateTime       |                                                         |
+| Column                         | Type           | Notes                                                    |
+| ------------------------------ | -------------- | -------------------------------------------------------- |
+| `id`                           | String, PK     | `project_demo`                                           |
+| `workspaceId`                  | FK → Workspace | Cascade delete                                           |
+| `key`                          | String         | Short key, e.g. `RAFT`                                   |
+| `name`, `description`, `color` | String         | Display metadata                                         |
+| `defaultBranch`                | String         | Default `main`; sole authority for the branch            |
+| `archivedAt`                   | DateTime?      | `null` = active; archives block new tasks and executions |
+| `createdAt`, `updatedAt`       | DateTime       |                                                          |
 
 Unique on `(workspaceId, key)`; indexed by `workspaceId` and
 `(workspaceId, archivedAt)`.
@@ -67,9 +66,10 @@ Unique on `(workspaceId, key)`; indexed by `workspaceId` and
 ### ProjectRepositoryBinding
 
 A project's repository path on one Computer. The path is opaque user input; the
-API never normalizes it and never inspects the filesystem. Only a matching
-runner `repository.validation` response can move a binding out of
-`unverified`.
+API never normalizes it and never inspects the filesystem. P2-01 creates every
+binding as `unverified` and its REST API never writes any other status. Only
+P2-02's Runner `repository.validation` response may move a binding to `ready`,
+`missing`, or `error`.
 
 | Column                    | Type          | Notes                                              |
 | ------------------------- | ------------- | -------------------------------------------------- |
@@ -79,17 +79,16 @@ runner `repository.validation` response can move a binding out of
 | `path`                    | String        | Raw input; SHA-256 in `pathHash`                   |
 | `pathHash`                | String        | Stable hash for audit/identity                     |
 | `bindingVersion`          | Int           | Starts at 1; increments only on a real path change |
-| `platform`                | String?       | Runner platform                                    |
-| `status`                  | String        | `unverified`, `ready`, `missing`, or `error`       |
-| `validationRequestId`     | String?       | Correlation/idempotency id                         |
-| `canonicalPath`           | String?       | Runner realpath on success                         |
-| `headCommit`              | String?       | Runner HEAD commit on success                      |
-| `validationErrorCode`     | String?       | Concrete `REPO_*` code on failure                  |
-| `validationError`         | String?       | Human-readable failure message                     |
-| `lastValidatedAt`         | DateTime?     | Set on success and failure                         |
-| `validatedByRunnerId`     | FK → Runner?  | `SetNull` on runner delete                         |
-| `validatedBindingVersion` | Int?          | Version that produced the last success             |
-| `policyVersion`           | String?       | Runner path-policy fingerprint                     |
+| `platform`                | String?       | Runner platform (reserved for P2-02)               |
+| `status`                  | String        | `unverified` in P2-01; P2-02 adds the other states |
+| `validationRequestId`     | String?       | P2-02 correlation/idempotency id                   |
+| `canonicalPath`           | String?       | P2-02 runner realpath on success                   |
+| `validationErrorCode`     | String?       | P2-02 concrete `REPO_*` code on failure            |
+| `validationError`         | String?       | P2-02 human-readable failure message               |
+| `lastValidatedAt`         | DateTime?     | P2-02 validation timestamp                         |
+| `validatedByRunnerId`     | FK → Runner?  | P2-02 validator; `SetNull` on runner delete        |
+| `validatedBindingVersion` | Int?          | P2-02 version that produced the last success       |
+| `policyVersion`           | String?       | P2-02 runner path-policy fingerprint               |
 | `createdAt`, `updatedAt`  | DateTime      |                                                    |
 
 Unique on `(projectId, computerId)`; indexed by `(projectId, status)`,
@@ -98,7 +97,7 @@ changing a Project's branch affects only future executions, and every execution
 captures a branch snapshot.
 
 See [p2-01-project-repository-binding.md](p2-01-project-repository-binding.md)
-for the state machine, API, and validation flow.
+for the state machine, API, archive behavior, and concurrency guarantees.
 
 ### Computer
 

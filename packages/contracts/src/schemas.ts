@@ -66,38 +66,12 @@ const projectColor = z
   .trim()
   .regex(/^#[0-9a-fA-F]{6}$/, 'Color must be a six-digit hex value such as #6b7280');
 
-function isRepositoryUrl(value: string): boolean {
-  if (/\s/.test(value)) return false;
-  for (const character of value) {
-    const codePoint = character.codePointAt(0) ?? 0;
-    if (codePoint <= 0x1f || codePoint === 0x7f) return false;
-  }
-  try {
-    const url = new URL(value);
-    return ['http:', 'https:', 'ssh:', 'git:'].includes(url.protocol);
-  } catch {
-    // SCP-like SSH syntax (git@example.com:org/repo.git) is not a URL, but it
-    // is an accepted repository address in every Git client.
-    return /^git@[A-Za-z0-9._-]+:[^\s]+$/.test(value);
-  }
-}
-
-const repositoryUrl = z
-  .union([z.string().trim().max(2000, 'Repository URL is too long'), z.null()])
-  .optional()
-  .transform((value) => (value ? value : null))
-  .refine(
-    (value) => value === null || isRepositoryUrl(value),
-    'Repository URL must be an http(s), ssh, git URL, or git@host:path address',
-  );
-
 export const createProjectSchema = z
   .object({
     key: projectKey,
     name: projectName,
     description: z.string().trim().max(2000, 'Description is too long').optional().default(''),
     color: projectColor.optional().default('#6b7280'),
-    repoUrl: repositoryUrl,
     defaultBranch: repositoryDefaultBranchSchema.optional().default('main'),
   })
   .strict();
@@ -107,7 +81,6 @@ export const updateProjectSchema = z
     name: projectName.optional(),
     description: z.string().trim().max(2000, 'Description is too long').optional(),
     color: projectColor.optional(),
-    repoUrl: repositoryUrl.optional(),
     defaultBranch: repositoryDefaultBranchSchema.optional(),
     archived: z.boolean().optional(),
   })

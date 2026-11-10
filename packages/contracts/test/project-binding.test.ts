@@ -15,31 +15,21 @@ describe('project REST schemas', () => {
     const parsed = createProjectSchema.parse({
       key: 'haft',
       name: 'Haft Platform',
-      repoUrl: 'git@github.com:org/haft.git',
     });
     expect(parsed.key).toBe('HAFT');
     expect(parsed.defaultBranch).toBe('main');
     expect(parsed.color).toBe('#6b7280');
     expect(parsed.description).toBe('');
-    expect(parsed.repoUrl).toBe('git@github.com:org/haft.git');
   });
 
-  it('accepts https, ssh, and git URLs but not arbitrary strings', () => {
-    for (const repoUrl of [
-      'https://example.com/org/repo.git',
-      'ssh://git@example.com/org/repo.git',
-      'git://example.com/org/repo.git',
-      'git@example.com:org/repo.git',
-    ]) {
-      expect(createProjectSchema.safeParse({ key: 'APP', name: 'App', repoUrl }).success).toBe(
-        true,
-      );
-    }
-    for (const repoUrl of ['not a url', 'file:///tmp/repo', 'https://example.com/a b']) {
-      expect(createProjectSchema.safeParse({ key: 'APP', name: 'App', repoUrl }).success).toBe(
-        false,
-      );
-    }
+  it('rejects P2-02 project metadata such as repoUrl', () => {
+    expect(
+      createProjectSchema.safeParse({
+        key: 'APP',
+        name: 'App',
+        repoUrl: 'git@github.com:org/app.git',
+      }).success,
+    ).toBe(false);
   });
 
   it('rejects malformed keys and whitespace in default branches', () => {
@@ -56,12 +46,10 @@ describe('project REST schemas', () => {
     expect(repositoryDefaultBranchSchema.parse('release/2026')).toBe('release/2026');
   });
 
-  it('requires at least one mutable field on update and keeps repoUrl absent when omitted', () => {
+  it('requires at least one mutable field on update', () => {
     expect(updateProjectSchema.safeParse({}).success).toBe(false);
-    const parsed = updateProjectSchema.parse({ name: 'Renamed' });
-    expect(parsed).toEqual({ name: 'Renamed' });
-    expect(Object.prototype.hasOwnProperty.call(parsed, 'repoUrl')).toBe(false);
-    expect(updateProjectSchema.parse({ repoUrl: null }).repoUrl).toBeNull();
+    expect(updateProjectSchema.parse({ name: 'Renamed' })).toEqual({ name: 'Renamed' });
+    expect(updateProjectSchema.parse({ archived: true })).toEqual({ archived: true });
     expect(updateProjectSchema.safeParse({ key: 'NEW' }).success).toBe(false);
   });
 });
@@ -101,8 +89,9 @@ describe('project binding REST schemas', () => {
     expect(parsed).toMatchObject({ path: '/srv/repo', defaultBranch: 'release' });
   });
 
-  it('freezes the four binding statuses and the new invalid code', () => {
+  it('freezes the four binding statuses and the P2-01 execution codes', () => {
     expect(PROJECT_BINDING_STATUSES).toEqual(['unverified', 'ready', 'missing', 'error']);
-    expect(ERROR_CODES.PROJECT_BINDING_INVALID).toBe('PROJECT_BINDING_INVALID');
+    expect(ERROR_CODES.PROJECT_BINDING_MISSING).toBe('PROJECT_BINDING_MISSING');
+    expect(ERROR_CODES.PROJECT_BINDING_NOT_READY).toBe('PROJECT_BINDING_NOT_READY');
   });
 });

@@ -1,5 +1,5 @@
 import type { ProjectDto } from '@raft-lite/contracts';
-import { GitBranch, GitFork, ListChecks, PlayCircle } from 'lucide-react';
+import { GitBranch, ListChecks, PlayCircle } from 'lucide-react';
 
 export function ProjectCard({
   project,
@@ -49,13 +49,7 @@ export function ProjectCard({
         {project.description || 'No description provided.'}
       </p>
 
-      <div className="mt-3 flex min-w-0 items-center gap-1.5 text-[10.5px] text-faint">
-        <GitFork size={11} aria-hidden="true" className="shrink-0" />
-        <span className="truncate font-mono" title={project.repoUrl ?? 'No repository URL'}>
-          {project.repoUrl ?? 'No repository URL'}
-        </span>
-      </div>
-      <div className="mt-1.5 flex items-center gap-1.5 text-[10.5px] text-faint">
+      <div className="mt-3 flex items-center gap-1.5 text-[10.5px] text-faint">
         <GitBranch size={11} aria-hidden="true" />
         <span className="font-mono">{project.defaultBranch}</span>
       </div>

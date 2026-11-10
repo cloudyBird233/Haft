@@ -104,7 +104,6 @@ export interface ProjectDto {
   key: string;
   description: string;
   color: string;
-  repoUrl: string | null;
   defaultBranch: string;
   archivedAt: string | null;
   createdAt: string;
@@ -126,7 +125,6 @@ export interface ProjectBindingDto {
   status: ProjectBindingStatus;
   platform: string | null;
   canonicalPath: string | null;
-  headCommit: string | null;
   validationRequestId: string | null;
   validationErrorCode: string | null;
   validationError: string | null;

@@ -174,11 +174,6 @@ export const api = {
       `/projects/${encodeURIComponent(projectId)}/bindings/${encodeURIComponent(bindingId)}`,
       { method: 'DELETE' },
     ),
-  validateProjectBinding: (projectId: string, bindingId: string) =>
-    request<ProjectBindingDto>(
-      `/projects/${encodeURIComponent(projectId)}/bindings/${encodeURIComponent(bindingId)}/validate`,
-      { method: 'POST' },
-    ),
   getAgent: (id: string) => request<AgentDetailDto>(`/agents/${encodeURIComponent(id)}`),
   createAgent: (input: CreateAgentInput) =>
     request<AgentDto>('/agents', { method: 'POST', body: json(input) }),

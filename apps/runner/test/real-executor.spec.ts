@@ -2,7 +2,11 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { ChildProcess } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
-import type { ExecutionPhase, ExecutionStartMessage, RunnerLogEntry } from '@raft-lite/contracts';
+import type {
+  ExecutionPhase,
+  ExecutionStartMessage,
+  RunnerLogEntry,
+} from '@raft-lite/contracts';
 import type { RunnerConfig } from '../src/config';
 import type {
   CancelledPayload,
@@ -52,7 +56,6 @@ function makeConfig(overrides: Partial<RunnerConfig> = {}): RunnerConfig {
     cliTimeoutMs: 60_000,
     allowAutoApprove: false,
     projectPaths: { project_demo: process.cwd() },
-    allowedRepositoryRoots: [],
     stepMs: 15,
     healthPort: 0,
     maxConcurrentExecutions: 1,

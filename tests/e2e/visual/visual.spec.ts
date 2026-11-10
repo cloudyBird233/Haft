@@ -10,7 +10,7 @@ import {
   waitForAgentList,
   waitForBoard,
 } from '../../support/app';
-import { E2E_REPOSITORY_PATH, waitForFakeRunner } from '../../support/repository';
+import { waitForFakeRunner } from '../../support/repository';
 import { byTestId } from '../../support/ui-contract';
 
 const SCREENSHOT_DIR = join(process.cwd(), 'docs', 'screenshots');
@@ -150,7 +150,7 @@ test.describe('visual layout and screenshot gallery', () => {
     await capture(page, 'execution-completed-1440x900.png');
   });
 
-  test('project list, validated binding, and project form are captured', async ({
+  test('project list, unverified binding, and project form are captured', async ({
     page,
     request,
   }) => {
@@ -160,15 +160,13 @@ test.describe('visual layout and screenshot gallery', () => {
     const project = await factory.createProject({
       key: 'VIS',
       name: 'Visual Repository Project',
-      description: 'A project with one runner-validated repository binding.',
-      repoUrl: 'git@github.com:org/visual-repository.git',
+      description: 'A project with one unverified repository binding.',
       defaultBranch: 'main',
     });
-    const binding = await factory.createProjectBinding(project.id, {
+    await factory.createProjectBinding(project.id, {
       computerId: 'computer_local',
-      path: E2E_REPOSITORY_PATH,
+      path: process.cwd(),
     });
-    await factory.validateProjectBinding(project.id, binding.id);
 
     await gotoRoute(page, 'projects');
     await expect(byTestId(page, 'projects.page')).toBeVisible();
@@ -180,9 +178,9 @@ test.describe('visual layout and screenshot gallery', () => {
     await expect(byTestId(page, 'projectDetail.panel')).toBeVisible();
     await expect(byTestId(page, 'projectBindings.row')).toHaveAttribute(
       'data-binding-status',
-      'ready',
+      'unverified',
     );
-    await expect(byTestId(page, 'projectBindings.row')).toContainText('Last checked');
+    await expect(byTestId(page, 'projectBindings.row')).toContainText('Never validated');
     await expectNoPageOverflow(page);
     await capture(page, 'project-detail-1440x900.png');
 

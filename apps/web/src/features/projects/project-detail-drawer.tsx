@@ -1,17 +1,7 @@
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { ComputerDto, ProjectBindingDto, ProjectDto } from '@raft-lite/contracts';
-import {
-  Archive,
-  ArchiveRestore,
-  GitBranch,
-  GitFork,
-  Pencil,
-  Plus,
-  RefreshCw,
-  ShieldCheck,
-  Trash2,
-} from 'lucide-react';
+import { Archive, ArchiveRestore, GitBranch, Pencil, Plus, Trash2 } from 'lucide-react';
 import { api, ApiError } from '../../services/api';
 import { queryKeys } from '../../services/query-keys';
 import { useProject } from '../../hooks/use-raft-data';
@@ -52,7 +42,6 @@ export function ProjectDetailDrawer({
   const { toast } = useToast();
   const [bindingFormOpen, setBindingFormOpen] = useState(false);
   const [editingBinding, setEditingBinding] = useState<ProjectBindingDto | null>(null);
-  const [validatingId, setValidatingId] = useState<string | null>(null);
   const [deleteBindingTarget, setDeleteBindingTarget] = useState<ProjectBindingDto | null>(null);
   const [deletingBinding, setDeletingBinding] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
@@ -85,7 +74,7 @@ export function ProjectDetailDrawer({
       await api.updateProjectBinding(project.id, editingBinding.id, { path: values.path });
       toast({
         title: 'Repository path updated',
-        description: 'Validate the binding again before starting a real execution.',
+        description: 'The binding is unverified again and remains blocked for real executions.',
         variant: 'success',
       });
     } else {
@@ -95,33 +84,12 @@ export function ProjectDetailDrawer({
       });
       toast({
         title: 'Repository binding created',
-        description: 'Validate the path with the runner to make it executable.',
+        description:
+          'The binding is unverified. P2-02 repository validation is required before execution.',
         variant: 'success',
       });
     }
     invalidate();
-  }
-
-  async function handleValidate(binding: ProjectBindingDto): Promise<void> {
-    if (!project) return;
-    setValidatingId(binding.id);
-    try {
-      const result = await api.validateProjectBinding(project.id, binding.id);
-      toast({
-        title: 'Repository validated',
-        description: `${binding.computer?.name ?? 'The runner'} confirmed ${result.canonicalPath ?? binding.path}.`,
-        variant: 'success',
-      });
-    } catch (error) {
-      toast({
-        title: 'Repository validation failed',
-        description: errorMessage(error),
-        variant: 'error',
-      });
-    } finally {
-      setValidatingId(null);
-      invalidate();
-    }
   }
 
   async function handleDeleteBinding(): Promise<void> {
@@ -289,14 +257,6 @@ export function ProjectDetailDrawer({
                     {project.description || 'No description provided.'}
                   </p>
                   <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 rounded-xl border border-line bg-[#fbfaf7] p-3.5 text-[11.5px]">
-                    <div className="col-span-2 min-w-0">
-                      <dt className="flex items-center gap-1.5 text-faint">
-                        <GitFork size={11} aria-hidden="true" /> Repository URL
-                      </dt>
-                      <dd className="mt-0.5 truncate font-mono font-medium text-ink">
-                        {project.repoUrl ?? 'Not set'}
-                      </dd>
-                    </div>
                     <div>
                       <dt className="flex items-center gap-1.5 text-faint">
                         <GitBranch size={11} aria-hidden="true" /> Default branch
@@ -321,7 +281,8 @@ export function ProjectDetailDrawer({
                         Repository bindings
                       </h3>
                       <p className="mt-1 text-[11px] text-muted">
-                        A real execution needs a validated binding on the assigned computer.
+                        Bindings start unverified. P2-02 repository validation will make them
+                        executable.
                       </p>
                     </div>
                     <Button
@@ -381,11 +342,6 @@ export function ProjectDetailDrawer({
                                 ? `Last checked ${formatShortDateTime(binding.lastValidatedAt)}`
                                 : 'Never validated'}
                             </span>
-                            {binding.headCommit ? (
-                              <span className="font-mono">
-                                HEAD {binding.headCommit.slice(0, 8)}
-                              </span>
-                            ) : null}
                           </div>
 
                           {binding.validationError ? (
@@ -408,30 +364,14 @@ export function ProjectDetailDrawer({
                                 ? 'The path is missing. Real executions are blocked.'
                                 : binding.status === 'error'
                                   ? 'Validation failed. Real executions are blocked.'
-                                  : 'Not executable until the runner validates this path.'}
+                                  : 'Unverified. P2-02 repository validation is required before real execution.'}
                           </p>
 
                           <div className="mt-2.5 flex flex-wrap items-center gap-1.5 border-t border-line pt-2.5">
                             <Button
-                              variant="secondary"
-                              size="sm"
-                              onClick={() => void handleValidate(binding)}
-                              loading={validatingId === binding.id}
-                              disabled={validatingId !== null}
-                              data-testid="binding-validate-button"
-                            >
-                              <ShieldCheck size={12} aria-hidden="true" />
-                              {validatingId === binding.id
-                                ? 'Validating…'
-                                : binding.status === 'ready'
-                                  ? 'Revalidate'
-                                  : 'Validate'}
-                            </Button>
-                            <Button
                               variant="ghost"
                               size="sm"
                               onClick={() => openEditBinding(binding)}
-                              disabled={validatingId !== null}
                               data-testid="binding-edit-button"
                             >
                               <Pencil size={11} aria-hidden="true" />
@@ -441,19 +381,12 @@ export function ProjectDetailDrawer({
                               variant="ghost"
                               size="sm"
                               onClick={() => setDeleteBindingTarget(binding)}
-                              disabled={validatingId !== null}
                               data-testid="binding-delete-button"
                               className="text-danger hover:bg-danger/[0.06] hover:text-danger"
                             >
                               <Trash2 size={11} aria-hidden="true" />
                               Delete
                             </Button>
-                            {validatingId === binding.id ? (
-                              <span className="ml-auto inline-flex items-center gap-1 text-[10px] text-faint">
-                                <RefreshCw size={10} className="animate-spin" aria-hidden="true" />
-                                Waiting for the runner
-                              </span>
-                            ) : null}
                           </div>
                         </div>
                       ))}

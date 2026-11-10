@@ -113,7 +113,6 @@ describe('TaskDetailDrawer repository binding guard', () => {
         ...testBinding,
         status: 'unverified',
         canonicalPath: null,
-        headCommit: null,
         lastValidatedAt: null,
         validatedByRunnerId: null,
         validatedBindingVersion: null,
@@ -125,7 +124,7 @@ describe('TaskDetailDrawer repository binding guard', () => {
       `/projects?project=${testProject.id}`,
     );
     expect(screen.getByTestId('execution-start-hint')).toHaveTextContent(
-      'Repository binding: Unverified. Validate it in Projects before starting a real execution',
+      'Repository binding: Unverified. P2-02 repository validation is required before starting a real execution',
     );
     expect(screen.getByTestId('execution-start-button')).toBeDisabled();
     expect(api.startTask).not.toHaveBeenCalled();
@@ -142,7 +141,7 @@ describe('TaskDetailDrawer repository binding guard', () => {
   it('blocks a binding whose path changed after the last validation', async () => {
     renderDrawer([{ ...testBinding, bindingVersion: 2, validatedBindingVersion: 1 }]);
     expect(await screen.findByTestId('execution-start-hint')).toHaveTextContent(
-      'The repository binding changed after validation. Validate it again in Projects',
+      'The repository binding changed after validation and must be revalidated by P2-02',
     );
     expect(screen.getByTestId('execution-start-button')).toBeDisabled();
   });
