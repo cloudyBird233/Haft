@@ -152,10 +152,43 @@ Deterministic failure triggers:
 The Fake Runner is covered by three E2E tests in
 `tests/e2e/functional/runner-execution.spec.ts`: successful execution through the
 protocol and task completion, cancellation waiting for a runner confirmation,
-and deterministic failure propagation to task/agent state and logs. API-level
+and deterministic failure propagation to task/agent state and logs. Each of
+these tests first obtains a `ready` binding for `project_demo` through the
+test-only `POST /__test__/projects/:projectId/bindings/:bindingId/ready`
+fixture; without a `ready` binding the API deliberately rejects the real
+execution. P2-01's product API never writes `ready` and never calls the Runner
+for bindings; the fixture exists only when `E2E_TEST_MODE=true`. API-level
 protocol tests in `apps/api/test/runner.integration.spec.ts` cover pairing,
 dispatch, stale-runner reconciliation, duplicate log handling, diff persistence,
-diff idempotency, and rejection of Git results from a non-owning runner.
+diff idempotency, rejection of Git results from a non-owning runner, and the
+binding/archive execution guards.
+
+### Project and repository binding coverage
+
+- `packages/contracts/test/project-binding.test.ts` covers project
+  key/name/defaultBranch and binding path schemas, rejection of P2-02 fields,
+  DTO/status constants, and immutable-field vocabulary.
+- `apps/api/test/projects.integration.spec.ts` covers project CRUD and counts,
+  duplicate keys, archive/restore, archived-project task rejection, delete
+  conflict, cross-workspace 404, binding create/duplicate/path-versioning,
+  immutable-field rejection, project/binding ownership, the absence of a
+  P2-01 validation endpoint, and archived-project execution rejection without
+  side effects.
+- `apps/api/test/runner.integration.spec.ts` covers the real execution gate:
+  missing binding, unverified binding, a `ready` binding whose validated version
+  no longer matches the current binding version, zero Runner messages for
+  binding CRUD, archived-project rejection with a connected Runner, the
+  Execution repository snapshot, and a deterministic binding-change race
+  between precheck and Execution creation.
+- Web component tests cover the Projects page, project form, project detail
+  drawer, unverified binding states, and task-project selection.
+- `tests/e2e/functional/projects-bindings.spec.ts` is the deterministic P2-01
+  loop: create a project in the UI → bind a Computer path → observe the
+  `unverified` binding and the absence of a Validate action → create a Task
+  against that project → confirm the explicit P2-02 validation reason disables
+  real execution → verify Project/Binding/Task counts and no Execution.
+- Visual E2E regenerates the Projects list, unverified binding drawer, and create
+  project dialog screenshots under `docs/screenshots/`.
 
 ### Git diff coverage
 
@@ -228,7 +261,15 @@ It uses:
 | Recovery      | `test-results/real-e2e/recovery`                         |
 | Mode          | `real`, runtimes `codex,opencode`, timeout 600 s         |
 
-`tests/e2e-real/prepare-project.mjs` creates the disposable repository.
+`tests/e2e-real/prepare-project.mjs` creates the disposable repository and
+`tests/support/repository.ts` creates the `project_demo` binding at that path.
+Because P2-01 deliberately has no repository-validation protocol, the helper
+marks the binding `ready` through the E2E-only fixture
+(`POST /__test__/projects/:projectId/bindings/:bindingId/ready`); production
+P2-01 never writes `ready`. The runner still uses the legacy
+`HAFT_RUNNER_PROJECTS` mapping for P2-01 execution routing, which P2-02 will
+replace with the explicit repository handshake.
+
 `tests/e2e-real/real-cli.spec.ts` starts a real task through the API and
 `tests/e2e-real/real-ui.spec.ts` drives the real browser UI end to end:
 
@@ -266,19 +307,30 @@ acceptance must be recorded in [REPORT.md](REPORT.md).
 - `resetSeed`: auto-used fixture that resets the default seed before each test.
 
 `tests/fixtures/test-data-factory.ts` creates ordinary domain data through the
-public REST API — never by writing SQLite directly. It covers agents, tasks,
-assignment, executions, logs, runtime mode, advance/finish, and unique names:
+public REST API — never by writing SQLite directly. It covers projects,
+repository bindings, agents, tasks, assignment, executions, logs, runtime mode,
+advance/finish, and unique names:
 
 ```ts
 const agent = await factory.createAgent({ role: 'Release Steward' });
-const task = await factory.createTask({ assigneeAgentId: agent.id });
-const { execution } = await factory.createRunningExecution({
-  task: { title: 'Capture the execution gallery' },
+const project = await factory.createProject({ key: 'REL', name: 'Release' });
+const binding = await factory.createProjectBinding(project.id, {
+  computerId: 'computer_local',
+  path: process.cwd(),
+});
+// Test-only fixture; requires E2E_TEST_MODE=true. Production P2-01 never
+// validates bindings and never writes `ready`.
+await factory.markProjectBindingReady(project.id, binding.id);
+const task = await factory.createTask({
+  assigneeAgentId: agent.id,
+  projectId: project.id,
 });
 ```
 
 Because factory calls use the same validation and state machine as the UI, a
-factory helper failing is a real API regression, not a fixture artifact.
+factory helper failing is a real API regression, not a fixture artifact. The one
+exception is `markProjectBindingReady`, which deliberately bypasses the
+unfinished P2-02 Runner validation protocol.
 
 ## Machine-readable UI interaction contract
 

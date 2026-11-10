@@ -1,10 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import {
-  HttpStatus,
-  Injectable,
-  type OnModuleDestroy,
-  type OnModuleInit,
-} from '@nestjs/common';
+import { HttpStatus, Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import type {
   RunnerCapabilities,
   RunnerEnvelope,
@@ -307,7 +302,8 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
     });
     this.logger.warn({
       eventType: 'runner.disconnected',
-      message: 'Runner disconnected; running executions stay alive during the recovery grace window',
+      message:
+        'Runner disconnected; running executions stay alive during the recovery grace window',
       runnerId,
       status: 'offline',
     });
@@ -352,6 +348,7 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
           runtimes: payload.capabilities.runtimes,
           projectIds: payload.capabilities.projectIds,
           maxConcurrentExecutions: maxConcurrent,
+          features: payload.capabilities.features ?? [],
         }),
         maxConcurrentExecutions: maxConcurrent,
         status: 'online',
@@ -673,7 +670,8 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
       if (connectedAt && execution.createdAt.getTime() >= connectedAt.getTime()) {
         this.logger.info({
           eventType: 'runner.execution_pending',
-          message: 'Execution started after this runner connection; keeping it while the snapshot settles',
+          message:
+            'Execution started after this runner connection; keeping it while the snapshot settles',
           runnerId,
           executionId: execution.id,
           status: 'running',
@@ -726,9 +724,7 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
       where: { id: executionId },
       select: { runnerId: true, status: true },
     });
-    return Boolean(
-      execution && execution.runnerId === runnerId && execution.status === 'running',
-    );
+    return Boolean(execution && execution.runnerId === runnerId && execution.status === 'running');
   }
 
   private scheduleRecoveryTimeout(runnerId: string): void {

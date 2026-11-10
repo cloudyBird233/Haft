@@ -9,6 +9,8 @@ import type {
   ExecutionDiffDto,
   ExecutionLogDto,
   ExecutionSummaryDto,
+  ProjectBindingDto,
+  ProjectDetailDto,
   ProjectDto,
   RunnerCapabilitiesDto,
   RunnerDto,
@@ -27,10 +29,13 @@ import type {
   LogLevel,
   LogStream,
   ProgressMode,
+  ProjectBindingStatus,
+  RunnerFeature,
   RunnerStatus,
   TaskPriority,
   TaskStatus,
 } from '@raft-lite/contracts';
+import { RUNNER_FEATURES } from '@raft-lite/contracts';
 
 export const agentRelations = {
   computer: { include: { runner: true } },
@@ -76,6 +81,13 @@ export const runnerRelations = {
 } satisfies Prisma.RunnerInclude;
 export type RunnerWithRelations = Prisma.RunnerGetPayload<{ include: typeof runnerRelations }>;
 
+export const projectBindingRelations = {
+  computer: true,
+} satisfies Prisma.ProjectRepositoryBindingInclude;
+export type ProjectBindingWithRelations = Prisma.ProjectRepositoryBindingGetPayload<{
+  include: typeof projectBindingRelations;
+}>;
+
 const iso = (value: Date): string => value.toISOString();
 const isoOrNull = (value: Date | null): string | null => (value ? iso(value) : null);
 const asEnum = <T extends string>(value: string): T => value as T;
@@ -84,6 +96,13 @@ function parseRunnerCapabilities(value: string): RunnerCapabilitiesDto {
   try {
     const parsed = JSON.parse(value) as Partial<RunnerCapabilitiesDto>;
     if (parsed && typeof parsed === 'object') {
+      const knownFeatures = new Set<string>(RUNNER_FEATURES);
+      const features = Array.isArray(parsed.features)
+        ? parsed.features.filter(
+            (feature): feature is RunnerFeature =>
+              typeof feature === 'string' && knownFeatures.has(feature),
+          )
+        : [];
       return {
         runtimes: Array.isArray(parsed.runtimes) ? parsed.runtimes : [],
         projectIds: Array.isArray(parsed.projectIds) ? parsed.projectIds : [],
@@ -91,12 +110,13 @@ function parseRunnerCapabilities(value: string): RunnerCapabilitiesDto {
           typeof parsed.maxConcurrentExecutions === 'number'
             ? parsed.maxConcurrentExecutions
             : null,
+        features: [...new Set(features)],
       };
     }
   } catch {
     // Ignore malformed legacy capability blobs; the API remains readable.
   }
-  return { runtimes: [], projectIds: [], maxConcurrentExecutions: null };
+  return { runtimes: [], projectIds: [], maxConcurrentExecutions: null, features: [] };
 }
 
 export function toComputerDto(computer: Prisma.ComputerGetPayload<object>): ComputerDto {
@@ -110,14 +130,65 @@ export function toComputerDto(computer: Prisma.ComputerGetPayload<object>): Comp
   };
 }
 
-export function toProjectDto(project: Prisma.ProjectGetPayload<object>): ProjectDto {
+export interface ProjectCounts {
+  taskCount: number;
+  executionCount: number;
+  bindingCount: number;
+}
+
+export function toProjectDto(
+  project: Prisma.ProjectGetPayload<object>,
+  counts?: Partial<ProjectCounts>,
+): ProjectDto {
   return {
     id: project.id,
+    workspaceId: project.workspaceId,
     name: project.name,
     key: project.key,
     description: project.description,
     color: project.color,
+    defaultBranch: project.defaultBranch,
+    archivedAt: isoOrNull(project.archivedAt),
     createdAt: iso(project.createdAt),
+    updatedAt: iso(project.updatedAt),
+    ...(counts?.taskCount !== undefined ? { taskCount: counts.taskCount } : {}),
+    ...(counts?.executionCount !== undefined ? { executionCount: counts.executionCount } : {}),
+    ...(counts?.bindingCount !== undefined ? { bindingCount: counts.bindingCount } : {}),
+  };
+}
+
+export function toProjectBindingDto(binding: ProjectBindingWithRelations): ProjectBindingDto {
+  return {
+    id: binding.id,
+    projectId: binding.projectId,
+    computerId: binding.computerId,
+    computer: binding.computer ? toComputerDto(binding.computer) : null,
+    path: binding.path,
+    pathHash: binding.pathHash,
+    bindingVersion: binding.bindingVersion,
+    status: asEnum<ProjectBindingStatus>(binding.status),
+    platform: binding.platform,
+    canonicalPath: binding.canonicalPath,
+    validationRequestId: binding.validationRequestId,
+    validationErrorCode: binding.validationErrorCode,
+    validationError: binding.validationError,
+    lastValidatedAt: isoOrNull(binding.lastValidatedAt),
+    validatedByRunnerId: binding.validatedByRunnerId,
+    validatedBindingVersion: binding.validatedBindingVersion,
+    policyVersion: binding.policyVersion,
+    createdAt: iso(binding.createdAt),
+    updatedAt: iso(binding.updatedAt),
+  };
+}
+
+export function toProjectDetailDto(
+  project: Prisma.ProjectGetPayload<object>,
+  counts: ProjectCounts,
+  bindings: ProjectBindingWithRelations[],
+): ProjectDetailDto {
+  return {
+    ...toProjectDto(project, counts),
+    bindings: bindings.map(toProjectBindingDto),
   };
 }
 
@@ -280,6 +351,10 @@ export function toExecutionDto(execution: ExecutionWithRelations): ExecutionDto 
     agentId: execution.agentId,
     runtime: execution.runtime,
     runnerId: execution.runnerId,
+    repositoryProjectId: execution.repositoryProjectId,
+    repositoryBindingId: execution.repositoryBindingId,
+    repositoryBindingVersion: execution.repositoryBindingVersion,
+    repositoryDefaultBranch: execution.repositoryDefaultBranch,
     status: asEnum<ExecutionStatus>(execution.status),
     phase: asEnum<ExecutionPhase>(execution.phase),
     progress: execution.progress,
@@ -397,6 +472,6 @@ export function toWorkspaceDto(
     name: workspace.name,
     slug: workspace.slug,
     createdAt: iso(workspace.createdAt),
-    projects: workspace.projects.map(toProjectDto),
+    projects: workspace.projects.map((project) => toProjectDto(project)),
   };
 }

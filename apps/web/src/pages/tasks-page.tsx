@@ -15,7 +15,7 @@ import {
   TASK_STATUS_LABELS,
 } from '@raft-lite/contracts';
 import { Plus, Search, X } from 'lucide-react';
-import { useAgents, useTasks, useWorkspace } from '../hooks/use-raft-data';
+import { useAgents, useProjects, useTasks } from '../hooks/use-raft-data';
 import { api } from '../services/api';
 import { queryKeys } from '../services/query-keys';
 import { useToast } from '../providers/toast-provider';
@@ -43,9 +43,13 @@ export function TasksPage(): JSX.Element {
   const [editingTask, setEditingTask] = useState<TaskDetailDto | null>(null);
 
   const agentsQuery = useAgents({ limit: 100 });
-  const workspaceQuery = useWorkspace();
+  const projectsQuery = useProjects();
   const agents = agentsQuery.data?.items ?? [];
-  const projects = workspaceQuery.data?.projects ?? [];
+  const projects = projectsQuery.data?.items ?? [];
+  const selectableProjects = projects.filter(
+    (project) =>
+      !project.archivedAt || (editingTask ? project.id === editingTask.projectId : false),
+  );
 
   const filters: TaskListQuery = useMemo(
     () => ({
@@ -114,7 +118,11 @@ export function TasksPage(): JSX.Element {
         await api.assignTask(editingTask.id, { agentId: nextAssignee });
       }
       invalidateTasks();
-      toast({ title: 'Task updated', description: 'The task brief has been saved.', variant: 'success' });
+      toast({
+        title: 'Task updated',
+        description: 'The task brief has been saved.',
+        variant: 'success',
+      });
     } else {
       const created = await api.createTask(values);
       invalidateTasks();
@@ -246,17 +254,26 @@ export function TasksPage(): JSX.Element {
             {projects.map((project) => (
               <option key={project.id} value={project.id}>
                 {project.name}
+                {project.archivedAt ? ' (archived)' : ''}
               </option>
             ))}
           </Select>
           {hasFilters ? (
-            <Button variant="ghost" size="sm" onClick={clearFilters} data-testid="task-clear-filters-button">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={clearFilters}
+              data-testid="task-clear-filters-button"
+            >
               <X size={12} aria-hidden="true" />
               Clear
             </Button>
           ) : null}
         </div>
-        <div className="ml-auto hidden shrink-0 text-[10.5px] text-faint xl:block" data-testid="tasks-count">
+        <div
+          className="ml-auto hidden shrink-0 text-[10.5px] text-faint xl:block"
+          data-testid="tasks-count"
+        >
           {tasksQuery.data ? `${tasksQuery.data.total} tasks` : ''}
         </div>
       </div>
@@ -308,7 +325,11 @@ export function TasksPage(): JSX.Element {
             description="Create a task, assign an agent, and start the first execution."
             testId="tasks-empty"
             action={
-              <Button variant="primary" onClick={openCreate} data-testid="tasks-empty-create-button">
+              <Button
+                variant="primary"
+                onClick={openCreate}
+                data-testid="tasks-empty-create-button"
+              >
                 <Plus size={14} aria-hidden="true" />
                 Create task
               </Button>
@@ -348,7 +369,7 @@ export function TasksPage(): JSX.Element {
               }
             : null
         }
-        projects={projects}
+        projects={selectableProjects}
         agents={agents}
         lockAssignment={editingTask ? isTerminalTaskStatus(editingTask.status) : false}
         onSubmit={handleFormSubmit}

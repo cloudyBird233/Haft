@@ -1,6 +1,6 @@
 import { test, expect } from '../../fixtures';
-import type { RaftTestFactory } from '../../fixtures/test-data-factory';
 import { gotoPath } from '../../support/app';
+import { ensureReadyRepositoryBinding, waitForFakeRunner } from '../../support/repository';
 import { byTestId } from '../../support/ui-contract';
 
 const COMPUTER_ID = 'computer_local';
@@ -12,24 +12,6 @@ const PROJECT_ID = 'project_demo';
  * tests therefore cover the production server/runner/database/UI path while
  * remaining independent from CLI installation, authentication or model access.
  */
-async function waitForFakeRunner(factory: RaftTestFactory): Promise<void> {
-  await expect
-    .poll(
-      async () => {
-        const { items } = await factory.getRuntimes({
-          computerId: COMPUTER_ID,
-          projectId: PROJECT_ID,
-        });
-        return items.find((item) => item.runtime === 'codex')?.available ?? false;
-      },
-      {
-        timeout: 45_000,
-        message:
-          'The Fake Runner did not register for computer_local/project_demo. Start it with pnpm --filter @raft-lite/runner start.',
-      },
-    )
-    .toBe(true);
-}
 
 test.describe('Fake Agent Runner', () => {
   test('runs a Codex execution through the runner protocol and completes the task', async ({
@@ -37,6 +19,7 @@ test.describe('Fake Agent Runner', () => {
     factory,
   }) => {
     await waitForFakeRunner(factory);
+    await ensureReadyRepositoryBinding(factory);
     const agent = await factory.createAgent({
       name: factory.uniqueName('Runner Codex Agent'),
       runtime: 'codex',
@@ -117,14 +100,17 @@ test.describe('Fake Agent Runner', () => {
     );
 
     const logs = await factory.getExecutionLogs(executionId);
-    expect(logs.items.some((entry) => entry.message.includes('Fake runner completed all simulated steps.'))).toBe(
-      true,
-    );
+    expect(
+      logs.items.some((entry) =>
+        entry.message.includes('Fake runner completed all simulated steps.'),
+      ),
+    ).toBe(true);
     expect(new Set(logs.items.map((entry) => entry.seq)).size).toBe(logs.items.length);
   });
 
   test('waits for the Fake Runner to confirm a cancellation', async ({ page, factory }) => {
     await waitForFakeRunner(factory);
+    await ensureReadyRepositoryBinding(factory);
     const agent = await factory.createAgent({
       name: factory.uniqueName('Runner Cancel Agent'),
       runtime: 'codex',
@@ -174,6 +160,7 @@ test.describe('Fake Agent Runner', () => {
     factory,
   }) => {
     await waitForFakeRunner(factory);
+    await ensureReadyRepositoryBinding(factory);
     const agent = await factory.createAgent({
       name: factory.uniqueName('Runner Failure Agent'),
       runtime: 'opencode',
@@ -197,9 +184,7 @@ test.describe('Fake Agent Runner', () => {
       'failed',
       { timeout: 20_000 },
     );
-    await expect(byTestId(page, 'execution.failureReason')).toContainText(
-      'FAKE_RUNNER_FAILURE',
-    );
+    await expect(byTestId(page, 'execution.failureReason')).toContainText('FAKE_RUNNER_FAILURE');
 
     const execution = await factory.getExecution(executionId);
     expect(execution.runtime).toBe('opencode');

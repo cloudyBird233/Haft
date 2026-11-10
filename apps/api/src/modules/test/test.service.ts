@@ -3,6 +3,7 @@ import type {
   AdvanceExecutionResult,
   FinishExecutionInput,
   FinishExecutionResult,
+  ProjectBindingDto,
   RuntimeModeInput,
   RuntimeModeResult,
   SeedRequestInput,
@@ -11,6 +12,7 @@ import type {
 import { AppException } from '../../common/errors/app.exception';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import { clearAllData, initializeDemoData } from '../../common/seed/demo-data';
+import { projectBindingRelations, toProjectBindingDto } from '../../common/serializers';
 import { MockRuntimeService } from '../runtime/mock-runtime.service';
 
 @Injectable()
@@ -30,6 +32,34 @@ export class TestService {
   setMode(input: RuntimeModeInput): RuntimeModeResult {
     this.runtime.setMode(input.mode);
     return { mode: input.mode };
+  }
+
+  /**
+   * Test-only fixture for success-path tests. The P2-01 API never writes a
+   * binding out of `unverified`; only P2-02 runner validation may do that.
+   */
+  async markBindingReady(projectId: string, bindingId: string): Promise<ProjectBindingDto> {
+    const binding = await this.prisma.projectRepositoryBinding.findFirst({
+      where: { id: bindingId, projectId },
+    });
+    if (!binding) {
+      throw new AppException(
+        'BINDING_NOT_FOUND',
+        'Repository binding not found',
+        HttpStatus.NOT_FOUND,
+        { projectId, bindingId },
+      );
+    }
+    const updated = await this.prisma.projectRepositoryBinding.update({
+      where: { id: binding.id },
+      data: {
+        status: 'ready',
+        validatedBindingVersion: binding.bindingVersion,
+        lastValidatedAt: new Date(),
+      },
+      include: projectBindingRelations,
+    });
+    return toProjectBindingDto(updated);
   }
 
   async advance(executionId: string, steps: number): Promise<AdvanceExecutionResult> {

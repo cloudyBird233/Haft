@@ -78,22 +78,29 @@ export class TasksService {
   }
 
   async create(input: CreateTaskInput): Promise<TaskDto> {
+    // Fast precheck for a friendly error. The authoritative check runs again
+    // inside the same transaction that inserts the Task, so a concurrent
+    // archive between these two steps cannot create a task in an archived
+    // project.
     await this.assertProject(input.projectId);
     if (input.assigneeAgentId) {
       await this.assertAgent(input.assigneeAgentId);
     }
 
-    const task = await this.prisma.task.create({
-      data: {
-        workspaceId: DEFAULT_WORKSPACE_ID,
-        projectId: input.projectId,
-        assigneeAgentId: input.assigneeAgentId,
-        title: input.title,
-        description: input.description,
-        priority: input.priority,
-        status: input.assigneeAgentId ? 'claimed' : 'todo',
-      },
-      include: taskRelations,
+    const task = await this.prisma.$transaction(async (tx) => {
+      await this.assertProject(input.projectId, tx);
+      return tx.task.create({
+        data: {
+          workspaceId: DEFAULT_WORKSPACE_ID,
+          projectId: input.projectId,
+          assigneeAgentId: input.assigneeAgentId,
+          title: input.title,
+          description: input.description,
+          priority: input.priority,
+          status: input.assigneeAgentId ? 'claimed' : 'todo',
+        },
+        include: taskRelations,
+      });
     });
     const dto = toTaskDto(task);
     await this.activities.record({
@@ -129,8 +136,10 @@ export class TasksService {
     if (!existing) {
       throw new AppException('TASK_NOT_FOUND', 'Task not found', HttpStatus.NOT_FOUND);
     }
-    if (input.projectId) {
-      await this.assertProject(input.projectId);
+    const targetProjectId =
+      input.projectId && input.projectId !== existing.projectId ? input.projectId : null;
+    if (targetProjectId) {
+      await this.assertProject(targetProjectId);
     }
     if (input.status && input.status !== existing.status) {
       const activeExecution = await this.prisma.execution.findFirst({
@@ -157,10 +166,18 @@ export class TasksService {
       }
     }
 
-    const task = await this.prisma.task.update({
-      where: { id },
-      data: input,
-      include: taskRelations,
+    const task = await this.prisma.$transaction(async (tx) => {
+      // Moving a Task to another Project is also a write against that Project.
+      // Re-read it in the write transaction so a concurrent archive cannot be
+      // bypassed by the precheck above.
+      if (targetProjectId) {
+        await this.assertProject(targetProjectId, tx);
+      }
+      return tx.task.update({
+        where: { id },
+        data: input,
+        include: taskRelations,
+      });
     });
     const dto = toTaskDto(task);
     const changedStatus = input.status && input.status !== existing.status;
@@ -284,8 +301,11 @@ export class TasksService {
     return { id };
   }
 
-  private async assertProject(projectId: string): Promise<void> {
-    const project = await this.prisma.project.findFirst({
+  private async assertProject(
+    projectId: string,
+    client: Pick<Prisma.TransactionClient, 'project'> = this.prisma,
+  ): Promise<void> {
+    const project = await client.project.findFirst({
       where: { id: projectId, workspaceId: DEFAULT_WORKSPACE_ID },
     });
     if (!project) {
@@ -293,6 +313,14 @@ export class TasksService {
         'PROJECT_NOT_FOUND',
         'Selected project does not exist',
         HttpStatus.BAD_REQUEST,
+      );
+    }
+    if (project.archivedAt) {
+      throw new AppException(
+        'PROJECT_ARCHIVED',
+        'Archived projects cannot receive new tasks',
+        HttpStatus.CONFLICT,
+        { projectId: project.id, archivedAt: project.archivedAt.toISOString() },
       );
     }
   }

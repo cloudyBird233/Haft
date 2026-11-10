@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -7,7 +7,7 @@ import type { ListDto, TaskDto } from '@raft-lite/contracts';
 import { TasksPage } from '../pages/tasks-page';
 import { ToastProvider } from '../providers/toast-provider';
 import { api } from '../services/api';
-import { testAgents, testProject, testTasks } from './fixtures';
+import { testAgents, testArchivedProject, testProject, testTasks } from './fixtures';
 
 vi.mock('../services/api', () => {
   class ApiError extends Error {
@@ -18,6 +18,8 @@ vi.mock('../services/api', () => {
     api: {
       listTasks: vi.fn(),
       listAgents: vi.fn(),
+      listProjects: vi.fn(),
+      createTask: vi.fn(),
       getWorkspace: vi.fn(),
       getTask: vi.fn(),
     },
@@ -61,6 +63,10 @@ describe('TasksPage interaction states', () => {
     listTasksMock.mockReset();
     listTasksMock.mockImplementation(async (filters) => filteredTasks(filters ?? {}));
     vi.mocked(api.listAgents).mockResolvedValue({ items: testAgents, total: testAgents.length });
+    vi.mocked(api.listProjects).mockResolvedValue({
+      items: [testProject, testArchivedProject],
+      total: 2,
+    });
     vi.mocked(api.getWorkspace).mockResolvedValue({
       id: 'ws_demo',
       name: 'Raft Lite',
@@ -120,5 +126,45 @@ describe('TasksPage interaction states', () => {
     expect(await screen.findByTestId('tasks-error')).toBeVisible();
     expect(screen.getByTestId('tasks-error')).toHaveTextContent('Simulated API outage');
     expect(screen.getByTestId('tasks-retry-button')).toBeVisible();
+  });
+
+  it('offers only active projects in the task form and persists the selected project id', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.createTask).mockResolvedValue(testTasks[0] as TaskDto);
+    renderTasksPage();
+    expect(await screen.findByText('Audit log viewer')).toBeVisible();
+
+    await user.click(screen.getByTestId('task-create-button'));
+    const form = await screen.findByTestId('task-form');
+    const projectSelect = within(form).getByTestId('task-project-select');
+    const options = within(projectSelect).getAllByRole('option');
+    expect(options.map((option) => option.textContent)).toEqual(['Raft Lite']);
+    expect(within(projectSelect).queryByText('Legacy Project')).not.toBeInTheDocument();
+
+    await user.type(screen.getByTestId('task-title-input'), 'Ship the project binding');
+    await user.click(screen.getByTestId('task-submit-button'));
+
+    await waitFor(() => expect(api.createTask).toHaveBeenCalledTimes(1));
+    expect(api.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Ship the project binding',
+        projectId: testProject.id,
+      }),
+    );
+  });
+
+  it('blocks task creation and links to projects when every project is archived', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.listProjects).mockResolvedValue({
+      items: [testArchivedProject],
+      total: 1,
+    });
+    renderTasksPage();
+    expect(await screen.findByText('Audit log viewer')).toBeVisible();
+
+    await user.click(screen.getByTestId('task-create-button'));
+    expect(await screen.findByTestId('task-form-no-projects')).toBeVisible();
+    expect(screen.getByTestId('task-submit-button')).toBeDisabled();
+    expect(screen.getByTestId('task-project-select')).toBeDisabled();
   });
 });

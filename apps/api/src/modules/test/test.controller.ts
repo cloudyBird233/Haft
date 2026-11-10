@@ -38,10 +38,18 @@ export class TestController {
 
   @Post('runtime/mode')
   @HttpCode(200)
-  setRuntimeMode(
-    @Body(new ZodValidationPipe(runtimeModeSchema)) body: RuntimeModeInput,
-  ) {
+  setRuntimeMode(@Body(new ZodValidationPipe(runtimeModeSchema)) body: RuntimeModeInput) {
     return this.testService.setMode(body);
+  }
+
+  /**
+   * Test-only fixture: mark a binding ready without implementing the P2-02
+   * runner validation protocol. Only mounted when E2E_TEST_MODE=true.
+   */
+  @Post('projects/:projectId/bindings/:bindingId/ready')
+  @HttpCode(200)
+  markBindingReady(@Param('projectId') projectId: string, @Param('bindingId') bindingId: string) {
+    return this.testService.markBindingReady(projectId, bindingId);
   }
 
   @Post('executions/:id/advance')

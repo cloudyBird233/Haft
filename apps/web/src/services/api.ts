@@ -7,6 +7,8 @@ import type {
   CancelExecutionInput,
   ComputerDto,
   CreateAgentInput,
+  CreateProjectBindingInput,
+  CreateProjectInput,
   CreateTaskInput,
   DashboardDto,
   ExecutionDto,
@@ -15,11 +17,16 @@ import type {
   ExecutionLogDto,
   HealthDto,
   ListDto,
+  ProjectBindingDto,
+  ProjectDetailDto,
+  ProjectDto,
   TaskCancellationDto,
   TaskDetailDto,
   TaskDto,
   TaskListQuery,
   UpdateAgentInput,
+  UpdateProjectBindingInput,
+  UpdateProjectInput,
   UpdateTaskInput,
   WorkspaceDto,
   AgentDetailDto,
@@ -96,12 +103,15 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   if (!response.ok) {
     const errorBody = payload as Partial<ApiErrorBody> | null;
-    throw new ApiError(errorBody?.error?.message ?? `Request failed with status ${response.status}`, {
-      code: errorBody?.error?.code ?? `HTTP_${response.status}`,
-      status: response.status,
-      details: errorBody?.error?.details ?? null,
-      requestId: errorBody?.requestId ?? response.headers.get('x-request-id'),
-    });
+    throw new ApiError(
+      errorBody?.error?.message ?? `Request failed with status ${response.status}`,
+      {
+        code: errorBody?.error?.code ?? `HTTP_${response.status}`,
+        status: response.status,
+        details: errorBody?.error?.details ?? null,
+        requestId: errorBody?.requestId ?? response.headers.get('x-request-id'),
+      },
+    );
   }
 
   if (payload && typeof payload === 'object' && 'data' in payload) {
@@ -138,8 +148,33 @@ export const api = {
         offset: params.offset,
       })}`,
     ),
-  getAgent: (id: string) =>
-    request<AgentDetailDto>(`/agents/${encodeURIComponent(id)}`),
+  listProjects: () => request<ListDto<ProjectDto>>('/projects'),
+  getProject: (id: string) => request<ProjectDetailDto>(`/projects/${encodeURIComponent(id)}`),
+  createProject: (input: CreateProjectInput) =>
+    request<ProjectDto>('/projects', { method: 'POST', body: json(input) }),
+  updateProject: (id: string, input: UpdateProjectInput) =>
+    request<ProjectDetailDto>(`/projects/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: json(input),
+    }),
+  deleteProject: (id: string) =>
+    request<{ id: string }>(`/projects/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  createProjectBinding: (projectId: string, input: CreateProjectBindingInput) =>
+    request<ProjectBindingDto>(`/projects/${encodeURIComponent(projectId)}/bindings`, {
+      method: 'POST',
+      body: json(input),
+    }),
+  updateProjectBinding: (projectId: string, bindingId: string, input: UpdateProjectBindingInput) =>
+    request<ProjectBindingDto>(
+      `/projects/${encodeURIComponent(projectId)}/bindings/${encodeURIComponent(bindingId)}`,
+      { method: 'PATCH', body: json(input) },
+    ),
+  deleteProjectBinding: (projectId: string, bindingId: string) =>
+    request<{ id: string }>(
+      `/projects/${encodeURIComponent(projectId)}/bindings/${encodeURIComponent(bindingId)}`,
+      { method: 'DELETE' },
+    ),
+  getAgent: (id: string) => request<AgentDetailDto>(`/agents/${encodeURIComponent(id)}`),
   createAgent: (input: CreateAgentInput) =>
     request<AgentDto>('/agents', { method: 'POST', body: json(input) }),
   updateAgent: (id: string, input: UpdateAgentInput) =>
@@ -195,8 +230,7 @@ export const api = {
         offset: params.offset,
       })}`,
     ),
-  getExecution: (id: string) =>
-    request<ExecutionDto>(`/executions/${encodeURIComponent(id)}`),
+  getExecution: (id: string) => request<ExecutionDto>(`/executions/${encodeURIComponent(id)}`),
   getExecutionLogs: (id: string) =>
     request<ListDto<ExecutionLogDto>>(
       `/executions/${encodeURIComponent(id)}/logs${queryString({ limit: 500 })}`,

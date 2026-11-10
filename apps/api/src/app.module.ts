@@ -5,6 +5,7 @@ import { ComputersModule } from './modules/computers/computers.module';
 import { EventsModule } from './modules/events/events.module';
 import { ExecutionsModule } from './modules/executions/executions.module';
 import { HealthModule } from './modules/health/health.module';
+import { ProjectsModule } from './modules/projects/projects.module';
 import { RuntimeModule } from './modules/runtime/runtime.module';
 import { TasksModule } from './modules/tasks/tasks.module';
 import { TestModule } from './modules/test/test.module';
@@ -25,6 +26,7 @@ const testModeEnabled =
     ActivitiesModule,
     RuntimeModule,
     AgentsModule,
+    ProjectsModule,
     TasksModule,
     ExecutionsModule,
     ComputersModule,

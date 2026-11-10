@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { io, type Socket } from 'socket.io-client';
 import type { INestApplication } from '@nestjs/common';
@@ -12,12 +12,15 @@ import {
   type ExecutionDto,
   type ExecutionLogDto,
   type ListDto,
+  type ProjectBindingDto,
+  type ProjectDetailDto,
   type RuntimeAvailabilityDto,
   type RunnerServerMessage,
   type TaskDetailDto,
 } from '@raft-lite/contracts';
 import { createTestApp, waitFor, type ApiSuccessBody } from './test-app';
 import { PrismaService } from '../src/common/prisma/prisma.service';
+import { RuntimeRegistryService } from '../src/modules/runtime/runtime-registry.service';
 import { SEED_IDS } from '../src/common/seed/demo-data';
 
 const BOOTSTRAP = 'test-runner-bootstrap-token';
@@ -53,6 +56,10 @@ describe('Runner protocol v1 integration', () => {
     await app.close();
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   beforeEach(async () => {
     for (const socket of activeSockets) socket.disconnect();
     activeSockets = [];
@@ -61,12 +68,14 @@ describe('Runner protocol v1 integration', () => {
     expect(response.status).toBe(200);
   });
 
-  async function connectRunner(options: {
-    runnerId?: string;
-    computerId?: string;
-    bootstrapToken?: string;
-    token?: string;
-  } = {}): Promise<ConnectedRunner> {
+  async function connectRunner(
+    options: {
+      runnerId?: string;
+      computerId?: string;
+      bootstrapToken?: string;
+      token?: string;
+    } = {},
+  ): Promise<ConnectedRunner> {
     const runnerId = options.runnerId ?? RUNNER_ID;
     const socket = io(`${baseUrl}/runner`, {
       transports: ['websocket'],
@@ -111,6 +120,7 @@ describe('Runner protocol v1 integration', () => {
       installed?: boolean;
       authenticated?: boolean;
       projectIds?: string[];
+      features?: string[];
     } = {},
   ): Promise<void> {
     send(
@@ -140,20 +150,45 @@ describe('Runner protocol v1 integration', () => {
           ],
           projectIds: options.projectIds ?? [SEED_IDS.project],
           maxConcurrentExecutions: 1,
+          // P2-01 does not consume runner features. P2-02 will advertise and
+          // enforce repository validation/path-policy capabilities.
+          features: options.features ?? [],
         },
       },
       runnerId,
     );
-    send(
-      connected.socket,
-      'runner.snapshot',
-      { executions: [], pendingLogCount: 0 },
-      runnerId,
-    );
+    send(connected.socket, 'runner.snapshot', { executions: [], pendingLogCount: 0 }, runnerId);
     await waitFor(async () => {
       const row = await prisma.runner.findUnique({ where: { id: runnerId } });
       return row?.status === 'online' && row.runnerVersion === 'test-runner/1.0.0';
     }, 4000);
+  }
+
+  async function createBinding(projectId = SEED_IDS.project): Promise<ProjectBindingDto> {
+    const path = `/test/repos/${randomUUID()}`;
+    const created = await request(server)
+      .post(`/api/projects/${projectId}/bindings`)
+      .send({ computerId: COMPUTER_ID, path })
+      .expect(201);
+    return (created.body as ApiSuccessBody<ProjectBindingDto>).data;
+  }
+
+  /**
+   * P2-01 never writes `ready` through its API and never talks to the Runner
+   * for bindings. Success paths therefore use the test-only fixture, which is
+   * available only with E2E_TEST_MODE=true.
+   */
+  async function ensureReadyBinding(projectId = SEED_IDS.project): Promise<ProjectBindingDto> {
+    const detail = await request(server).get(`/api/projects/${projectId}`).expect(200);
+    const existing = (detail.body as ApiSuccessBody<ProjectDetailDto>).data.bindings.find(
+      (binding) => binding.computerId === COMPUTER_ID,
+    );
+    const binding = existing ?? (await createBinding(projectId));
+    const ready = await request(server)
+      .post(`/__test__/projects/${projectId}/bindings/${binding.id}/ready`)
+      .send({})
+      .expect(200);
+    return (ready.body as ApiSuccessBody<ProjectBindingDto>).data;
   }
 
   async function createCodexTask(): Promise<{ agentId: string; taskId: string }> {
@@ -185,8 +220,10 @@ describe('Runner protocol v1 integration', () => {
     executionId: string;
     taskId: string;
     agentId: string;
+    binding: ProjectBindingDto;
     start: Extract<RunnerServerMessage, { type: 'execution.start' }>;
   }> {
+    const binding = await ensureReadyBinding();
     const { agentId, taskId } = await createCodexTask();
     const startMessage = waitForMessage(connected.socket, 'execution.start', 5000);
     const startResponse = Promise.resolve(
@@ -200,7 +237,7 @@ describe('Runner protocol v1 integration', () => {
     const response = await startResponse;
     expect(response.status).toBe(201);
     expect((response.body as ApiSuccessBody<ExecutionDto>).data.agentId).toBe(agentId);
-    return { executionId: start.payload.executionId, taskId, agentId, start };
+    return { executionId: start.payload.executionId, taskId, agentId, binding, start };
   }
 
   it('pairs, registers, and exposes runtime availability for mapped projects', async () => {
@@ -210,15 +247,11 @@ describe('Runner protocol v1 integration', () => {
 
     const availability = await waitFor(async () => {
       const response = await request(server)
-        .get(
-          `/api/runtimes?computerId=${COMPUTER_ID}&projectId=${SEED_IDS.project}`,
-        )
+        .get(`/api/runtimes?computerId=${COMPUTER_ID}&projectId=${SEED_IDS.project}`)
         .expect(200);
       const items = (response.body as ApiSuccessBody<{ items: RuntimeAvailabilityDto[] }>).data
         .items;
-      return items.find(
-        (item) => item.runtime === 'codex' && item.available,
-      );
+      return items.find((item) => item.runtime === 'codex' && item.available);
     });
     expect(availability.runnerId).toBe(RUNNER_ID);
     expect(availability.cliVersion).toBe('0.164.0-test');
@@ -231,18 +264,257 @@ describe('Runner protocol v1 integration', () => {
     const unmapped = await request(server)
       .get(`/api/runtimes?computerId=${COMPUTER_ID}&projectId=project_other`)
       .expect(200);
-    const codex = (unmapped.body as ApiSuccessBody<{ items: RuntimeAvailabilityDto[] }>).data
-      .items.find((item) => item.runtime === 'codex');
+    const codex = (
+      unmapped.body as ApiSuccessBody<{ items: RuntimeAvailabilityDto[] }>
+    ).data.items.find((item) => item.runtime === 'codex');
     expect(codex).toMatchObject({ available: false, reasonCode: 'PROJECT_NOT_MAPPED' });
+  });
+
+  it('blocks real executions until the binding is ready for its current version', async () => {
+    const { taskId } = await createCodexTask();
+
+    const missing = await request(server).post(`/api/tasks/${taskId}/start`).send({}).expect(409);
+    expect(missing.body.error.code).toBe('PROJECT_BINDING_MISSING');
+
+    const binding = await createBinding();
+    const unverified = await request(server)
+      .post(`/api/tasks/${taskId}/start`)
+      .send({})
+      .expect(409);
+    expect(unverified.body.error.code).toBe('PROJECT_BINDING_NOT_READY');
+    expect(unverified.body.error.details).toMatchObject({
+      bindingId: binding.id,
+      bindingStatus: 'unverified',
+      bindingVersion: binding.bindingVersion,
+      validatedBindingVersion: null,
+    });
+
+    await prisma.projectRepositoryBinding.update({
+      where: { id: binding.id },
+      data: {
+        status: 'ready',
+        validatedBindingVersion: binding.bindingVersion - 1,
+      },
+    });
+    const stale = await request(server).post(`/api/tasks/${taskId}/start`).send({}).expect(409);
+    expect(stale.body.error.code).toBe('PROJECT_BINDING_NOT_READY');
+    expect(stale.body.error.details).toMatchObject({
+      bindingStatus: 'ready',
+      bindingVersion: binding.bindingVersion,
+      validatedBindingVersion: binding.bindingVersion - 1,
+    });
+  });
+
+  it('never sends runner messages for P2-01 binding CRUD', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    await delay(100);
+
+    const received: string[] = [];
+    const handler = (raw: unknown): void => {
+      const parsed = runnerServerMessageSchema.safeParse(raw);
+      if (parsed.success) received.push(parsed.data.type);
+    };
+    connected.socket.on('runner.message', handler);
+    try {
+      const binding = await createBinding();
+      const changed = await request(server)
+        .patch(`/api/projects/${SEED_IDS.project}/bindings/${binding.id}`)
+        .send({ path: `${binding.path}-moved` })
+        .expect(200);
+      expect((changed.body as ApiSuccessBody<ProjectBindingDto>).data.status).toBe('unverified');
+      await request(server)
+        .delete(`/api/projects/${SEED_IDS.project}/bindings/${binding.id}`)
+        .expect(200);
+      await delay(200);
+    } finally {
+      connected.socket.off('runner.message', handler);
+    }
+
+    expect(received).toEqual([]);
+  });
+
+  it('rejects an archived project even when its binding is ready and a runner is online', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    await ensureReadyBinding();
+    const { agentId, taskId } = await createCodexTask();
+    const beforeTask = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
+    const beforeAgent = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+
+    await request(server)
+      .patch(`/api/projects/${SEED_IDS.project}`)
+      .send({ archived: true })
+      .expect(200);
+    const blocked = await request(server).post(`/api/tasks/${taskId}/start`).send({}).expect(409);
+    expect(blocked.body.error.code).toBe('PROJECT_ARCHIVED');
+
+    expect(await prisma.execution.count({ where: { taskId } })).toBe(0);
+    const taskAfter = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
+    expect(taskAfter.status).toBe(beforeTask.status);
+    expect(taskAfter.assigneeAgentId).toBe(beforeTask.assigneeAgentId);
+    const agentAfter = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+    expect(agentAfter.status).toBe(beforeAgent.status);
+    expect(agentAfter.lastActiveAt).toEqual(beforeAgent.lastActiveAt);
+  });
+
+  it('rejects a binding that changes between precheck and execution creation', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    const binding = await ensureReadyBinding();
+    const { agentId, taskId } = await createCodexTask();
+    const beforeTask = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
+    const beforeAgent = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+    const started: string[] = [];
+    const handler = (raw: unknown): void => {
+      const parsed = runnerServerMessageSchema.safeParse(raw);
+      if (parsed.success && parsed.data.type === 'execution.start') {
+        started.push(parsed.data.payload.executionId);
+      }
+    };
+    connected.socket.on('runner.message', handler);
+
+    const runtimes = app.get(RuntimeRegistryService);
+    const original = runtimes.getAvailability.bind(runtimes);
+    let changed = false;
+    vi.spyOn(runtimes, 'getAvailability').mockImplementation(
+      async (runtime, computerId, projectId) => {
+        const availability = await original(runtime, computerId, projectId);
+        if (!changed) {
+          changed = true;
+          await prisma.projectRepositoryBinding.update({
+            where: { id: binding.id },
+            data: {
+              path: `${binding.path}-changed-during-start`,
+              pathHash: 'f'.repeat(64),
+              bindingVersion: { increment: 1 },
+              status: 'unverified',
+              validatedBindingVersion: null,
+            },
+          });
+        }
+        return availability;
+      },
+    );
+
+    try {
+      const response = await request(server)
+        .post(`/api/tasks/${taskId}/start`)
+        .send({})
+        .expect(409);
+      expect(response.body.error.code).toBe('PROJECT_BINDING_NOT_READY');
+      expect(response.body.error.details).toMatchObject({
+        bindingId: binding.id,
+        bindingStatus: 'unverified',
+        bindingVersion: binding.bindingVersion + 1,
+        validatedBindingVersion: null,
+      });
+    } finally {
+      connected.socket.off('runner.message', handler);
+    }
+    await delay(200);
+
+    expect(started).toEqual([]);
+    expect(await prisma.execution.count({ where: { taskId } })).toBe(0);
+    const taskAfter = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
+    expect(taskAfter.status).toBe(beforeTask.status);
+    expect(taskAfter.assigneeAgentId).toBe(beforeTask.assigneeAgentId);
+    const agentAfter = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+    expect(agentAfter.status).toBe(beforeAgent.status);
+    expect(agentAfter.lastActiveAt).toEqual(beforeAgent.lastActiveAt);
+  });
+
+  it('snapshots the project default branch read inside the execution transaction', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    const binding = await ensureReadyBinding();
+    const { agentId, taskId } = await createCodexTask();
+
+    const started: string[] = [];
+    const handler = (raw: unknown): void => {
+      const parsed = runnerServerMessageSchema.safeParse(raw);
+      if (parsed.success && parsed.data.type === 'execution.start') {
+        started.push(parsed.data.payload.executionId);
+      }
+    };
+    connected.socket.on('runner.message', handler);
+
+    const runtimes = app.get(RuntimeRegistryService);
+    const original = runtimes.getAvailability.bind(runtimes);
+    let branchChanged = false;
+    vi.spyOn(runtimes, 'getAvailability').mockImplementation(
+      async (runtime, computerId, projectId) => {
+        const availability = await original(runtime, computerId, projectId);
+        if (!branchChanged) {
+          branchChanged = true;
+          // The precheck has already loaded the Task relation. Changing the
+          // branch here proves the snapshot comes from the transaction re-read,
+          // not from the stale `task.project.defaultBranch` value.
+          await prisma.project.update({
+            where: { id: SEED_IDS.project },
+            data: { defaultBranch: 'release/during-start' },
+          });
+        }
+        return availability;
+      },
+    );
+
+    let executionId = '';
+    try {
+      const startMessage = waitForMessage(connected.socket, 'execution.start', 5000);
+      const startResponse = Promise.resolve(
+        request(server).post(`/api/tasks/${taskId}/start`).send({}),
+      );
+      const start = await startMessage;
+      send(connected.socket, 'execution.accepted', {
+        executionId: start.payload.executionId,
+        acceptedAt: new Date().toISOString(),
+      });
+      const response = await startResponse;
+      expect(response.status).toBe(201);
+      const execution = (response.body as ApiSuccessBody<ExecutionDto>).data;
+      executionId = execution.id;
+
+      expect(execution).toMatchObject({
+        agentId,
+        repositoryProjectId: SEED_IDS.project,
+        repositoryBindingId: binding.id,
+        repositoryBindingVersion: binding.bindingVersion,
+        repositoryDefaultBranch: 'release/during-start',
+      });
+      const stored = await prisma.execution.findUniqueOrThrow({ where: { id: execution.id } });
+      expect(stored).toMatchObject({
+        repositoryProjectId: SEED_IDS.project,
+        repositoryBindingId: binding.id,
+        repositoryBindingVersion: binding.bindingVersion,
+        repositoryDefaultBranch: 'release/during-start',
+      });
+    } finally {
+      connected.socket.off('runner.message', handler);
+    }
+    await delay(200);
+
+    expect(branchChanged).toBe(true);
+    // Exactly one dispatch: the branch change must not trigger a retry, a
+    // second Execution, or a second execution.start message.
+    expect(started).toEqual([executionId]);
+    expect(await prisma.execution.count({ where: { taskId } })).toBe(1);
   });
 
   it('runs a complete execution over the runner protocol and persists logs once', async () => {
     const connected = await connectRunner();
     await registerRunner(connected);
-    const { executionId, taskId, agentId } = await startAndAccept(connected);
+    const { executionId, taskId, agentId, binding } = await startAndAccept(connected);
 
     const running = await request(server).get(`/api/executions/${executionId}`).expect(200);
-    expect((running.body as ApiSuccessBody<ExecutionDto>).data.phase).toBe('queued');
+    const runningExecution = (running.body as ApiSuccessBody<ExecutionDto>).data;
+    expect(runningExecution.phase).toBe('queued');
+    expect(runningExecution).toMatchObject({
+      repositoryProjectId: SEED_IDS.project,
+      repositoryBindingId: binding.id,
+      repositoryBindingVersion: binding.bindingVersion,
+      repositoryDefaultBranch: 'main',
+    });
 
     send(connected.socket, 'execution.phase', {
       executionId,
@@ -482,9 +754,7 @@ describe('Runner protocol v1 integration', () => {
       cancelReason: 'Stop from integration test',
     });
 
-    const taskResponse = await request(server)
-      .get(`/api/tasks/${execution.taskId}`)
-      .expect(200);
+    const taskResponse = await request(server).get(`/api/tasks/${execution.taskId}`).expect(200);
     const task = (taskResponse.body as ApiSuccessBody<TaskDetailDto>).data;
     expect(task.status).toBe('cancelled');
   });
@@ -575,16 +845,12 @@ describe('Runner protocol v1 integration', () => {
     await delay(300);
     const current = await request(server).get(`/api/executions/${executionId}`).expect(200);
     expect((current.body as ApiSuccessBody<ExecutionDto>).data.status).toBe('running');
-    const diff = await request(server)
-      .get(`/api/executions/${executionId}/diff`)
-      .expect(200);
+    const diff = await request(server).get(`/api/executions/${executionId}/diff`).expect(200);
     expect((diff.body as ApiSuccessBody<ExecutionDiffDto>).data).toMatchObject({
       available: false,
       diff: '',
     });
-    const logs = await request(server)
-      .get(`/api/executions/${executionId}/logs`)
-      .expect(200);
+    const logs = await request(server).get(`/api/executions/${executionId}/logs`).expect(200);
     expect((logs.body as ApiSuccessBody<ListDto<ExecutionLogDto>>).data.total).toBe(0);
   });
 });

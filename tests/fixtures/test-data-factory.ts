@@ -6,12 +6,17 @@ import type {
   ApiErrorBody,
   ApiSuccess,
   CreateAgentInput,
+  CreateProjectBindingInput,
+  CreateProjectInput,
   CreateTaskInput,
   ExecutionDiffDto,
   ExecutionDto,
   ExecutionLogDto,
   FinishExecutionResult,
   ListDto,
+  ProjectBindingDto,
+  ProjectDetailDto,
+  ProjectDto,
   RuntimeAvailabilityDto,
   RuntimeControlMode,
   RuntimeFinishOutcome,
@@ -118,8 +123,7 @@ export class RaftTestFactory {
   async createTask(overrides: Partial<CreateTaskInput> = {}): Promise<TaskDto> {
     const input: CreateTaskInput = {
       title: overrides.title ?? this.uniqueName('E2E Task'),
-      description:
-        overrides.description ?? 'A deterministic task created through the public API.',
+      description: overrides.description ?? 'A deterministic task created through the public API.',
       projectId: overrides.projectId ?? 'project_demo',
       assigneeAgentId: overrides.assigneeAgentId ?? null,
       priority: overrides.priority ?? 'medium',
@@ -175,6 +179,48 @@ export class RaftTestFactory {
 
   async getExecutionDiff(id: string): Promise<ExecutionDiffDto> {
     return this.call('GET', `/api/executions/${id}/diff`);
+  }
+
+  async createProject(
+    overrides: Partial<CreateProjectInput> & { key: string; name: string },
+  ): Promise<ProjectDto> {
+    const input: CreateProjectInput = {
+      key: overrides.key,
+      name: overrides.name,
+      description:
+        overrides.description ?? 'Created by the Raft Lite deterministic test-data factory.',
+      color: overrides.color ?? '#6b7280',
+      defaultBranch: overrides.defaultBranch ?? 'main',
+    };
+    return this.call('POST', '/api/projects', input);
+  }
+
+  async getProject(id: string): Promise<ProjectDetailDto> {
+    return this.call('GET', `/api/projects/${id}`);
+  }
+
+  async listProjects(): Promise<ListDto<ProjectDto>> {
+    return this.call('GET', '/api/projects');
+  }
+
+  async deleteProject(id: string): Promise<{ id: string }> {
+    return this.call('DELETE', `/api/projects/${id}`);
+  }
+
+  async createProjectBinding(
+    projectId: string,
+    input: CreateProjectBindingInput,
+  ): Promise<ProjectBindingDto> {
+    return this.call('POST', `/api/projects/${projectId}/bindings`, input);
+  }
+
+  /**
+   * Test-only fixture. P2-01 never validates bindings; the `__test__` endpoint
+   * exists only when E2E_TEST_MODE=true so success-path tests can start from a
+   * ready binding without implementing P2-02's runner protocol.
+   */
+  async markProjectBindingReady(projectId: string, bindingId: string): Promise<ProjectBindingDto> {
+    return this.call('POST', `/__test__/projects/${projectId}/bindings/${bindingId}/ready`, {});
   }
 
   /**

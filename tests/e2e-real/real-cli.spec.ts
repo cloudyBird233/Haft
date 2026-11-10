@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { expect, test, type APIRequestContext } from '@playwright/test';
 import type { RuntimeAvailabilityDto } from '@raft-lite/contracts';
 import { RaftTestFactory } from '../fixtures/test-data-factory';
+import { ensureReadyRepositoryBinding } from '../support/repository';
 
 const API_URL = process.env.REAL_E2E_API_URL ?? 'http://127.0.0.1:3201';
 const COMPUTER_ID = 'computer_local';
@@ -52,6 +53,8 @@ async function runRealCli(
     `Real ${runtime} CLI is unavailable: ${capability?.reasonCode ?? 'UNKNOWN'} ${capability?.reason ?? ''}`,
   );
   if (!capability?.available) return;
+
+  await ensureReadyRepositoryBinding(factory, { path: PROJECT_ROOT });
 
   const agent = await factory.createAgent({
     name: factory.uniqueName(`Real ${runtime} Agent`),
@@ -136,8 +139,7 @@ test.describe('Real CLI execution (opt-in)', () => {
       'Set HAFT_REAL_CLI_E2E=1 to run real CLI tests against installed and authenticated CLIs.',
     );
     test.skip(
-      process.env.HAFT_REAL_E2E_OPENCODE !== '1' ||
-        !process.env.HAFT_REAL_OPENCODE_MODEL,
+      process.env.HAFT_REAL_E2E_OPENCODE !== '1' || !process.env.HAFT_REAL_OPENCODE_MODEL,
       'Set HAFT_REAL_E2E_OPENCODE=1 and HAFT_REAL_OPENCODE_MODEL=<provider/model> to enable the OpenCode test.',
     );
     await runRealCli(request, 'opencode', 'HAFT_REAL_OPENCODE_E2E.md');

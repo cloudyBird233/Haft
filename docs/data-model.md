@@ -16,10 +16,14 @@ erDiagram
     COMPUTER ||--o{ AGENT : hosts
     COMPUTER ||--o| RUNNER : paired_with
     PROJECT ||--o{ TASK : groups
+    PROJECT ||--o{ PROJECT_REPOSITORY_BINDING : binds
+    COMPUTER ||--o{ PROJECT_REPOSITORY_BINDING : hosts
+    RUNNER ||--o{ PROJECT_REPOSITORY_BINDING : validates
     AGENT ||--o{ TASK : assigned
     TASK ||--o{ EXECUTION : runs
     AGENT ||--o{ EXECUTION : performs
     RUNNER ||--o{ EXECUTION : executes
+    PROJECT_REPOSITORY_BINDING ||--o{ EXECUTION : snapshots
     EXECUTION ||--o{ EXECUTION_LOG : emits
     EXECUTION ||--o{ EXECUTION_ARTIFACT : stores
     TASK ||--o{ ACTIVITY : relates
@@ -46,15 +50,54 @@ recording.
 
 ### Project
 
-| Column                         | Type           | Notes                  |
-| ------------------------------ | -------------- | ---------------------- |
-| `id`                           | String, PK     | `project_demo`         |
-| `workspaceId`                  | FK → Workspace | Cascade delete         |
-| `key`                          | String         | Short key, e.g. `RAFT` |
-| `name`, `description`, `color` | String         | Display metadata       |
-| `createdAt`, `updatedAt`       | DateTime       |                        |
+| Column                         | Type           | Notes                                                    |
+| ------------------------------ | -------------- | -------------------------------------------------------- |
+| `id`                           | String, PK     | `project_demo`                                           |
+| `workspaceId`                  | FK → Workspace | Cascade delete                                           |
+| `key`                          | String         | Short key, e.g. `RAFT`                                   |
+| `name`, `description`, `color` | String         | Display metadata                                         |
+| `defaultBranch`                | String         | Default `main`; sole authority for the branch            |
+| `archivedAt`                   | DateTime?      | `null` = active; archives block new tasks and executions |
+| `createdAt`, `updatedAt`       | DateTime       |                                                          |
 
-Unique on `(workspaceId, key)`; indexed by `workspaceId`.
+Unique on `(workspaceId, key)`; indexed by `workspaceId` and
+`(workspaceId, archivedAt)`.
+
+### ProjectRepositoryBinding
+
+A project's repository path on one Computer. The path is opaque user input; the
+API never normalizes it and never inspects the filesystem. P2-01 creates every
+binding as `unverified` and its REST API never writes any other status. Only
+P2-02's Runner `repository.validation` response may move a binding to `ready`,
+`missing`, or `error`.
+
+| Column                    | Type          | Notes                                              |
+| ------------------------- | ------------- | -------------------------------------------------- |
+| `id`                      | String, PK    |                                                    |
+| `projectId`               | FK → Project  | Cascade delete                                     |
+| `computerId`              | FK → Computer | Cascade delete                                     |
+| `path`                    | String        | Raw input; SHA-256 in `pathHash`                   |
+| `pathHash`                | String        | Stable hash for audit/identity                     |
+| `bindingVersion`          | Int           | Starts at 1; increments only on a real path change |
+| `platform`                | String?       | Runner platform (reserved for P2-02)               |
+| `status`                  | String        | `unverified` in P2-01; P2-02 adds the other states |
+| `validationRequestId`     | String?       | P2-02 correlation/idempotency id                   |
+| `canonicalPath`           | String?       | P2-02 runner realpath on success                   |
+| `validationErrorCode`     | String?       | P2-02 concrete `REPO_*` code on failure            |
+| `validationError`         | String?       | P2-02 human-readable failure message               |
+| `lastValidatedAt`         | DateTime?     | P2-02 validation timestamp                         |
+| `validatedByRunnerId`     | FK → Runner?  | P2-02 validator; `SetNull` on runner delete        |
+| `validatedBindingVersion` | Int?          | P2-02 version that produced the last success       |
+| `policyVersion`           | String?       | P2-02 runner path-policy fingerprint               |
+| `createdAt`, `updatedAt`  | DateTime      |                                                    |
+
+Unique on `(projectId, computerId)`; indexed by `(projectId, status)`,
+`computerId`, and `validatedByRunnerId`. There is no `defaultBranch` column:
+changing a Project's branch affects only future executions, and every execution
+captures a branch snapshot.
+
+See [p2-01-project-repository-binding.md](p2-01-project-repository-binding.md)
+for the state machine, API, archive behavior, and concurrency guarantees.
 
 ### Computer
 
@@ -147,37 +190,46 @@ Indexed by `workspaceId`, `status`, and `assigneeAgentId`.
 
 ### Execution
 
-| Column                     | Type         | Notes                                                               |
-| -------------------------- | ------------ | ------------------------------------------------------------------- |
-| `id`                       | String, PK   |                                                                     |
-| `taskId`                   | FK → Task    | Cascade delete                                                      |
-| `agentId`                  | FK → Agent   | Cascade delete                                                      |
-| `runnerId`                 | FK → Runner? | `SetNull` on runner delete; `null` for mock executions              |
-| `runtime`                  | String       | `mock`, `codex`, or `opencode`                                      |
-| `status`                   | String       | `running`, `completed`, `failed`, `cancelled`                       |
-| `phase`                    | String       | `queued`, `preparing`, `running`, `finalizing`, or terminal outcome |
-| `progress`                 | Int          | 0–100                                                               |
-| `progressMode`             | String       | `determinate` or `indeterminate`                                    |
-| `exitCode`                 | Int?         | Real CLI exit code; `null` when unavailable                         |
-| `summary`                  | String?      | Final CLI summary or deterministic fake summary                     |
-| `branchName`, `baseCommit` | String?      | Git evidence reported by the runner                                 |
-| `headCommit`               | String?      | Head after the CLI finished; may equal `baseCommit`                 |
-| `changedFiles`             | Int          | Changed-file count from the terminal Git payload                    |
-| `diffStat`                 | String       | `git diff --stat` text plus untracked-file names; default `""`      |
-| `gitStatus`                | String       | Bounded `git status --porcelain=v1` snapshot; default `""`          |
-| `diffTruncated`            | Boolean      | The stored patch was cut at `EXECUTION_DIFF_MAX_BYTES`              |
-| `lastRunnerSeq`            | Int          | Highest runner log sequence applied                                 |
-| `startedAt`                | DateTime     | Default now                                                         |
-| `endedAt`                  | DateTime?    | Set on terminal states                                              |
-| `failureReason`            | String?      | Set on failure                                                      |
-| `cancelReason`             | String?      | Set on cancellation                                                 |
-| `createdAt`, `updatedAt`   | DateTime     |                                                                     |
+| Column                     | Type          | Notes                                                               |
+| -------------------------- | ------------- | ------------------------------------------------------------------- |
+| `id`                       | String, PK    |                                                                     |
+| `taskId`                   | FK → Task     | Cascade delete                                                      |
+| `agentId`                  | FK → Agent    | Cascade delete                                                      |
+| `runnerId`                 | FK → Runner?  | `SetNull` on runner delete; `null` for mock executions              |
+| `repositoryProjectId`      | String?       | Project used when a real execution was created                      |
+| `repositoryBindingId`      | FK → Binding? | `SetNull` on binding delete; history keeps the snapshot             |
+| `repositoryBindingVersion` | Int?          | Binding version captured at creation                                |
+| `repositoryDefaultBranch`  | String?       | Project branch captured at creation                                 |
+| `runtime`                  | String        | `mock`, `codex`, or `opencode`                                      |
+| `status`                   | String        | `running`, `completed`, `failed`, `cancelled`                       |
+| `phase`                    | String        | `queued`, `preparing`, `running`, `finalizing`, or terminal outcome |
+| `progress`                 | Int           | 0–100                                                               |
+| `progressMode`             | String        | `determinate` or `indeterminate`                                    |
+| `exitCode`                 | Int?          | Real CLI exit code; `null` when unavailable                         |
+| `summary`                  | String?       | Final CLI summary or deterministic fake summary                     |
+| `branchName`, `baseCommit` | String?       | Git evidence reported by the runner                                 |
+| `headCommit`               | String?       | Head after the CLI finished; may equal `baseCommit`                 |
+| `changedFiles`             | Int           | Changed-file count from the terminal Git payload                    |
+| `diffStat`                 | String        | `git diff --stat` text plus untracked-file names; default `""`      |
+| `gitStatus`                | String        | Bounded `git status --porcelain=v1` snapshot; default `""`          |
+| `diffTruncated`            | Boolean       | The stored patch was cut at `EXECUTION_DIFF_MAX_BYTES`              |
+| `lastRunnerSeq`            | Int           | Highest runner log sequence applied                                 |
+| `startedAt`                | DateTime      | Default now                                                         |
+| `endedAt`                  | DateTime?     | Set on terminal states                                              |
+| `failureReason`            | String?       | Set on failure                                                      |
+| `cancelReason`             | String?       | Set on cancellation                                                 |
+| `createdAt`, `updatedAt`   | DateTime      |                                                                     |
 
 Indexed by `taskId`, `agentId`, `runnerId`, `status`, and `phase`.
 
 `status` remains the coarse product state; `phase` is an additive, more precise
 execution stage used by the UI and runner protocol. Existing rows keep their
 status values, and the migration maps terminal statuses to terminal phases.
+
+For a real (`codex`/`opencode`) execution, the four `repository*` snapshot
+columns are written in the same transaction that creates the Execution. They
+survive a later binding path change or deletion, so history always shows the
+project, binding version, and default branch that were actually used.
 
 A task may have at most one `running` execution at a time; this is enforced in
 `ExecutionsService.startForTask` with an in-process start lock rather than by a
@@ -215,15 +267,15 @@ failure summaries, cancellation notes) share one ordered stream with CLI output.
 Large payloads are kept out of `Execution` list/detail responses and stored once
 per `(executionId, kind)`.
 
-| Column        | Type           | Notes                                             |
-| ------------- | -------------- | ------------------------------------------------- |
-| `id`          | String, PK     |                                                   |
-| `executionId` | FK → Execution | Cascade delete                                    |
-| `kind`        | String         | `git-diff` for the unified patch                  |
-| `content`     | String         | Unified diff text, capped at 1 MiB                |
-| `byteSize`    | Int            | UTF-8 byte size of `content`                      |
-| `truncated`   | Boolean        | Whether the patch was cut at the size limit       |
-| `createdAt`, `updatedAt` | DateTime |                                         |
+| Column                   | Type           | Notes                                       |
+| ------------------------ | -------------- | ------------------------------------------- |
+| `id`                     | String, PK     |                                             |
+| `executionId`            | FK → Execution | Cascade delete                              |
+| `kind`                   | String         | `git-diff` for the unified patch            |
+| `content`                | String         | Unified diff text, capped at 1 MiB          |
+| `byteSize`               | Int            | UTF-8 byte size of `content`                |
+| `truncated`              | Boolean        | Whether the patch was cut at the size limit |
+| `createdAt`, `updatedAt` | DateTime       |                                             |
 
 Unique on `(executionId, kind)` and indexed by `executionId`. The artifact is
 written from the owning runner's terminal event; duplicate terminal messages are

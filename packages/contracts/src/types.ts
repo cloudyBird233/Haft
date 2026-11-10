@@ -7,6 +7,8 @@ import type {
   LogLevel,
   LogStream,
   ProgressMode,
+  ProjectBindingStatus,
+  RunnerFeature,
   RunnerStatus,
   TaskPriority,
   TaskStatus,
@@ -57,6 +59,7 @@ export interface RunnerCapabilitiesDto {
   runtimes: RunnerRuntimeCapabilityDto[];
   projectIds: string[];
   maxConcurrentExecutions: number | null;
+  features: RunnerFeature[];
 }
 
 export interface RunnerSummaryDto {
@@ -96,11 +99,45 @@ export interface RuntimeAvailabilityDto {
 
 export interface ProjectDto {
   id: string;
+  workspaceId: string;
   name: string;
   key: string;
   description: string;
   color: string;
+  defaultBranch: string;
+  archivedAt: string | null;
   createdAt: string;
+  updatedAt: string;
+  /** Present on project list/detail responses; omitted in nested task summaries. */
+  taskCount?: number;
+  executionCount?: number;
+  bindingCount?: number;
+}
+
+export interface ProjectBindingDto {
+  id: string;
+  projectId: string;
+  computerId: string;
+  computer: ComputerDto | null;
+  path: string;
+  pathHash: string;
+  bindingVersion: number;
+  status: ProjectBindingStatus;
+  platform: string | null;
+  canonicalPath: string | null;
+  validationRequestId: string | null;
+  validationErrorCode: string | null;
+  validationError: string | null;
+  lastValidatedAt: string | null;
+  validatedByRunnerId: string | null;
+  validatedBindingVersion: number | null;
+  policyVersion: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProjectDetailDto extends ProjectDto {
+  bindings: ProjectBindingDto[];
 }
 
 export interface WorkspaceDto {
@@ -195,6 +232,10 @@ export interface ExecutionDto {
   agentId: string;
   runtime: string;
   runnerId: string | null;
+  repositoryProjectId: string | null;
+  repositoryBindingId: string | null;
+  repositoryBindingVersion: number | null;
+  repositoryDefaultBranch: string | null;
   status: ExecutionStatus;
   phase: ExecutionPhase;
   progress: number;
