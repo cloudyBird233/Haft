@@ -27,10 +27,11 @@ import type {
 import { FakeExecutor } from './fake-executor';
 import { log } from './logger';
 import { ProtocolEventQueue } from './protocol-event-queue';
-import { RealExecutor } from './real-executor';
+import { RealExecutor, type RealExecutorDependencies } from './real-executor';
 import { ExecutionRecovery, type RecoveredExecution } from './recovery';
 import { RepositoryPolicyError, type RepositoryPathPolicy } from './repository-policy';
 import {
+  RepositoryContextCancelledError,
   RepositoryContextError,
   RepositoryContextManager,
   type RepositoryContext,
@@ -51,6 +52,8 @@ export interface RunnerClientOptions {
   repositoryPolicy?: RepositoryPathPolicy;
   repositoryValidationCache?: RepositoryValidationCache;
   repositoryContexts?: RepositoryContextManager;
+  /** Test seam for deterministic live-admission/spawn assertions. */
+  realExecutorDependencies?: Partial<RealExecutorDependencies>;
   onFatal?: (message: string) => void;
 }
 
@@ -185,6 +188,7 @@ export class RunnerClient {
         ? new FakeExecutor(this.config, callbacks)
         : new RealExecutor(this.config, callbacks, this.recovery, {
             repositoryPolicy: this.repositoryPolicy,
+            ...options.realExecutorDependencies,
           });
   }
 
@@ -350,14 +354,29 @@ export class RunnerClient {
         this.handleServerError(message.payload);
         break;
       case 'execution.start':
-        void this.handleStart(message.payload);
+        void this.handleStart(message.payload).catch((error: unknown) => {
+          log('error', {
+            eventType: 'runner.admission_failed',
+            message: 'Execution admission ended with an unexpected error',
+            executionId: message.payload.executionId,
+            status: 'error',
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
         break;
       case 'execution.repository':
-        void this.handleRepository(message.payload);
+        void this.handleRepository(message.payload).catch((error: unknown) => {
+          log('error', {
+            eventType: 'runner.repository_handler_failed',
+            message: 'Repository handshake handler ended with an unexpected error',
+            executionId: message.payload.executionId,
+            status: 'error',
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
         break;
       case 'execution.cancel':
-        this.repositoryContexts.release(message.payload.executionId);
-        this.executor.cancel(message.payload.executionId, message.payload.reason);
+        this.handleCancel(message.payload.executionId, message.payload.reason);
         break;
       case 'execution.reconcile':
         log('info', {
@@ -544,6 +563,36 @@ export class RunnerClient {
     this.onFatal(`${payload.code}: ${payload.message}`);
   }
 
+  /**
+   * Cancellation is recorded synchronously before any asynchronous cleanup.
+   * If no executor session exists, this method itself confirms the pre-start
+   * cancellation to the API; an active session keeps the existing terminate
+   * and terminal-event path.
+   */
+  private handleCancel(executionId: string, reason?: string | null): void {
+    const resolved = reason?.trim() || 'Cancelled by operator';
+    const hadSession = this.executor.hasActiveSession(executionId);
+    const first = this.repositoryContexts.cancel(executionId, resolved);
+    // Always let the executor drop any admission-only state (for example a
+    // resolved executable cached before start). With an active session this
+    // also starts the existing process-termination path.
+    this.executor.cancel(executionId, resolved);
+    if (hadSession) return;
+    if (!first) return;
+    this.send('execution.cancelled', {
+      executionId,
+      reason: resolved,
+      exitCode: null,
+      git: null,
+    });
+    log('info', {
+      eventType: 'runner.execution_cancelled_before_start',
+      message: 'Confirmed a pre-start cancellation without an active executor session',
+      executionId,
+      status: 'cancelled',
+    });
+  }
+
   private async handleStart(
     payload: Extract<RunnerServerMessage, { type: 'execution.start' }>['payload'],
   ): Promise<void> {
@@ -568,63 +617,118 @@ export class RunnerClient {
   private async runAdmission(
     payload: Extract<RunnerServerMessage, { type: 'execution.start' }>['payload'],
   ): Promise<void> {
-    log('info', {
-      eventType: 'runner.execution_received',
-      message: `Dispatching ${payload.runtime} execution`,
-      executionId: payload.executionId,
-      status: 'running',
-    });
-
-    const state = this.repositoryContexts.beginStart(payload.executionId);
-    if (state === 'missing') {
-      this.sendStartRejected(
-        payload.executionId,
-        ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
-        'No ready repository context exists for this execution',
-      );
-      return;
-    }
-    if (state === 'started') {
-      // Duplicate start after the spawn: re-send accepted, never respawn.
-      this.send('execution.accepted', {
-        executionId: payload.executionId,
-        acceptedAt: new Date().toISOString(),
-      });
-      return;
-    }
-    if (state === 'starting') {
-      const inFlight = this.admissions.get(payload.executionId);
-      if (inFlight) {
-        await inFlight;
+    const executionId = payload.executionId;
+    let acceptedSent = false;
+    try {
+      if (this.repositoryContexts.isCancelled(executionId)) {
+        // Cancellation already owns the terminal path. Still answer a late
+        // start deterministically so an old API process cannot mistake the
+        // silence for an admission in progress.
+        this.sendStartRejected(
+          executionId,
+          ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
+          'The execution was cancelled before admission',
+        );
         return;
       }
-    }
 
-    const context = this.repositoryContexts.get(payload.executionId);
-    if (!context) {
+      log('info', {
+        eventType: 'runner.execution_received',
+        message: `Dispatching ${payload.runtime} execution`,
+        executionId,
+        status: 'running',
+      });
+
+      const state = this.repositoryContexts.beginStart(executionId);
+      if (state === 'missing') {
+        this.sendStartRejected(
+          executionId,
+          ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
+          'No ready repository context exists for this execution',
+        );
+        return;
+      }
+      if (state === 'started') {
+        // Duplicate start after the spawn: re-send accepted, never respawn.
+        this.send('execution.accepted', {
+          executionId,
+          acceptedAt: new Date().toISOString(),
+        });
+        return;
+      }
+      if (state === 'starting') {
+        const inFlight = this.admissions.get(executionId);
+        if (inFlight) {
+          await inFlight;
+          return;
+        }
+      }
+
+      const context = this.repositoryContexts.get(executionId);
+      if (!context) {
+        this.sendStartRejected(
+          executionId,
+          ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
+          'The repository context disappeared during admission',
+        );
+        return;
+      }
+
+      const failure = await this.admissionFailure(payload, context);
+      if (failure) {
+        this.repositoryContexts.release(executionId);
+        this.sendStartRejected(executionId, failure.code, failure.message, failure.retryable);
+        return;
+      }
+
+      // Admission performed real awaits (live CLI probe, capacity, policy).
+      // A cancel may have arrived in that window; never turn it into a spawn.
+      if (this.repositoryContexts.isCancelled(executionId)) {
+        this.repositoryContexts.release(executionId);
+        return;
+      }
+      const current = this.repositoryContexts.get(executionId);
+      if (!current || current.contextId !== context.contextId) {
+        this.repositoryContexts.release(executionId);
+        this.sendStartRejected(
+          executionId,
+          ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
+          'The repository context expired during admission',
+        );
+        return;
+      }
+
+      this.repositoryContexts.markStarted(executionId);
+      // The Runner must never spawn before the API has this acknowledgement.
+      this.send('execution.accepted', {
+        executionId,
+        acceptedAt: new Date().toISOString(),
+      });
+      acceptedSent = true;
+      try {
+        this.executor.start(payload, context);
+      } catch (error) {
+        // `executor.start` runs after accepted by contract; a synchronous
+        // throw here cannot be converted into a pre-start rejection.
+        log('error', {
+          eventType: 'runner.executor_start_failed',
+          message: 'Executor threw synchronously after execution.accepted',
+          executionId,
+          status: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    } catch (error) {
+      if (acceptedSent || this.repositoryContexts.isCancelled(executionId)) {
+        return;
+      }
+      this.repositoryContexts.release(executionId);
       this.sendStartRejected(
-        payload.executionId,
-        ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
-        'The repository context disappeared during admission',
+        executionId,
+        errorCode(error) ?? ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
+        errorMessage(error),
       );
-      return;
     }
-
-    const failure = await this.admissionFailure(payload, context);
-    if (failure) {
-      // A failed admission requires a new execution.repository handshake.
-      this.repositoryContexts.release(payload.executionId);
-      this.sendStartRejected(payload.executionId, failure.code, failure.message, failure.retryable);
-      return;
-    }
-
-    this.repositoryContexts.markStarted(payload.executionId);
-    // The Runner must never spawn before the API has this acknowledgement.
-    this.send('execution.accepted', {
-      executionId: payload.executionId,
-      acceptedAt: new Date().toISOString(),
-    });
-    this.executor.start(payload, context);
   }
 
   private async admissionFailure(
@@ -661,33 +765,13 @@ export class RunnerClient {
       };
     }
 
-    const admitted = this.executor.canAdmit(payload, context);
+    // The executor owns the live admission checks (runtime enabled, capacity,
+    // duplicate, CLI resolution and authentication at this instant). The
+    // startup capability cache is registration metadata only and is never
+    // treated as final admission evidence.
+    const admitted = await this.executor.canAdmit(payload, context);
     if (!admitted.ok) {
       return admitted;
-    }
-
-    if (this.config.mode === 'real') {
-      const capability = this.runtimeCapabilities.find((item) => item.runtime === payload.runtime);
-      if (!capability?.installed) {
-        return {
-          ok: false,
-          code: ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
-          message: `CLI_NOT_INSTALLED: ${
-            capability?.message ?? `${payload.runtime} is not available on this runner`
-          }`,
-          retryable: false,
-        };
-      }
-      if (!capability.authenticated) {
-        return {
-          ok: false,
-          code: ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
-          message: `CLI_NOT_AUTHENTICATED: ${
-            capability.message ?? `${payload.runtime} is not authenticated on this runner`
-          }`,
-          retryable: false,
-        };
-      }
     }
     return null;
   }
@@ -740,6 +824,11 @@ export class RunnerClient {
       };
       this.send('execution.repository.accepted', accepted);
     } catch (error) {
+      if (error instanceof RepositoryContextCancelledError) {
+        // The cancel handler already confirmed `execution.cancelled`; a late
+        // repository rejection would race the terminal state for no benefit.
+        return;
+      }
       const code =
         error instanceof RepositoryContextError
           ? error.code
@@ -966,4 +1055,18 @@ export class RunnerClient {
     socket.emit('runner.message', envelope);
     return socket.connected;
   }
+}
+
+function errorCode(error: unknown): ExecutionStartRejectedPayload['code'] | null {
+  if (error && typeof error === 'object' && 'code' in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string') {
+      return code as ExecutionStartRejectedPayload['code'];
+    }
+  }
+  return null;
+}
+
+function errorMessage(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).slice(0, 2000);
 }

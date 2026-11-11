@@ -34,7 +34,10 @@ import { EventsGateway } from '../events/events.gateway';
 import type { RuntimeEvent } from '../runtime/agent-runtime.interface';
 import { RuntimeRegistryService } from '../runtime/runtime-registry.service';
 import { RepositoryHandshakeService } from '../runners/repository-handshake.service';
-import { RepositoryDispatchError } from '../runners/repository-errors';
+import {
+  RepositoryDispatchCancelledError,
+  RepositoryDispatchError,
+} from '../runners/repository-errors';
 
 const RUNNER_CANCEL_TIMEOUT_MS = Math.max(
   5_000,
@@ -305,6 +308,14 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
             HttpStatus.CONFLICT,
           );
         }
+        if (!this.runtimes.hasLiveExecutionFeatures(runnerId)) {
+          throw new AppException(
+            ERROR_CODES.PROJECT_BINDING_UNSUPPORTED,
+            'The runner does not support the P2-02 execution repository handshake; upgrade it',
+            HttpStatus.CONFLICT,
+            { runnerId },
+          );
+        }
         assertBindingRunnerIdentity(currentBinding, runnerId, this.runtimes);
         bindingSnapshot = currentBinding;
       }
@@ -377,8 +388,26 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         runnerId,
       });
     } catch (error) {
+      const cancelled =
+        error instanceof RepositoryDispatchCancelledError ||
+        (await this.isCancelRequested(execution.id));
+      if (cancelled) {
+        // The cancellation path owns the terminal state and Task/Agent
+        // handling. Do not send this through failExecutionStart: that would
+        // turn an operator cancel into an ordinary failed start and could
+        // double-rollback the Task/Agent.
+        this.logger.info({
+          eventType: 'execution.start_cancelled',
+          message: 'Execution start stopped because a cancel intent was persisted',
+          taskId,
+          agentId: assigneeAgentId,
+          executionId: execution.id,
+          status: 'cancelled',
+        });
+        throw this.cancelledStart(execution.id);
+      }
       try {
-        await this.failExecutionStart({
+        const applied = await this.failExecutionStart({
           executionId: execution.id,
           taskId,
           agentId: assigneeAgentId,
@@ -387,7 +416,13 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
           previousAgentLastActiveAt: task.assignee.lastActiveAt,
           error,
         });
+        if (!applied && (await this.isCancelRequested(execution.id))) {
+          throw this.cancelledStart(execution.id);
+        }
       } catch (rollbackError) {
+        if (rollbackError instanceof AppException) {
+          throw rollbackError;
+        }
         this.logger.error({
           eventType: 'runtime.start_rollback_failed',
           message: 'Failed to roll back a rejected execution start',
@@ -600,20 +635,33 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     input?: CancelExecutionInput,
   ): Promise<ExecutionDto> {
     const reason = input?.reason ?? 'Cancelled by operator';
-    let dispatched = true;
-    if (execution.runnerId) {
-      dispatched = this.runtimes.cancelOnRunner(execution.runnerId, execution.id, reason);
-    } else {
-      await this.runtimes.stop(execution.runtime as AgentRuntimeType, execution.id);
+    // Persist the intent before any Runner message. Once this returns, every
+    // later dispatch/ACK/start check observes the cancellation, including
+    // after an API restart.
+    const cancellation = await this.handshake.requestCancel(execution.id, reason);
+    if (cancellation.alreadyTerminal) {
+      return this.getExecutionDto(execution.id);
     }
-    if (!dispatched) {
+
+    if (cancellation.safeToFinalize) {
+      // No repository message was ever sent, so no Runner context or process
+      // can exist. The cancel message is still sent (a Runner without a
+      // session confirms it), but the API does not need to wait for process
+      // termination evidence that cannot be produced.
+      await this.withExecutionLock(execution.id, () =>
+        this.finishExecution(execution.id, 'cancelled', { reason }),
+      );
+      return this.getExecutionDto(execution.id);
+    }
+
+    if (!cancellation.dispatched) {
       const latest = await this.findExecutionWithRelations(execution.id);
       if (latest && latest.status !== 'running') {
         return toExecutionDto(latest);
       }
       throw new AppException(
         'RUNNER_OFFLINE',
-        'The runner is offline; the execution was not cancelled and remains running',
+        'The runner is offline; cancellation is recorded and the execution cannot start, but the runner has not confirmed process termination',
         HttpStatus.CONFLICT,
         { executionId: execution.id },
       );
@@ -629,7 +677,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       }
       throw new AppException(
         'RUNNER_CANCEL_TIMEOUT',
-        'The runner did not confirm that the process tree stopped; the execution remains running',
+        'The runner did not confirm that the process tree stopped; the cancel intent remains recorded and execution.start is blocked',
         HttpStatus.CONFLICT,
         { executionId: execution.id, timeoutMs: RUNNER_CANCEL_TIMEOUT_MS },
       );
@@ -694,21 +742,26 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     previousAgentStatus: string;
     previousAgentLastActiveAt: Date | null;
     error: unknown;
-  }): Promise<void> {
+  }): Promise<boolean> {
     const endedAt = new Date();
     const failureReason = formatStartFailureReason(input.error);
     const applied = await this.prisma.$transaction(async (tx) => {
       const current = await tx.execution.findUnique({
         where: { id: input.executionId },
-        select: { status: true },
+        select: { status: true, cancelRequestedAt: true },
       });
       // Idempotent: a recovered failure or a duplicate caller may already have
       // made the row terminal. Never overwrite its reason or restore twice.
-      if (!current || current.status !== 'running') {
+      // A persisted operator cancel wins over a handshake failure.
+      if (!current || current.status !== 'running' || current.cancelRequestedAt) {
         return false;
       }
       const updated = await tx.execution.updateMany({
-        where: { id: input.executionId, status: 'running' },
+        where: {
+          id: input.executionId,
+          status: 'running',
+          cancelRequestedAt: null,
+        },
         data: {
           status: 'failed',
           phase: 'failed',
@@ -743,7 +796,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         executionId: input.executionId,
         status: 'warning',
       });
-      return;
+      return false;
     }
 
     await this.appendLog(input.executionId, 'error', `Execution failed to start: ${failureReason}`);
@@ -766,6 +819,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         error: input.error instanceof Error ? input.error.message : String(input.error),
       },
     });
+    return true;
   }
 
   private async handleRuntimeEvent(event: RuntimeEvent): Promise<void> {
@@ -1065,6 +1119,23 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       _max: { seq: true },
     });
     return (aggregate._max.seq ?? 0) + 1;
+  }
+
+  private async isCancelRequested(id: string): Promise<boolean> {
+    const execution = await this.prisma.execution.findUnique({
+      where: { id },
+      select: { cancelRequestedAt: true, status: true },
+    });
+    return Boolean(execution?.cancelRequestedAt) || execution?.status === 'cancelled';
+  }
+
+  private cancelledStart(executionId: string): AppException {
+    return new AppException(
+      'EXECUTION_NOT_RUNNING',
+      'The execution was cancelled before it started',
+      HttpStatus.CONFLICT,
+      { executionId },
+    );
   }
 
   private async waitForExecutionTerminal(

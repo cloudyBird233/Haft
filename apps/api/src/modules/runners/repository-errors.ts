@@ -17,3 +17,16 @@ export class RepositoryDispatchError extends Error {
     this.name = 'RepositoryDispatchError';
   }
 }
+
+/**
+ * The operator cancelled the execution while its handshake was still
+ * in flight. This is not a failure: the cancellation path owns the terminal
+ * state, so `ExecutionsService` must never route it through
+ * `failExecutionStart` (which would restore Task/Agent as a failed start).
+ */
+export class RepositoryDispatchCancelledError extends Error {
+  constructor(message = 'The execution was cancelled before it started') {
+    super(message);
+    this.name = 'RepositoryDispatchCancelledError';
+  }
+}

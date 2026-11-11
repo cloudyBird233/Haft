@@ -169,6 +169,10 @@ model Execution {
   repositoryBaseCommit      String?
   repositoryPreparedAt      DateTime?
   dispatchState             String                     @default("created")
+  /// Durable operator cancel intent. Set before any Runner cancel message is
+  /// sent and checked by every pre-start handshake transition. It is an
+  /// internal field, not a substitute dispatch state.
+  cancelRequestedAt         DateTime?
   runtime                   String                     @default("mock")
   status                    String                     @default("running")
   phase                     String                     @default("running")

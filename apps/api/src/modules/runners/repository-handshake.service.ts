@@ -9,7 +9,7 @@ import {
 } from '@raft-lite/contracts';
 import { AppLogger } from '../../common/logger/app-logger';
 import { PrismaService } from '../../common/prisma/prisma.service';
-import { RepositoryDispatchError } from './repository-errors';
+import { RepositoryDispatchCancelledError, RepositoryDispatchError } from './repository-errors';
 import { sameRepositoryPath } from './repository-state';
 import {
   RunnerRegistryService,
@@ -32,12 +32,26 @@ interface ExecutionSnapshot {
   id: string;
   status: string;
   dispatchState: string;
+  cancelRequestedAt: Date | null;
   runnerId: string | null;
   computerId: string;
   projectId: string;
   bindingId: string;
   bindingVersion: number;
   defaultBranch: string;
+}
+
+export interface CancelRequestResult {
+  /** The row was (or already is) terminal; no cancellation work remains. */
+  alreadyTerminal: boolean;
+  /** A durable cancel intent exists after this call. */
+  cancelRequested: boolean;
+  /** `execution.cancel` was handed to a connected Runner. */
+  dispatched: boolean;
+  /** No repository message was ever sent, so the API may terminalise safely. */
+  safeToFinalize: boolean;
+  dispatchState: string;
+  runnerId: string | null;
 }
 
 interface PendingDispatch {
@@ -78,6 +92,7 @@ const REQUIRED_EXECUTION_FEATURES: readonly RunnerFeature[] = [
 @Injectable()
 export class RepositoryHandshakeService implements OnModuleDestroy {
   private readonly pending = new Map<string, PendingDispatch>();
+  private readonly executionLocks = new Map<string, Promise<void>>();
   private unsubscribeProtocol: (() => void) | null = null;
   private unsubscribeRegistration: (() => void) | null = null;
 
@@ -135,88 +150,255 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
     }
   }
 
+  /**
+   * Persists the operator cancel intent, aborts any in-flight handshake and
+   * sends `execution.cancel`. The DB write and the final dispatch/start sends
+   * share the same per-execution lock, so a cancel cannot slip between a
+   * passed check and a sent message.
+   */
+  async requestCancel(executionId: string, reason: string): Promise<CancelRequestResult> {
+    return this.withExecutionLock(executionId, async () => {
+      const execution = await this.prisma.execution.findUnique({
+        where: { id: executionId },
+        select: {
+          id: true,
+          status: true,
+          dispatchState: true,
+          runnerId: true,
+          cancelRequestedAt: true,
+        },
+      });
+      if (!execution) {
+        return {
+          alreadyTerminal: true,
+          cancelRequested: false,
+          dispatched: false,
+          safeToFinalize: false,
+          dispatchState: 'terminal',
+          runnerId: null,
+        };
+      }
+      if (execution.status !== 'running') {
+        return {
+          alreadyTerminal: true,
+          cancelRequested: Boolean(execution.cancelRequestedAt),
+          dispatched: false,
+          safeToFinalize: false,
+          dispatchState: execution.dispatchState,
+          runnerId: execution.runnerId,
+        };
+      }
+
+      await this.prisma.execution.updateMany({
+        where: { id: executionId, status: 'running', cancelRequestedAt: null },
+        data: { cancelRequestedAt: new Date() },
+      });
+
+      const fresh = await this.prisma.execution.findUnique({
+        where: { id: executionId },
+        select: { status: true, dispatchState: true, runnerId: true },
+      });
+      if (!fresh || fresh.status !== 'running') {
+        return {
+          alreadyTerminal: true,
+          cancelRequested: Boolean(fresh),
+          dispatched: false,
+          safeToFinalize: false,
+          dispatchState: fresh?.dispatchState ?? 'terminal',
+          runnerId: fresh?.runnerId ?? execution.runnerId,
+        };
+      }
+
+      let pendingForExecution: PendingDispatch | null = null;
+      for (const pending of this.pending.values()) {
+        if (pending.executionId !== executionId) continue;
+        pendingForExecution = pending;
+        break;
+      }
+      if (pendingForExecution) {
+        this.rejectPending(
+          pendingForExecution,
+          new RepositoryDispatchCancelledError(reason || 'Cancelled by operator'),
+        );
+        this.pending.delete(pendingForExecution.key);
+      }
+
+      let dispatched = false;
+      if (fresh.runnerId) {
+        dispatched = this.runners.dispatchCancel(
+          fresh.runnerId,
+          executionId,
+          reason || 'Cancelled by operator',
+        );
+      }
+
+      return {
+        alreadyTerminal: false,
+        cancelRequested: true,
+        dispatched,
+        // No repository message was ever emitted, so no Runner context can
+        // exist. The API may terminalise this cancellation without waiting.
+        safeToFinalize: !pendingForExecution && fresh.dispatchState === 'created',
+        dispatchState: fresh.dispatchState,
+        runnerId: fresh.runnerId,
+      };
+    });
+  }
+
+  private async isCancelRequested(executionId: string): Promise<boolean> {
+    const execution = await this.prisma.execution.findUnique({
+      where: { id: executionId },
+      select: { cancelRequestedAt: true },
+    });
+    return Boolean(execution?.cancelRequestedAt);
+  }
+
+  private async withExecutionLock<T>(executionId: string, work: () => Promise<T>): Promise<T> {
+    const previous = this.executionLocks.get(executionId) ?? Promise.resolve();
+    const result = previous.then(work, work);
+    const tracked = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.executionLocks.set(executionId, tracked);
+    try {
+      return await result;
+    } finally {
+      if (this.executionLocks.get(executionId) === tracked) {
+        this.executionLocks.delete(executionId);
+      }
+    }
+  }
+
   async dispatch(input: RepositoryDispatchInput): Promise<void> {
     const snapshot = await this.loadSnapshot(input);
     await this.assertDispatchable(snapshot);
     await this.assertCapacity(input.runnerId, input.executionId);
 
-    const acquired = await this.prisma.execution.updateMany({
-      where: { id: input.executionId, dispatchState: 'created' },
-      data: { dispatchState: 'repository_preparing' },
-    });
-    if (acquired.count === 0) {
-      const current = await this.prisma.execution.findUnique({
-        where: { id: input.executionId },
-        select: { status: true, dispatchState: true },
-      });
-      if (!current || current.status !== 'running') {
-        throw new RepositoryDispatchError(
-          ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
-          'The execution is no longer running',
-        );
-      }
-      this.logger.warn({
-        eventType: 'repository.dispatch_duplicate',
-        message: 'Execution dispatch was acquired by another dispatcher',
-        runnerId: input.runnerId,
-        executionId: input.executionId,
-        status: 'warning',
-        dispatchState: current.dispatchState,
-      });
-      throw new RepositoryDispatchError(
-        ERROR_CODES.EXECUTION_ALREADY_RUNNING,
-        'This execution is already being dispatched',
-      );
-    }
-    await this.audit(input.executionId, 'repository_preparing', {
-      bindingVersion: snapshot.bindingVersion,
-    });
-
-    const binding = await this.prisma.projectRepositoryBinding.findUnique({
-      where: { id: snapshot.bindingId },
-      select: { path: true, canonicalPath: true, policyVersion: true },
-    });
-    if (!binding?.canonicalPath || !binding.policyVersion) {
-      throw new RepositoryDispatchError(
-        ERROR_CODES.PROJECT_BINDING_NOT_READY,
-        'The repository binding is not ready for execution',
-      );
-    }
-
-    const payload: ExecutionRepositoryPayload = {
-      executionId: input.executionId,
-      projectId: snapshot.projectId,
-      bindingId: snapshot.bindingId,
-      bindingVersion: snapshot.bindingVersion,
-      path: binding.path,
-      defaultBranch: snapshot.defaultBranch,
-      policyVersion: binding.policyVersion,
-    };
-    const repositoryMessage = this.runners.buildEnvelope(
-      input.runnerId,
-      'execution.repository',
-      payload,
-      randomUUID(),
-    );
-
-    const pending = this.createPending(
-      input,
-      snapshot,
-      repositoryMessage,
-      binding.canonicalPath,
-      binding.policyVersion,
-    );
-    this.pending.set(pending.key, pending);
-
+    let pending: PendingDispatch | null = null;
+    let bindingPolicyVersion = '';
     try {
-      this.armRepositoryTimers(pending);
-      if (!this.runners.sendEnvelope(input.runnerId, repositoryMessage)) {
-        throw new RepositoryDispatchError(
-          ERROR_CODES.RUNNER_OFFLINE,
-          'The assigned runner disconnected before the repository handshake',
-          true,
+      pending = await this.withExecutionLock(input.executionId, async () => {
+        // Final check and the repository send are serialized with
+        // `requestCancel`. A cancel that wins this lock is guaranteed to be
+        // observed here, so no repository or start message can be sent after
+        // the intent is persisted.
+        const current = await this.prisma.execution.findUnique({
+          where: { id: input.executionId },
+          select: {
+            status: true,
+            dispatchState: true,
+            cancelRequestedAt: true,
+          },
+        });
+        if (!current || current.status !== 'running') {
+          throw new RepositoryDispatchCancelledError(
+            'The execution is no longer running before the repository handshake',
+          );
+        }
+        if (current.cancelRequestedAt) {
+          throw new RepositoryDispatchCancelledError();
+        }
+        if (current.dispatchState !== 'created') {
+          this.logger.warn({
+            eventType: 'repository.dispatch_duplicate',
+            message: 'Execution dispatch was acquired by another dispatcher',
+            runnerId: input.runnerId,
+            executionId: input.executionId,
+            status: 'warning',
+            dispatchState: current.dispatchState,
+          });
+          throw new RepositoryDispatchError(
+            ERROR_CODES.EXECUTION_ALREADY_RUNNING,
+            'This execution is already being dispatched',
+          );
+        }
+
+        const acquired = await this.prisma.execution.updateMany({
+          where: {
+            id: input.executionId,
+            status: 'running',
+            dispatchState: 'created',
+            cancelRequestedAt: null,
+          },
+          data: { dispatchState: 'repository_preparing' },
+        });
+        if (acquired.count === 0) {
+          const latest = await this.prisma.execution.findUnique({
+            where: { id: input.executionId },
+            select: { status: true, dispatchState: true, cancelRequestedAt: true },
+          });
+          if (!latest || latest.status !== 'running' || latest.cancelRequestedAt) {
+            throw new RepositoryDispatchCancelledError();
+          }
+          this.logger.warn({
+            eventType: 'repository.dispatch_duplicate',
+            message: 'Execution dispatch was acquired by another dispatcher',
+            runnerId: input.runnerId,
+            executionId: input.executionId,
+            status: 'warning',
+            dispatchState: latest.dispatchState,
+          });
+          throw new RepositoryDispatchError(
+            ERROR_CODES.EXECUTION_ALREADY_RUNNING,
+            'This execution is already being dispatched',
+          );
+        }
+        await this.audit(input.executionId, 'repository_preparing', {
+          bindingVersion: snapshot.bindingVersion,
+        });
+
+        const binding = await this.prisma.projectRepositoryBinding.findUnique({
+          where: { id: snapshot.bindingId },
+          select: { path: true, canonicalPath: true, policyVersion: true },
+        });
+        if (!binding?.canonicalPath || !binding.policyVersion) {
+          throw new RepositoryDispatchError(
+            ERROR_CODES.PROJECT_BINDING_NOT_READY,
+            'The repository binding is not ready for execution',
+          );
+        }
+        bindingPolicyVersion = binding.policyVersion;
+
+        const payload: ExecutionRepositoryPayload = {
+          executionId: input.executionId,
+          projectId: snapshot.projectId,
+          bindingId: snapshot.bindingId,
+          bindingVersion: snapshot.bindingVersion,
+          path: binding.path,
+          defaultBranch: snapshot.defaultBranch,
+          policyVersion: binding.policyVersion,
+        };
+        const repositoryMessage = this.runners.buildEnvelope(
+          input.runnerId,
+          'execution.repository',
+          payload,
+          randomUUID(),
         );
-      }
+
+        const created = this.createPending(
+          input,
+          snapshot,
+          repositoryMessage,
+          binding.canonicalPath,
+          binding.policyVersion,
+        );
+        this.pending.set(created.key, created);
+        this.armRepositoryTimers(created);
+        try {
+          if (!this.runners.sendEnvelope(input.runnerId, repositoryMessage)) {
+            throw new RepositoryDispatchError(
+              ERROR_CODES.RUNNER_OFFLINE,
+              'The assigned runner disconnected before the repository handshake',
+              true,
+            );
+          }
+        } catch (error) {
+          this.clearPending(created);
+          throw error;
+        }
+        return created;
+      });
 
       const accepted = await pending.repositoryDeferred.promise;
       this.clearRepositoryTimers(pending);
@@ -234,7 +416,7 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
       });
       pending.startMessage = startMessage;
       pending.startTimer = setTimeout(() => {
-        pending.startDeferred.reject(
+        pending?.startDeferred.reject(
           new RepositoryDispatchError(
             ERROR_CODES.START_ACCEPT_TIMEOUT,
             'The runner did not confirm that the CLI started in time',
@@ -244,21 +426,51 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
       }, START_ACCEPT_TIMEOUT_MS);
       pending.startTimer.unref();
 
-      if (!this.runners.sendEnvelope(input.runnerId, startMessage)) {
-        throw new RepositoryDispatchError(
-          ERROR_CODES.RUNNER_OFFLINE,
-          'The assigned runner disconnected before execution.start',
-          true,
-        );
-      }
+      // The start send is the linearization point for cancel. Holding the
+      // same per-execution lock as `requestCancel` guarantees that a cancel
+      // committed before this block is seen here, and a cancel arriving
+      // after it necessarily observes a sent `execution.start`.
+      await this.withExecutionLock(input.executionId, async () => {
+        const current = await this.prisma.execution.findUnique({
+          where: { id: input.executionId },
+          select: { status: true, dispatchState: true, cancelRequestedAt: true },
+        });
+        if (!current || current.status !== 'running') {
+          throw new RepositoryDispatchCancelledError(
+            'The execution became terminal before execution.start was sent',
+          );
+        }
+        if (current.cancelRequestedAt) {
+          throw new RepositoryDispatchCancelledError();
+        }
+        if (current.dispatchState !== 'start_sent') {
+          throw new RepositoryDispatchError(
+            ERROR_CODES.REPOSITORY_CONTEXT_MISMATCH,
+            'The execution dispatch state changed before execution.start was sent',
+          );
+        }
+        if (!this.runners.sendEnvelope(input.runnerId, startMessage)) {
+          throw new RepositoryDispatchError(
+            ERROR_CODES.RUNNER_OFFLINE,
+            'The assigned runner disconnected before execution.start',
+            true,
+          );
+        }
+      });
       await pending.startDeferred.promise;
       pending.settled = true;
       await this.audit(input.executionId, 'running', {
         bindingVersion: snapshot.bindingVersion,
-        policyVersion: binding.policyVersion,
+        policyVersion: bindingPolicyVersion,
       });
     } catch (error) {
-      if (error instanceof RepositoryDispatchError) {
+      if (error instanceof RepositoryDispatchCancelledError) {
+        await this.audit(input.executionId, 'handshake_cancelled', {
+          bindingVersion: snapshot.bindingVersion,
+          code: 'EXECUTION_CANCELLED',
+          message: error.message,
+        });
+      } else if (error instanceof RepositoryDispatchError) {
         if (error.code === ERROR_CODES.REPOSITORY_POLICY_CHANGED) {
           await this.markBindingUnverified(snapshot.bindingId, snapshot.bindingVersion);
         }
@@ -271,11 +483,13 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
       this.runners.dispatchCancel(
         input.runnerId,
         input.executionId,
-        `${errorCode(error)}: handshake failed`,
+        error instanceof RepositoryDispatchCancelledError
+          ? 'Execution cancelled before start'
+          : `${errorCode(error)}: handshake failed`,
       );
       throw error;
     } finally {
-      this.clearPending(pending);
+      if (pending) this.clearPending(pending);
     }
   }
 
@@ -312,6 +526,7 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
       id: execution.id,
       status: execution.status,
       dispatchState: execution.dispatchState,
+      cancelRequestedAt: execution.cancelRequestedAt,
       runnerId: execution.runnerId,
       computerId: execution.runner.computerId,
       projectId: execution.repositoryProjectId,
@@ -327,6 +542,9 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
         ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
         'The execution is not running',
       );
+    }
+    if (snapshot.cancelRequestedAt) {
+      throw new RepositoryDispatchCancelledError();
     }
     if (snapshot.dispatchState !== 'created') {
       throw new RepositoryDispatchError(
@@ -523,6 +741,7 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
           id: true,
           status: true,
           dispatchState: true,
+          cancelRequestedAt: true,
           runnerId: true,
           repositoryProjectId: true,
           repositoryBindingId: true,
@@ -532,9 +751,12 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
           repositoryPolicyVersion: true,
         },
       });
+      if (!execution || execution.status !== 'running' || execution.cancelRequestedAt) {
+        throw new RepositoryDispatchCancelledError(
+          'The execution was cancelled before the repository handshake completed',
+        );
+      }
       if (
-        !execution ||
-        execution.status !== 'running' ||
         execution.runnerId !== pending.runnerId ||
         execution.repositoryProjectId !== pending.snapshot.projectId ||
         execution.repositoryBindingId !== pending.snapshot.bindingId ||
@@ -634,7 +856,12 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
 
       if (expectedState === 'repository_preparing') {
         const moved = await tx.execution.updateMany({
-          where: { id: pending.executionId, dispatchState: 'repository_preparing' },
+          where: {
+            id: pending.executionId,
+            status: 'running',
+            dispatchState: 'repository_preparing',
+            cancelRequestedAt: null,
+          },
           data: {
             dispatchState: 'repository_ready',
             repositoryPath: ack?.canonicalPath ?? binding.canonicalPath,
@@ -645,16 +872,35 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
           },
         });
         if (moved.count === 0) {
+          const latest = await tx.execution.findUnique({
+            where: { id: pending.executionId },
+            select: { status: true, cancelRequestedAt: true },
+          });
+          if (latest?.cancelRequestedAt || latest?.status !== 'running') {
+            throw new RepositoryDispatchCancelledError();
+          }
           throw this.staleTransition(pending, 'repository_preparing');
         }
         return { state: 'repository_ready' as const, policyVersion: binding.policyVersion };
       }
 
       const moved = await tx.execution.updateMany({
-        where: { id: pending.executionId, dispatchState: 'repository_ready' },
+        where: {
+          id: pending.executionId,
+          status: 'running',
+          dispatchState: 'repository_ready',
+          cancelRequestedAt: null,
+        },
         data: { dispatchState: 'start_sent' },
       });
       if (moved.count === 0) {
+        const latest = await tx.execution.findUnique({
+          where: { id: pending.executionId },
+          select: { status: true, cancelRequestedAt: true },
+        });
+        if (latest?.cancelRequestedAt || latest?.status !== 'running') {
+          throw new RepositoryDispatchCancelledError();
+        }
         throw this.staleTransition(pending, 'repository_ready');
       }
       return { state: 'start_sent' as const, policyVersion: binding.policyVersion };
@@ -719,6 +965,15 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
       return;
     }
 
+    // A durable cancel intent always wins over a late ACK or start acceptance.
+    // This check also covers a fresh API process that reloads the row after a
+    // restart but still holds a pending entry for this connection.
+    if (await this.isCancelRequested(pending.executionId)) {
+      this.rejectPending(pending, new RepositoryDispatchCancelledError());
+      this.pending.delete(key);
+      return;
+    }
+
     if (event.type === 'execution.repository.accepted') {
       pending.repositoryDeferred.resolve(event.payload);
       return;
@@ -751,14 +1006,25 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
         return;
       }
       const moved = await this.prisma.execution.updateMany({
-        where: { id: pending.executionId, dispatchState: 'start_sent' },
+        where: {
+          id: pending.executionId,
+          status: 'running',
+          dispatchState: 'start_sent',
+          cancelRequestedAt: null,
+        },
         data: { dispatchState: 'running' },
       });
       if (moved.count === 0) {
         const current = await this.prisma.execution.findUnique({
           where: { id: pending.executionId },
-          select: { status: true, dispatchState: true },
+          select: { status: true, dispatchState: true, cancelRequestedAt: true },
         });
+        if (current?.cancelRequestedAt) {
+          // A cancel committed between the ingress check and this update. It
+          // must never be revived by a late start acceptance.
+          pending.startDeferred.reject(new RepositoryDispatchCancelledError());
+          return;
+        }
         if (current?.dispatchState === 'running' && current.status === 'running') {
           // Duplicate execution.accepted: transitioned once already.
           pending.startDeferred.resolve(event.payload);

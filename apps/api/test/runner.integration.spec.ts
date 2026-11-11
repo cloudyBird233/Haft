@@ -21,6 +21,8 @@ import {
 import { createTestApp, waitFor, type ApiSuccessBody } from './test-app';
 import { PrismaService } from '../src/common/prisma/prisma.service';
 import { RuntimeRegistryService } from '../src/modules/runtime/runtime-registry.service';
+import { RepositoryHandshakeService } from '../src/modules/runners/repository-handshake.service';
+import { RepositoryDispatchCancelledError } from '../src/modules/runners/repository-errors';
 import { SEED_IDS } from '../src/common/seed/demo-data';
 
 const BOOTSTRAP = 'test-runner-bootstrap-token';
@@ -1059,7 +1061,9 @@ describe('Runner protocol v1 integration', () => {
       });
 
       const failed = await waitFor(async () => {
-        const row = await prisma.execution.findUnique({ where: { id: repository.payload.executionId } });
+        const row = await prisma.execution.findUnique({
+          where: { id: repository.payload.executionId },
+        });
         return row?.status === 'failed' ? row : null;
       });
       expect(failed).toMatchObject({
@@ -1261,6 +1265,345 @@ describe('Runner protocol v1 integration', () => {
     } finally {
       connected.socket.off('runner.message', handler);
     }
+  });
+
+  it('F1: persists cancel intent and ignores a late repository ACK before execution.start', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    const binding = await ensureReadyBinding();
+    const { taskId, agentId } = await createCodexTask();
+
+    const outbound: string[] = [];
+    const handler = (raw: unknown): void => {
+      const parsed = runnerServerMessageSchema.safeParse(raw);
+      if (parsed.success) outbound.push(parsed.data.type);
+    };
+    connected.socket.on('runner.message', handler);
+    try {
+      const repositoryMessage = waitForMessage(connected.socket, 'execution.repository', 8000);
+      const startResponse = Promise.resolve(
+        request(server).post(`/api/tasks/${taskId}/start`).send({}),
+      );
+      const repository = await repositoryMessage;
+      const executionId = repository.payload.executionId;
+
+      const cancelMessage = waitForMessage(connected.socket, 'execution.cancel', 5000);
+      const cancelResponse = Promise.resolve(
+        request(server)
+          .post(`/api/executions/${executionId}/cancel`)
+          .send({ reason: 'cancel before ACK' }),
+      );
+      await cancelMessage;
+      send(connected.socket, 'execution.cancelled', {
+        executionId,
+        reason: 'cancel before ACK',
+        exitCode: null,
+        git: null,
+      });
+      const cancelled = await cancelResponse;
+      expect(cancelled.status).toBe(200);
+
+      // A late ACK must never advance the handshake or send execution.start.
+      await acceptRepositoryHandshake(connected, repository, binding);
+      const startResult = await startResponse;
+      expect(startResult.status).toBe(409);
+      expect(startResult.body.error.code).toBe('EXECUTION_NOT_RUNNING');
+      await delay(300);
+
+      expect(outbound).not.toContain('execution.start');
+      const row = await prisma.execution.findUniqueOrThrow({ where: { id: executionId } });
+      expect(row).toMatchObject({
+        status: 'cancelled',
+        dispatchState: 'terminal',
+        cancelReason: 'cancel before ACK',
+      });
+      expect(row.cancelRequestedAt).toBeTruthy();
+      expect(
+        await prisma.repositoryHandshakeEvent.count({
+          where: { executionId, state: 'handshake_cancelled' },
+        }),
+      ).toBeGreaterThanOrEqual(1);
+
+      // The operator cancel owns the Task/Agent state, not failExecutionStart.
+      const taskAfter = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
+      expect(taskAfter.status).toBe('cancelled');
+      const agentAfter = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      expect(agentAfter.status).toBe('idle');
+    } finally {
+      connected.socket.off('runner.message', handler);
+    }
+  });
+
+  it('F1: serializes cancel between the repository ACK and execution.start', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    const binding = await ensureReadyBinding();
+    const { taskId } = await createCodexTask();
+    const handshake = app.get(RepositoryHandshakeService);
+
+    type AcceptedRepositoryHook = {
+      acceptedRepository: (pending: { executionId: string }, ack: unknown) => Promise<void>;
+    };
+    const internals = handshake as unknown as AcceptedRepositoryHook;
+    const originalAcceptedRepository = internals.acceptedRepository.bind(internals);
+    const spy = vi
+      .spyOn(internals, 'acceptedRepository')
+      .mockImplementation(async (pending, ack) => {
+        await originalAcceptedRepository(pending, ack);
+        // The cancel commits after repository_ready but before the dispatcher
+        // takes the per-execution lock that guards execution.start.
+        await handshake.requestCancel(pending.executionId, 'cancel after ACK');
+      });
+
+    const outbound: string[] = [];
+    const handler = (raw: unknown): void => {
+      const parsed = runnerServerMessageSchema.safeParse(raw);
+      if (parsed.success) outbound.push(parsed.data.type);
+    };
+    connected.socket.on('runner.message', handler);
+    try {
+      const repositoryMessage = waitForMessage(connected.socket, 'execution.repository', 8000);
+      const startResponse = Promise.resolve(
+        request(server).post(`/api/tasks/${taskId}/start`).send({}),
+      );
+      const repository = await repositoryMessage;
+      const executionId = repository.payload.executionId;
+      await acceptRepositoryHandshake(connected, repository, binding);
+
+      const startResult = await startResponse;
+      expect(startResult.status).toBe(409);
+      expect(startResult.body.error.code).toBe('EXECUTION_NOT_RUNNING');
+      await delay(300);
+
+      expect(spy).toHaveBeenCalled();
+      expect(outbound).not.toContain('execution.start');
+      const row = await prisma.execution.findUniqueOrThrow({ where: { id: executionId } });
+      expect(row.cancelRequestedAt).toBeTruthy();
+      // The state may already be start_sent, but the guarded send never ran.
+      expect(row.dispatchState).not.toBe('running');
+
+      // Finish the operator cancellation so the row is terminal.
+      const cancelResponse = Promise.resolve(
+        request(server)
+          .post(`/api/executions/${executionId}/cancel`)
+          .send({ reason: 'cancel after ACK' }),
+      );
+      await delay(200);
+      send(connected.socket, 'execution.cancelled', {
+        executionId,
+        reason: 'cancel after ACK',
+        exitCode: null,
+        git: null,
+      });
+      expect((await cancelResponse).status).toBe(200);
+      const terminal = await prisma.execution.findUniqueOrThrow({ where: { id: executionId } });
+      expect(terminal).toMatchObject({ status: 'cancelled', dispatchState: 'terminal' });
+    } finally {
+      connected.socket.off('runner.message', handler);
+    }
+  });
+
+  it('F1: a persisted cancelRequestedAt blocks dispatch without sending execution.repository', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    const binding = await ensureReadyBinding();
+    const { taskId, agentId } = await createCodexTask();
+    const executionId = `execution_restart_${randomUUID()}`;
+    await prisma.execution.create({
+      data: {
+        id: executionId,
+        taskId,
+        agentId,
+        runnerId: RUNNER_ID,
+        repositoryProjectId: SEED_IDS.project,
+        repositoryBindingId: binding.id,
+        repositoryBindingVersion: binding.bindingVersion,
+        repositoryDefaultBranch: 'main',
+        runtime: 'codex',
+        status: 'running',
+        phase: 'queued',
+        dispatchState: 'created',
+        cancelRequestedAt: new Date(),
+      },
+    });
+    const handshake = app.get(RepositoryHandshakeService);
+
+    const outbound: string[] = [];
+    const handler = (raw: unknown): void => {
+      const parsed = runnerServerMessageSchema.safeParse(raw);
+      if (parsed.success) outbound.push(parsed.data.type);
+    };
+    connected.socket.on('runner.message', handler);
+    try {
+      await expect(
+        handshake.dispatch({
+          executionId,
+          runnerId: RUNNER_ID,
+          runtime: 'codex',
+          taskId,
+          taskTitle: 'Restart cancel',
+          taskDescription: 'Durable intent',
+          projectId: SEED_IDS.project,
+          prompt: 'Do not dispatch.',
+          options: {},
+        }),
+      ).rejects.toBeInstanceOf(RepositoryDispatchCancelledError);
+      await delay(200);
+      expect(outbound).not.toContain('execution.repository');
+      expect(outbound).not.toContain('execution.start');
+      const stillPending = await prisma.execution.findUniqueOrThrow({
+        where: { id: executionId },
+      });
+      expect(stillPending.status).toBe('running');
+      expect(stillPending.dispatchState).toBe('created');
+
+      const cancel = await request(server)
+        .post(`/api/executions/${executionId}/cancel`)
+        .send({ reason: 'restart cancel' });
+      expect(cancel.status).toBe(200);
+      const cancelled = await prisma.execution.findUniqueOrThrow({ where: { id: executionId } });
+      expect(cancelled).toMatchObject({
+        status: 'cancelled',
+        dispatchState: 'terminal',
+        cancelReason: 'restart cancel',
+      });
+    } finally {
+      connected.socket.off('runner.message', handler);
+    }
+  });
+
+  it('F1: finalizes a pre-start cancel with no repository context without waiting for a process', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    const binding = await ensureReadyBinding();
+    const { taskId, agentId } = await createCodexTask();
+    const executionId = `execution_prestart_${randomUUID()}`;
+    await prisma.execution.create({
+      data: {
+        id: executionId,
+        taskId,
+        agentId,
+        runnerId: RUNNER_ID,
+        repositoryProjectId: SEED_IDS.project,
+        repositoryBindingId: binding.id,
+        repositoryBindingVersion: binding.bindingVersion,
+        repositoryDefaultBranch: 'main',
+        runtime: 'codex',
+        status: 'running',
+        phase: 'queued',
+        dispatchState: 'created',
+      },
+    });
+
+    const outbound: string[] = [];
+    const handler = (raw: unknown): void => {
+      const parsed = runnerServerMessageSchema.safeParse(raw);
+      if (parsed.success) outbound.push(parsed.data.type);
+    };
+    connected.socket.on('runner.message', handler);
+    try {
+      const canceled = await request(server)
+        .post(`/api/executions/${executionId}/cancel`)
+        .send({ reason: 'no context yet' });
+      expect(canceled.status).toBe(200);
+      expect(outbound).not.toContain('execution.repository');
+      expect(outbound).not.toContain('execution.start');
+      const row = await prisma.execution.findUniqueOrThrow({ where: { id: executionId } });
+      expect(row).toMatchObject({ status: 'cancelled', dispatchState: 'terminal' });
+      expect(row.cancelRequestedAt).toBeTruthy();
+    } finally {
+      connected.socket.off('runner.message', handler);
+    }
+  });
+
+  it('F3: duplicate repository ACKs converge on one start and one context', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    const binding = await ensureReadyBinding();
+    const { taskId } = await createCodexTask();
+
+    const repositories: Array<Extract<RunnerServerMessage, { type: 'execution.repository' }>> = [];
+    const starts: string[] = [];
+    const handler = (raw: unknown): void => {
+      const parsed = runnerServerMessageSchema.safeParse(raw);
+      if (!parsed.success) return;
+      if (parsed.data.type === 'execution.repository') repositories.push(parsed.data);
+      if (parsed.data.type === 'execution.start') starts.push(parsed.data.payload.executionId);
+    };
+    connected.socket.on('runner.message', handler);
+    try {
+      const startResponse = Promise.resolve(
+        request(server).post(`/api/tasks/${taskId}/start`).send({}),
+      );
+      await waitFor(() => Promise.resolve(repositories.length >= 2), 8000);
+      const [first, second] = repositories;
+      expect(first?.messageId).toBe(second?.messageId);
+
+      // Both ACKs describe the same Runner context. The API must accept them
+      // idempotently: one repository_ready transition and one execution.start.
+      await acceptRepositoryHandshake(connected, first!, binding);
+      await acceptRepositoryHandshake(connected, second!, binding);
+      await waitFor(() => Promise.resolve(starts.length === 1), 5000);
+      await delay(200);
+      expect(starts).toHaveLength(1);
+
+      send(connected.socket, 'execution.accepted', {
+        executionId: starts[0]!,
+        acceptedAt: new Date().toISOString(),
+      });
+      const response = await startResponse;
+      expect(response.status).toBe(201);
+      const execution = (response.body as ApiSuccessBody<ExecutionDto>).data;
+      expect(execution.repositoryContextId).toBe(`context_${execution.id}`);
+      expect(
+        await prisma.repositoryHandshakeEvent.count({
+          where: { executionId: execution.id, state: 'repository_ready' },
+        }),
+      ).toBe(1);
+      expect(
+        await prisma.repositoryHandshakeEvent.count({
+          where: { executionId: execution.id, state: 'start_sent' },
+        }),
+      ).toBe(1);
+    } finally {
+      connected.socket.off('runner.message', handler);
+    }
+  });
+
+  it('F4: rejects a live feature loss inside the creation transaction with zero Execution rows', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    await ensureReadyBinding();
+    const { taskId, agentId } = await createCodexTask();
+    const beforeTask = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
+    const runtimes = app.get(RuntimeRegistryService);
+    const originalGetAvailability = runtimes.getAvailability.bind(runtimes);
+    let reRegistered = false;
+    const spy = vi
+      .spyOn(runtimes, 'getAvailability')
+      .mockImplementation(async (...args: Parameters<typeof originalGetAvailability>) => {
+        const availability = await originalGetAvailability(...args);
+        if (!reRegistered) {
+          reRegistered = true;
+          // Same runner id re-registers and drops the execution features
+          // after the availability precheck but before the creation tx.
+          await registerRunner(connected, RUNNER_ID, COMPUTER_ID, {
+            features: ['repository-validation-v1', 'repository-path-policy-v1'],
+          });
+          await waitFor(() => Promise.resolve(!runtimes.hasLiveExecutionFeatures(RUNNER_ID)), 4000);
+        }
+        return availability;
+      });
+
+    const response = await request(server).post(`/api/tasks/${taskId}/start`).send({});
+    expect(response.status).toBe(409);
+    expect(response.body.error.code).toBe('PROJECT_BINDING_UNSUPPORTED');
+    expect(spy).toHaveBeenCalled();
+    expect(await prisma.execution.count({ where: { taskId } })).toBe(0);
+    const taskAfter = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
+    expect(taskAfter.status).toBe(beforeTask.status);
+    const agentAfter = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+    expect(agentAfter.status).toBe('idle');
   });
 });
 

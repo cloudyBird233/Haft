@@ -10,6 +10,7 @@ import type {
 } from '@raft-lite/contracts';
 import type { RunnerConfig } from './config';
 import { buildCliArgs } from './cli-args';
+import { probeAuthentication, type AuthProbeResult } from './cli-probe';
 import { createCliOutputParser, type CliLogLine, type CliOutputParser } from './cli-output';
 import type {
   CancelledPayload,
@@ -47,6 +48,7 @@ const SHUTDOWN_FORCE_WAIT_MS = 5_000;
  */
 export interface RealExecutorDependencies {
   resolveExecutable(command: string): Promise<ResolvedExecutable>;
+  probeAuthentication(runtime: RunnerRuntimeType, executable: string): Promise<AuthProbeResult>;
   spawnProcess(command: string, args: readonly string[], options: SpawnOptions): ChildProcess;
   inspectProcess(pid: number): Promise<ProcessIdentity | null>;
   terminateProcess(child: ChildProcess, force?: boolean): Promise<void>;
@@ -71,6 +73,7 @@ interface RealSession extends RunnerSessionView {
   parser: CliOutputParser;
   worktree: WorktreeInfo | null;
   projectPath: string | null;
+  executablePath: string | null;
   timeoutTimer: NodeJS.Timeout | null;
   forceKillTimer: NodeJS.Timeout | null;
   fallbackTimer: NodeJS.Timeout | null;
@@ -106,8 +109,11 @@ class RunnerFailure extends Error {
  */
 export class RealExecutor implements RunnerExecutor {
   private readonly sessions = new Map<string, RealSession>();
+  /** Executable resolved by live admission and reused by the following start. */
+  private readonly admittedExecutables = new Map<string, string>();
   private readonly git: Pick<GitWorktreeManager, 'prepare' | 'collect' | 'cleanup'>;
   private readonly resolveExecutable: RealExecutorDependencies['resolveExecutable'];
+  private readonly probeAuthentication: RealExecutorDependencies['probeAuthentication'];
   private readonly spawnProcess: RealExecutorDependencies['spawnProcess'];
   private readonly inspectProcess: RealExecutorDependencies['inspectProcess'];
   private readonly terminateProcess: RealExecutorDependencies['terminateProcess'];
@@ -122,6 +128,7 @@ export class RealExecutor implements RunnerExecutor {
   ) {
     this.git = dependencies.git ?? new GitWorktreeManager(config);
     this.resolveExecutable = dependencies.resolveExecutable ?? resolveExecutable;
+    this.probeAuthentication = dependencies.probeAuthentication ?? probeAuthentication;
     this.spawnProcess = dependencies.spawnProcess ?? spawn;
     this.inspectProcess = dependencies.inspectProcess ?? inspectProcess;
     this.terminateProcess = dependencies.terminateProcess ?? terminateProcess;
@@ -129,10 +136,10 @@ export class RealExecutor implements RunnerExecutor {
     this.shutdownForceWaitMs = dependencies.shutdownForceWaitMs ?? SHUTDOWN_FORCE_WAIT_MS;
   }
 
-  canAdmit(
+  async canAdmit(
     payload: ExecutionStartMessage['payload'],
     _context: RepositoryContext,
-  ): ExecutorAdmission {
+  ): Promise<ExecutorAdmission> {
     if (!this.config.realRuntimes.includes(payload.runtime)) {
       return {
         ok: false,
@@ -152,10 +159,72 @@ export class RealExecutor implements RunnerExecutor {
         retryable: true,
       };
     }
+
+    // Live admission: the startup capability cache is not evidence that the
+    // CLI still exists or is still authenticated when execution.start arrives.
+    const command = this.config.cliPaths[payload.runtime] ?? payload.runtime;
+    let resolved: Awaited<ReturnType<RealExecutorDependencies['resolveExecutable']>>;
+    try {
+      resolved = await this.resolveExecutable(command);
+    } catch (error) {
+      return {
+        ok: false,
+        code: 'REPOSITORY_CONTEXT_NOT_READY',
+        message: `CLI_NOT_INSTALLED: ${
+          error instanceof Error ? error.message : String(error)
+        }`.slice(0, 2000),
+        retryable: false,
+      };
+    }
+    if (!resolved.path) {
+      return {
+        ok: false,
+        code: 'REPOSITORY_CONTEXT_NOT_READY',
+        message: `CLI_NOT_INSTALLED: ${
+          resolved.error ?? `${payload.runtime} CLI was not found`
+        }`.slice(0, 2000),
+        retryable: false,
+      };
+    }
+
+    let auth: AuthProbeResult;
+    try {
+      auth = await this.probeAuthentication(payload.runtime, resolved.path);
+    } catch (error) {
+      return {
+        ok: false,
+        code: 'REPOSITORY_CONTEXT_NOT_READY',
+        message: `CLI_NOT_AUTHENTICATED: ${
+          error instanceof Error ? error.message : String(error)
+        }`.slice(0, 2000),
+        retryable: false,
+      };
+    }
+    if (!auth.authenticated) {
+      return {
+        ok: false,
+        code: 'REPOSITORY_CONTEXT_NOT_READY',
+        message: `CLI_NOT_AUTHENTICATED: ${
+          auth.message ?? `${payload.runtime} CLI is not authenticated`
+        }`.slice(0, 2000),
+        retryable: false,
+      };
+    }
+
+    // Keep the exact executable resolved by admission so start does not
+    // repeat an ordinary "is it installed?" decision after accepted.
+    this.admittedExecutables.set(payload.executionId, resolved.path);
     return { ok: true };
   }
 
+  hasActiveSession(executionId: string): boolean {
+    const session = this.sessions.get(executionId);
+    return Boolean(session && !session.finished && !session.cancelled);
+  }
+
   start(payload: ExecutionStartMessage['payload'], context: RepositoryContext): void {
+    const admittedExecutable = this.admittedExecutables.get(payload.executionId) ?? null;
+    this.admittedExecutables.delete(payload.executionId);
     if (this.sessions.has(payload.executionId)) {
       return;
     }
@@ -172,6 +241,7 @@ export class RealExecutor implements RunnerExecutor {
 
     const session = this.createSession(payload);
     session.projectPath = context.canonicalPath;
+    session.executablePath = admittedExecutable;
     this.sessions.set(session.executionId, session);
     this.emitPhase(session, 'preparing', 'Runner accepted the execution');
     this.log(session, 'system', 'info', `Real ${payload.runtime} runner accepted the execution.`);
@@ -190,6 +260,7 @@ export class RealExecutor implements RunnerExecutor {
   }
 
   cancel(executionId: string, reason?: string): void {
+    this.admittedExecutables.delete(executionId);
     const session = this.sessions.get(executionId);
     if (!session || session.finished || session.cancelled) {
       return;
@@ -357,12 +428,18 @@ export class RealExecutor implements RunnerExecutor {
     }
 
     const command = this.config.cliPaths[payload.runtime] ?? payload.runtime;
-    const resolved = await this.resolveExecutable(command);
-    if (!resolved.path) {
-      throw new RunnerFailure(
-        'CLI_NOT_INSTALLED',
-        resolved.error ?? `${payload.runtime} CLI was not found`,
-      );
+    let executable = session.executablePath;
+    if (!executable) {
+      // Defense in depth only. Normal admission resolved this before accepted;
+      // a miss here is a last-moment race, not the ordinary CLI-missing path.
+      const resolved = await this.resolveExecutable(command);
+      executable = resolved.path;
+      if (!executable) {
+        throw new RunnerFailure(
+          'CLI_NOT_INSTALLED',
+          resolved.error ?? `${payload.runtime} CLI was not found`,
+        );
+      }
     }
     if (session.cancelled) {
       await this.finalize(session, 'cancelled', {
@@ -384,7 +461,7 @@ export class RealExecutor implements RunnerExecutor {
 
     let child: ChildProcess;
     try {
-      child = this.spawnProcess(resolved.path, args, {
+      child = this.spawnProcess(executable, args, {
         cwd: worktree.path,
         env: buildCliEnvironment(),
         shell: false,
@@ -573,6 +650,7 @@ export class RealExecutor implements RunnerExecutor {
     }
 
     this.sessions.delete(session.executionId);
+    this.admittedExecutables.delete(session.executionId);
     await this.cleanupWorktree(session);
   }
 
@@ -717,6 +795,7 @@ export class RealExecutor implements RunnerExecutor {
       parser: createCliOutputParser(payload.runtime),
       worktree: null,
       projectPath: null,
+      executablePath: null,
       timeoutTimer: null,
       forceKillTimer: null,
       fallbackTimer: null,

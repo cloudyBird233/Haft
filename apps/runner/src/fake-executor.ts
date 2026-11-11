@@ -15,7 +15,12 @@ import type {
 } from './executor';
 import type { RepositoryContext } from './repository-context';
 
-export type { CancelledPayload, CompletedPayload, ExecutorCallbacks, FailedPayload } from './executor';
+export type {
+  CancelledPayload,
+  CompletedPayload,
+  ExecutorCallbacks,
+  FailedPayload,
+} from './executor';
 
 export interface FakeSession {
   executionId: string;
@@ -84,6 +89,11 @@ export class FakeExecutor implements RunnerExecutor {
     return { ok: true };
   }
 
+  hasActiveSession(executionId: string): boolean {
+    const session = this.sessions.get(executionId);
+    return Boolean(session && !session.cancelled);
+  }
+
   start(payload: ExecutionStartMessage['payload'], context: RepositoryContext): void {
     if (this.sessions.has(payload.executionId)) {
       return;
@@ -121,12 +131,7 @@ export class FakeExecutor implements RunnerExecutor {
         return;
       }
       stepIndex += 1;
-      this.log(
-        session,
-        step.level === 'warning' ? 'stderr' : 'stdout',
-        step.level,
-        step.message,
-      );
+      this.log(session, step.level === 'warning' ? 'stderr' : 'stdout', step.level, step.message);
       this.callbacks.onProgress(session, step.progress, stepIndex);
 
       if (this.shouldFail(payload) && stepIndex === 3) {
@@ -307,8 +312,7 @@ export class FakeExecutor implements RunnerExecutor {
         ' packages/example/src/feature.ts | 42 ++++++++++++++++++++++++++++++++----\n' +
         ' packages/example/test/feature.spec.ts | 18 ++++++++++++++++++\n' +
         ' 2 files changed, 56 insertions(+), 4 deletions(-)',
-      gitStatus:
-        ' M packages/example/src/feature.ts\n?? packages/example/test/feature.spec.ts',
+      gitStatus: ' M packages/example/src/feature.ts\n?? packages/example/test/feature.spec.ts',
       diff: [
         'diff --git a/packages/example/src/feature.ts b/packages/example/src/feature.ts',
         'index 1111111..2222222 100644',

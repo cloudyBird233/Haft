@@ -68,14 +68,19 @@ export type ExecutorAdmission =
 
 export interface RunnerExecutor {
   /**
-   * Synchronous admission check performed before `execution.accepted`.
-   * It must not spawn a CLI and must cover runtime enablement, capacity and
-   * duplicate execution ids.
+   * Admission check performed before `execution.accepted`.
+   *
+   * Implementations may await live checks (for example resolving and probing
+   * the CLI at this instant). They must not spawn a CLI. The result must cover
+   * runtime enablement, capacity, duplicate execution ids and any live
+   * executable/authentication check the executor needs before start.
    */
   canAdmit(
     payload: ExecutionStartMessage['payload'],
     context: RepositoryContext,
-  ): ExecutorAdmission;
+  ): ExecutorAdmission | Promise<ExecutorAdmission>;
+  /** True while an executor session exists for this execution id. */
+  hasActiveSession(executionId: string): boolean;
   start(payload: ExecutionStartMessage['payload'], context: RepositoryContext): void;
   cancel(executionId: string, reason?: string): void;
   acknowledge(executionId: string, throughSeq: number): void;

@@ -1,13 +1,13 @@
 import { HttpStatus, Injectable, type OnModuleDestroy } from '@nestjs/common';
-import type {
-  AgentRuntimeType,
-  RuntimeAvailabilityDto,
-} from '@raft-lite/contracts';
+import type { AgentRuntimeType, RuntimeAvailabilityDto } from '@raft-lite/contracts';
 import { RUNTIME_LABELS, RUNNER_RUNTIMES, type RunnerFeature } from '@raft-lite/contracts';
 import { AppException } from '../../common/errors/app.exception';
 import { AppLogger } from '../../common/logger/app-logger';
 import { RepositoryHandshakeService } from '../runners/repository-handshake.service';
-import { RunnerRegistryService, type LiveRunnerRegistration } from '../runners/runner-registry.service';
+import {
+  RunnerRegistryService,
+  type LiveRunnerRegistration,
+} from '../runners/runner-registry.service';
 import type {
   AgentRuntime,
   RuntimeContext,
@@ -128,6 +128,16 @@ export class RuntimeRegistryService implements OnModuleDestroy {
     return this.runners.getLiveRegistration(runnerId);
   }
 
+  /**
+   * Live execution-feature gate used inside the Execution creation
+   * transaction. The availability precheck and this check both read the live
+   * registration, so a re-registration that drops a required feature cannot
+   * leave a failed Execution row behind.
+   */
+  hasLiveExecutionFeatures(runnerId: string): boolean {
+    return this.runners.hasLiveFeatures(runnerId, EXECUTION_REQUIRED_FEATURES);
+  }
+
   noteFinished(type: AgentRuntimeType, executionId: string): void {
     const runtime = this.runtimes.get(type);
     if (runtime && 'markFinished' in runtime) {
@@ -177,8 +187,7 @@ export class RuntimeRegistryService implements OnModuleDestroy {
         reason = capability.message ?? `${RUNTIME_LABELS[runtime]} is not authenticated`;
         reasonCode = 'CLI_NOT_AUTHENTICATED';
       } else if (!this.runners.hasLiveFeatures(runner.id, EXECUTION_REQUIRED_FEATURES)) {
-        reason =
-          'The runner does not support the P2-02 execution repository handshake; upgrade it';
+        reason = 'The runner does not support the P2-02 execution repository handshake; upgrade it';
         reasonCode = 'PROJECT_BINDING_UNSUPPORTED';
       }
 

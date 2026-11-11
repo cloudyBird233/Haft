@@ -35,7 +35,28 @@ export class RepositoryContextError extends Error {
   }
 }
 
+/**
+ * Internal cancellation outcome. It is never forwarded as a repository
+ * rejection: the API already owns the cancel terminal state, and a late
+ * rejection after `execution.cancelled` would only create noise.
+ */
+export class RepositoryContextCancelledError extends RepositoryContextError {
+  readonly cancelled = true;
+
+  constructor(message = 'The repository context preparation was cancelled') {
+    super(ERROR_CODES.REPOSITORY_CONTEXT_REJECTED, message);
+    this.name = 'RepositoryContextCancelledError';
+  }
+}
+
+interface InflightPrepare {
+  fingerprint: string;
+  controller: AbortController;
+  promise: Promise<RepositoryContext>;
+}
+
 const PRE_START_TTL_MS = 10 * 60_000;
+const STARTING_TTL_MS = 60_000;
 const GIT_TIMEOUT_MS = 30_000;
 const GIT_MAX_OUTPUT_BYTES = 1024 * 1024;
 
@@ -46,9 +67,17 @@ const GIT_MAX_OUTPUT_BYTES = 1024 * 1024;
  * existence. It never spawns a CLI and never touches the main checkout.
  * Contexts do not survive a runner process restart; the API must resend
  * `execution.repository`.
+ *
+ * Concurrency: an in-flight preparation is shared by every duplicate message
+ * with the same execution id and fingerprint. A cancel records a durable
+ * in-memory intent and aborts the shared operation, so a late completion can
+ * never re-insert a context after `release`/`cancel`.
  */
 export class RepositoryContextManager {
   private readonly contexts = new Map<string, RepositoryContext>();
+  private readonly inflight = new Map<string, InflightPrepare>();
+  private readonly cancelled = new Map<string, string>();
+  private readonly generations = new Map<string, number>();
 
   constructor(
     private readonly config: Pick<
@@ -59,11 +88,16 @@ export class RepositoryContextManager {
   ) {}
 
   async prepare(payload: ExecutionRepositoryPayload): Promise<RepositoryContext> {
+    const cancelReason = this.cancelled.get(payload.executionId);
+    if (cancelReason !== undefined) {
+      throw new RepositoryContextCancelledError(cancelReason);
+    }
+
     const existing = this.contexts.get(payload.executionId);
     if (existing) {
       if (this.matches(existing, payload)) {
         existing.lastUsedAt = Date.now();
-        return existing;
+        return { ...existing };
       }
       throw new RepositoryContextError(
         ERROR_CODES.REPOSITORY_CONTEXT_CONFLICT,
@@ -71,6 +105,114 @@ export class RepositoryContextManager {
       );
     }
 
+    const fingerprint = this.fingerprint(payload);
+    const inFlight = this.inflight.get(payload.executionId);
+    if (inFlight) {
+      if (inFlight.fingerprint !== fingerprint) {
+        throw new RepositoryContextError(
+          ERROR_CODES.REPOSITORY_CONTEXT_CONFLICT,
+          'The execution id is already being prepared with a different repository context',
+        );
+      }
+      // Same execution id and same request: share one git/policy run and one
+      // contextId. Every caller observes the same resolve/reject outcome.
+      return inFlight.promise;
+    }
+
+    const generation = this.generation(payload.executionId);
+    const controller = new AbortController();
+    const promise = this.doPrepare(payload, generation, controller.signal).finally(() => {
+      const current = this.inflight.get(payload.executionId);
+      if (current?.promise === promise) {
+        this.inflight.delete(payload.executionId);
+      }
+    });
+    // The map may hold a rejected promise while another duplicate is still
+    // about to await it; never let that become an unhandled rejection.
+    promise.catch(() => undefined);
+    this.inflight.set(payload.executionId, { fingerprint, controller, promise });
+    return promise;
+  }
+
+  beginStart(executionId: string): 'acquired' | 'starting' | 'started' | 'missing' {
+    if (this.cancelled.has(executionId)) return 'missing';
+    const context = this.contexts.get(executionId);
+    if (!context) return 'missing';
+    context.lastUsedAt = Date.now();
+    if (context.state === 'started') return 'started';
+    if (context.state === 'starting') return 'starting';
+    context.state = 'starting';
+    return 'acquired';
+  }
+
+  markStarted(executionId: string): void {
+    if (this.cancelled.has(executionId)) {
+      this.contexts.delete(executionId);
+      return;
+    }
+    const context = this.contexts.get(executionId);
+    if (!context) return;
+    context.state = 'started';
+    context.lastUsedAt = Date.now();
+  }
+
+  /**
+   * Invalidates any current context and in-flight preparation. A later
+   * repository retry is allowed (admission failure handling relies on that).
+   */
+  release(executionId: string): void {
+    this.bumpGeneration(executionId);
+    const inFlight = this.inflight.get(executionId);
+    if (inFlight) {
+      this.inflight.delete(executionId);
+      inFlight.controller.abort();
+    }
+    this.contexts.delete(executionId);
+  }
+
+  /**
+   * Records the operator cancel intent before any asynchronous cleanup.
+   * Returns true only for the first cancel of this execution.
+   */
+  cancel(executionId: string, reason = 'Cancelled by operator'): boolean {
+    const first = !this.cancelled.has(executionId);
+    this.cancelled.set(executionId, reason);
+    this.bumpGeneration(executionId);
+    const inFlight = this.inflight.get(executionId);
+    if (inFlight) {
+      this.inflight.delete(executionId);
+      inFlight.controller.abort();
+    }
+    this.contexts.delete(executionId);
+    return first;
+  }
+
+  isCancelled(executionId: string): boolean {
+    return this.cancelled.has(executionId);
+  }
+
+  get(executionId: string): RepositoryContext | null {
+    const context = this.contexts.get(executionId);
+    return context ? { ...context } : null;
+  }
+
+  /** Sweeps unused `ready` contexts; `starting` has a short fallback TTL. */
+  sweep(now: number = Date.now()): void {
+    for (const [executionId, context] of this.contexts) {
+      if (context.state === 'started') continue;
+      const ttl = context.state === 'ready' ? PRE_START_TTL_MS : STARTING_TTL_MS;
+      if (now - context.lastUsedAt >= ttl) {
+        this.release(executionId);
+      }
+    }
+  }
+
+  private async doPrepare(
+    payload: ExecutionRepositoryPayload,
+    generation: number,
+    signal: AbortSignal,
+  ): Promise<RepositoryContext> {
+    this.throwIfInvalidated(payload.executionId, generation, signal);
     if (!this.policy) {
       throw new RepositoryContextError(
         ERROR_CODES.REPOSITORY_POLICY_NOT_CONFIGURED,
@@ -84,7 +226,14 @@ export class RepositoryContextManager {
       );
     }
 
-    const validation = await this.policy.validate(payload.path);
+    let validation: Awaited<ReturnType<RepositoryPathPolicy['validate']>>;
+    try {
+      validation = await this.policy.validate(payload.path);
+    } catch (error) {
+      this.throwIfInvalidated(payload.executionId, generation, signal);
+      throw error;
+    }
+    this.throwIfInvalidated(payload.executionId, generation, signal);
     if (!validation.ok || !validation.canonicalPath || !validation.headCommit) {
       throw new RepositoryContextError(
         validation.errorCode ?? ERROR_CODES.REPOSITORY_CONTEXT_REJECTED,
@@ -92,18 +241,36 @@ export class RepositoryContextManager {
       );
     }
 
-    await this.assertDefaultBranch(validation.canonicalPath, payload.defaultBranch);
+    await this.assertDefaultBranch(
+      validation.canonicalPath,
+      payload.defaultBranch,
+      payload.executionId,
+      generation,
+      signal,
+    );
     // Re-run isolation immediately before storing the context (TOCTOU).
     try {
       await this.policy.assertStillAllowed(validation.canonicalPath);
     } catch (error) {
+      this.throwIfInvalidated(payload.executionId, generation, signal);
       throw new RepositoryContextError(
         errorCode(error) ?? ERROR_CODES.REPOSITORY_CONTEXT_REJECTED,
         errorMessage(error),
       );
     }
+    this.throwIfInvalidated(payload.executionId, generation, signal);
 
-    const baseCommit = await this.branchCommit(validation.canonicalPath, payload.defaultBranch);
+    const baseCommit = await this.branchCommit(
+      validation.canonicalPath,
+      payload.defaultBranch,
+      payload.executionId,
+      generation,
+      signal,
+    );
+    // No await between the final check and the insert: a cancel/release cannot
+    // interleave here, and every earlier await was followed by a check.
+    this.throwIfInvalidated(payload.executionId, generation, signal);
+
     const now = Date.now();
     const context: RepositoryContext = {
       contextId: randomUUID(),
@@ -121,43 +288,39 @@ export class RepositoryContextManager {
       lastUsedAt: now,
     };
     this.contexts.set(context.executionId, context);
-    return context;
+    return { ...context };
   }
 
-  beginStart(executionId: string): 'acquired' | 'starting' | 'started' | 'missing' {
-    const context = this.contexts.get(executionId);
-    if (!context) return 'missing';
-    context.lastUsedAt = Date.now();
-    if (context.state === 'started') return 'started';
-    if (context.state === 'starting') return 'starting';
-    context.state = 'starting';
-    return 'acquired';
-  }
-
-  markStarted(executionId: string): void {
-    const context = this.contexts.get(executionId);
-    if (!context) return;
-    context.state = 'started';
-    context.lastUsedAt = Date.now();
-  }
-
-  release(executionId: string): void {
-    this.contexts.delete(executionId);
-  }
-
-  get(executionId: string): RepositoryContext | null {
-    const context = this.contexts.get(executionId);
-    return context ? { ...context } : null;
-  }
-
-  /** Sweeps only unused `ready` contexts; started contexts are exempt. */
-  sweep(now: number = Date.now()): void {
-    for (const [executionId, context] of this.contexts) {
-      if (context.state !== 'ready') continue;
-      if (now - context.lastUsedAt >= PRE_START_TTL_MS) {
-        this.contexts.delete(executionId);
-      }
+  private throwIfInvalidated(executionId: string, generation: number, signal: AbortSignal): void {
+    const reason = this.cancelled.get(executionId);
+    if (reason !== undefined) {
+      throw new RepositoryContextCancelledError(reason);
     }
+    if (signal.aborted || this.generation(executionId) !== generation) {
+      throw new RepositoryContextError(
+        ERROR_CODES.REPOSITORY_CONTEXT_REJECTED,
+        'The repository context preparation was invalidated',
+      );
+    }
+  }
+
+  private generation(executionId: string): number {
+    return this.generations.get(executionId) ?? 0;
+  }
+
+  private bumpGeneration(executionId: string): void {
+    this.generations.set(executionId, this.generation(executionId) + 1);
+  }
+
+  private fingerprint(payload: ExecutionRepositoryPayload): string {
+    return JSON.stringify([
+      payload.projectId,
+      payload.bindingId,
+      payload.bindingVersion,
+      payload.policyVersion,
+      payload.defaultBranch,
+      comparable(payload.path, this.config.platform),
+    ]);
   }
 
   private matches(context: RepositoryContext, payload: ExecutionRepositoryPayload): boolean {
@@ -176,35 +339,58 @@ export class RepositoryContextManager {
    * The mandatory default-branch existence check. Both commands receive the
    * branch expression as a single argv element; no shell interpolation.
    */
-  private async assertDefaultBranch(canonicalPath: string, branch: string): Promise<void> {
+  private async assertDefaultBranch(
+    canonicalPath: string,
+    branch: string,
+    executionId: string,
+    generation: number,
+    signal: AbortSignal,
+  ): Promise<void> {
     try {
-      await runGit(this.config.gitBinary, ['check-ref-format', '--branch', branch], canonicalPath);
+      await runGit(
+        this.config.gitBinary,
+        ['check-ref-format', '--branch', branch],
+        canonicalPath,
+        signal,
+      );
     } catch {
+      this.throwIfInvalidated(executionId, generation, signal);
       throw new RepositoryContextError(
         ERROR_CODES.REPO_DEFAULT_BRANCH_NOT_FOUND,
         `The project default branch is not a valid ref: ${branch}`,
       );
     }
+    this.throwIfInvalidated(executionId, generation, signal);
     try {
       await runGit(
         this.config.gitBinary,
         ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}^{commit}`],
         canonicalPath,
+        signal,
       );
     } catch {
+      this.throwIfInvalidated(executionId, generation, signal);
       throw new RepositoryContextError(
         ERROR_CODES.REPO_DEFAULT_BRANCH_NOT_FOUND,
         `The project default branch does not exist in this repository: ${branch}`,
       );
     }
+    this.throwIfInvalidated(executionId, generation, signal);
   }
 
-  private async branchCommit(canonicalPath: string, branch: string): Promise<string> {
+  private async branchCommit(
+    canonicalPath: string,
+    branch: string,
+    executionId: string,
+    generation: number,
+    signal: AbortSignal,
+  ): Promise<string> {
     try {
       const output = await runGit(
         this.config.gitBinary,
         ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`],
         canonicalPath,
+        signal,
       );
       const commit = output.trim();
       if (!commit) {
@@ -212,6 +398,7 @@ export class RepositoryContextManager {
       }
       return commit;
     } catch {
+      this.throwIfInvalidated(executionId, generation, signal);
       throw new RepositoryContextError(
         ERROR_CODES.REPO_DEFAULT_BRANCH_NOT_FOUND,
         `The project default branch does not resolve to a commit: ${branch}`,
@@ -220,7 +407,12 @@ export class RepositoryContextManager {
   }
 }
 
-function runGit(binary: string, args: readonly string[], cwd: string): Promise<string> {
+function runGit(
+  binary: string,
+  args: readonly string[],
+  cwd: string,
+  signal: AbortSignal,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       binary,
@@ -230,6 +422,7 @@ function runGit(binary: string, args: readonly string[], cwd: string): Promise<s
         timeout: GIT_TIMEOUT_MS,
         maxBuffer: GIT_MAX_OUTPUT_BYTES,
         windowsHide: true,
+        signal,
       },
       (error, stdout) => {
         if (error) {
