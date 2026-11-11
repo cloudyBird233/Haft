@@ -576,6 +576,32 @@ function samePath(a: string, b: string, platform: NodeJS.Platform): boolean {
   return containsPath(a, b, platform) && containsPath(b, a, platform);
 }
 
+export interface RepositoryPolicyVersionInput {
+  allowedRepositoryRoots: string[];
+  allowUnc: boolean;
+  worktreeRoot: string;
+  recoveryRoot: string;
+}
+
+/**
+ * Canonical, filesystem-independent hash input. `allowDevicePaths` is a fixed
+ * `false`: there is no configuration surface that can turn device paths on, and
+ * the constant is part of the hash so a policy that accidentally gained such a
+ * switch could never produce the same version as the safe policy.
+ */
+export function serializePolicyVersionInput(input: RepositoryPolicyVersionInput): string {
+  const normalizedRoots = [...new Set(input.allowedRepositoryRoots.map((root) => root))].sort(
+    (left, right) => (left < right ? -1 : left > right ? 1 : 0),
+  );
+  return JSON.stringify({
+    allowDevicePaths: false,
+    allowUnc: input.allowUnc,
+    allowedRepositoryRoots: normalizedRoots,
+    recoveryRoot: input.recoveryRoot,
+    worktreeRoot: input.worktreeRoot,
+  });
+}
+
 function computePolicyVersion(input: {
   allowedRepositoryRoots: string[];
   allowUnc: boolean;
@@ -584,17 +610,19 @@ function computePolicyVersion(input: {
   platform: NodeJS.Platform;
 }): string {
   const pathApi = input.platform === 'win32' ? win32 : posix;
-  const normalizedRoots = [
-    ...new Set(input.allowedRepositoryRoots.map((root) => normalizeForPolicy(root, pathApi))),
-  ].sort((left, right) => (left < right ? -1 : left > right ? 1 : 0));
-  const canonical = {
-    allowDevicePaths: false,
-    allowUnc: input.allowUnc,
-    allowedRepositoryRoots: normalizedRoots,
-    recoveryRoot: normalizeForPolicy(input.recoveryRoot, pathApi),
-    worktreeRoot: normalizeForPolicy(input.worktreeRoot, pathApi),
-  };
-  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex').slice(0, 16);
+  return createHash('sha256')
+    .update(
+      serializePolicyVersionInput({
+        allowUnc: input.allowUnc,
+        allowedRepositoryRoots: input.allowedRepositoryRoots.map((root) =>
+          normalizeForPolicy(root, pathApi),
+        ),
+        recoveryRoot: normalizeForPolicy(input.recoveryRoot, pathApi),
+        worktreeRoot: normalizeForPolicy(input.worktreeRoot, pathApi),
+      }),
+    )
+    .digest('hex')
+    .slice(0, 16);
 }
 
 function normalizeForPolicy(value: string, pathApi: PlatformPath): string {

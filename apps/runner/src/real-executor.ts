@@ -144,7 +144,21 @@ export class RealExecutor implements RunnerExecutor {
       return;
     }
 
+    // WP-B transition seam: without a server-supplied repository context the
+    // real executor must fail before creating a session, journal entry or
+    // worktree. There is deliberately no cwd fallback.
+    const projectPath = this.resolveRepositoryPath(payload);
+    if (!projectPath) {
+      this.failBeforeStart(
+        payload,
+        'PROJECT_BINDING_UNSUPPORTED: No repository context is available; the repository handshake is required before a real execution can start',
+        false,
+      );
+      return;
+    }
+
     const session = this.createSession(payload);
+    session.projectPath = projectPath;
     this.sessions.set(session.executionId, session);
     this.emitPhase(session, 'preparing', 'Runner accepted the execution');
     this.log(session, 'system', 'info', `Real ${payload.runtime} runner accepted the execution.`);
@@ -274,17 +288,22 @@ export class RealExecutor implements RunnerExecutor {
     session: RealSession,
     payload: ExecutionStartMessage['payload'],
   ): Promise<void> {
-    const projectPath = this.resolveRepositoryPath(payload);
-    if (!projectPath) {
+    // Invariant established by `start()`. Never pass '' to git.prepare: it
+    // would resolve to the runner process cwd and silently reintroduce the
+    // cwd fallback that fail-closed removed.
+    if (!session.projectPath) {
       throw new RunnerFailure(
         'PROJECT_BINDING_UNSUPPORTED',
-        'No repository context is available; the repository handshake is required before a real execution can start',
+        'No repository context is available on the real execution session',
       );
     }
     await this.beginJournal(session, payload);
-    session.projectPath = projectPath;
 
-    const worktree = await this.git.prepare(projectPath, payload.projectId, payload.executionId);
+    const worktree = await this.git.prepare(
+      session.projectPath,
+      payload.projectId,
+      payload.executionId,
+    );
     session.worktree = worktree;
     await this.persistJournal(
       session,
@@ -556,10 +575,14 @@ export class RealExecutor implements RunnerExecutor {
     });
   }
 
-  private failBeforeStart(payload: ExecutionStartMessage['payload'], reason: string): void {
+  private failBeforeStart(
+    payload: ExecutionStartMessage['payload'],
+    reason: string,
+    persistJournal = true,
+  ): void {
     const session = this.createSession(payload);
-    this.emitPhase(session, 'failed', null);
-    this.log(session, 'stderr', 'error', reason);
+    this.emitPhase(session, 'failed', null, persistJournal);
+    this.log(session, 'stderr', 'error', reason, persistJournal);
     this.callbacks.onFailed(session, {
       reason,
       exitCode: null,
@@ -598,9 +621,16 @@ export class RealExecutor implements RunnerExecutor {
     }
   }
 
-  private emitPhase(session: RealSession, phase: ExecutionPhase, message: string | null): void {
+  private emitPhase(
+    session: RealSession,
+    phase: ExecutionPhase,
+    message: string | null,
+    persistJournal = true,
+  ): void {
     session.phase = phase;
-    void this.persistJournal(session, { phase, status: 'active' }, true);
+    if (persistJournal) {
+      void this.persistJournal(session, { phase, status: 'active' }, true);
+    }
     this.callbacks.onPhase(session, phase, message);
   }
 
@@ -618,6 +648,7 @@ export class RealExecutor implements RunnerExecutor {
     stream: RunnerLogEntry['stream'],
     level: RunnerLogEntry['level'],
     message: string,
+    persistJournal = true,
   ): void {
     session.lastSeq += 1;
     const entry: RunnerLogEntry = {
@@ -635,11 +666,13 @@ export class RealExecutor implements RunnerExecutor {
       }
     }
     session.pending.set(entry.sequence, entry);
-    void this.persistJournal(
-      session,
-      { lastSequence: session.lastSeq, phase: session.phase, status: 'active' },
-      false,
-    );
+    if (persistJournal) {
+      void this.persistJournal(
+        session,
+        { lastSequence: session.lastSeq, phase: session.phase, status: 'active' },
+        false,
+      );
+    }
     this.callbacks.onLog(session, entry);
   }
 

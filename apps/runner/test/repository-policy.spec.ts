@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -9,6 +10,7 @@ import {
   containsPath,
   hasTraversalSegment,
   isWindowsDevicePath,
+  serializePolicyVersionInput,
   type RepositoryPolicyConfig,
 } from '../src/repository-policy';
 
@@ -244,6 +246,14 @@ describe('RepositoryPathPolicy Git shape checks', () => {
     await expectRejected(policy, bare, ERROR_CODES.REPO_BARE_UNSUPPORTED);
   });
 
+  it('rejects a Git repository subdirectory even though it is inside a repository', async () => {
+    const root = await makeRoot();
+    const repo = await initRepo(join(root, 'repo'));
+    const subdirectory = join(repo, 'packages', 'app');
+    await mkdir(subdirectory, { recursive: true });
+    await expectRejected(policyFor(root), subdirectory, ERROR_CODES.REPO_NOT_GIT_ROOT);
+  });
+
   it('rejects a linked worktree and a submodule', async () => {
     const root = await makeRoot();
     const repo = await initRepo(join(root, 'repo'));
@@ -325,6 +335,28 @@ describe('RepositoryPathPolicy bidirectional isolation', () => {
     );
   });
 
+  it('treats repo === worktreeRoot and repo === recoveryRoot as overlap', async () => {
+    const root = await makeRoot();
+    const repo = await initRepo(join(root, 'repo'));
+    expect(repo).toBeTruthy();
+    await expectRejected(
+      policyFor(root, {
+        worktreeRoot: repo,
+        recoveryRoot: join(root, 'recovery'),
+      }),
+      repo,
+      ERROR_CODES.REPO_PATH_NESTED_IN_WORKTREE_ROOT,
+    );
+    await expectRejected(
+      policyFor(root, {
+        worktreeRoot: join(root, 'worktrees'),
+        recoveryRoot: repo,
+      }),
+      repo,
+      ERROR_CODES.REPO_PATH_NESTED_IN_WORKTREE_ROOT,
+    );
+  });
+
   it('rejects overlapping worktreeRoot and recoveryRoot as a policy configuration error', async () => {
     const root = await makeRoot();
     const repo = await initRepo(join(root, 'repo'));
@@ -364,6 +396,26 @@ describe('RepositoryPathPolicy bidirectional isolation', () => {
       policyFor(root, {
         worktreeRoot: worktreeLink,
         recoveryRoot: join(root, 'recovery'),
+      }),
+      repo,
+      ERROR_CODES.REPO_PATH_NESTED_IN_WORKTREE_ROOT,
+    );
+  });
+
+  it('detects a recoveryRoot junction that points inside the repository', async (context) => {
+    const root = await makeRoot();
+    const repo = await initRepo(join(root, 'repo'));
+    const realRecoveryRoot = join(repo, 'real-recovery');
+    await mkdir(realRecoveryRoot, { recursive: true });
+    const recoveryLink = join(root, 'recovery-link');
+    if (!(await createDirectoryLink(realRecoveryRoot, recoveryLink))) {
+      context.skip();
+      return;
+    }
+    await expectRejected(
+      policyFor(root, {
+        worktreeRoot: join(root, 'worktrees'),
+        recoveryRoot: recoveryLink,
       }),
       repo,
       ERROR_CODES.REPO_PATH_NESTED_IN_WORKTREE_ROOT,
@@ -444,6 +496,32 @@ describe('RepositoryPathPolicy policyVersion', () => {
     expect('allowDevicePaths' in config).toBe(false);
     const policy = new RepositoryPathPolicy(config);
     expect(policy.configError).toBeNull();
+  });
+
+  it('locks the canonical hash input, including allowDevicePaths: false', () => {
+    const canonical = serializePolicyVersionInput({
+      allowedRepositoryRoots: ['/srv/repos', '/srv/other'],
+      allowUnc: false,
+      worktreeRoot: '/srv/worktrees',
+      recoveryRoot: '/srv/recovery',
+    });
+    expect(canonical).toBe(
+      '{"allowDevicePaths":false,"allowUnc":false,"allowedRepositoryRoots":["/srv/other","/srv/repos"],"recoveryRoot":"/srv/recovery","worktreeRoot":"/srv/worktrees"}',
+    );
+    expect(createHash('sha256').update(canonical).digest('hex').slice(0, 16)).toBe(
+      'db4c97086eb740a2',
+    );
+
+    // The same fixed input must always serialize identically, regardless of
+    // root order or duplicates.
+    expect(
+      serializePolicyVersionInput({
+        allowedRepositoryRoots: ['/srv/other', '/srv/repos', '/srv/repos'],
+        allowUnc: false,
+        worktreeRoot: '/srv/worktrees',
+        recoveryRoot: '/srv/recovery',
+      }),
+    ).toBe(canonical);
   });
 });
 

@@ -76,6 +76,15 @@ export class ProjectsController {
     return this.projects.updateBinding(id, bindingId, body);
   }
 
+  @Post(':id/bindings/:bindingId/validate')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'Validate a repository binding through its live runner (path-only)',
+  })
+  validateBinding(@Param('id') id: string, @Param('bindingId') bindingId: string) {
+    return this.projects.validateBinding(id, bindingId);
+  }
+
   @Delete(':id/bindings/:bindingId')
   @HttpCode(200)
   @ApiOperation({ summary: 'Delete a repository binding' })

@@ -1,10 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { io, type Socket } from 'socket.io-client';
 import {
+  ERROR_CODES,
   RUNNER_PROTOCOL_VERSION,
   runnerServerMessageSchema,
+  type RepositoryValidatePayload,
+  type RepositoryValidationPayload,
   type RunnerCapabilities,
   type RunnerEnvelope,
+  type RunnerFeature,
   type RunnerRuntimeCapability,
   type RunnerServerMessage,
 } from '@raft-lite/contracts';
@@ -16,12 +20,36 @@ import { log } from './logger';
 import { ProtocolEventQueue } from './protocol-event-queue';
 import { RealExecutor } from './real-executor';
 import { ExecutionRecovery, type RecoveredExecution } from './recovery';
+import type { RepositoryPathPolicy } from './repository-policy';
+import {
+  RepositoryValidationCache,
+  repositoryValidationPayloadHash,
+} from './repository-validation-cache';
 import { TokenStore } from './token-store';
 
 export interface RunnerClientOptions {
   config: RunnerConfig;
+  /**
+   * The single production path authority. It is required for the validation
+   * handler; tests may omit it to assert the fail-closed branch, but a real
+   * runner process always injects the instance constructed in `main.ts`.
+   */
+  repositoryPolicy?: RepositoryPathPolicy;
+  repositoryValidationCache?: RepositoryValidationCache;
   onFatal?: (message: string) => void;
 }
+
+/**
+ * Features this Runner actually implements at the WP-A boundary. Do not add
+ * project-binding-v1 or repository-handshake-v1 here until WP-C implements the
+ * corresponding messages.
+ */
+export const RUNNER_IMPLEMENTED_FEATURES: readonly RunnerFeature[] = [
+  'repository-validation-v1',
+  'repository-path-policy-v1',
+];
+
+const VALIDATION_POLICY_UNCONFIGURED_VERSION = 'unconfigured';
 
 const AUTH_ERROR_CODES = new Set([
   'RUNNER_AUTH_FAILED',
@@ -36,6 +64,8 @@ export class RunnerClient {
   private readonly tokenStore: TokenStore;
   private readonly executor: RunnerExecutor;
   private readonly recovery: ExecutionRecovery;
+  private readonly repositoryPolicy: RepositoryPathPolicy | null;
+  private readonly validationCache: RepositoryValidationCache;
   private recoveredExecutions: RecoveredExecution[] = [];
   private readonly onFatal: (message: string) => void;
   private runtimeCapabilities: RunnerRuntimeCapability[] = [];
@@ -57,6 +87,8 @@ export class RunnerClient {
   constructor(options: RunnerClientOptions) {
     this.config = options.config;
     this.onFatal = options.onFatal ?? (() => undefined);
+    this.repositoryPolicy = options.repositoryPolicy ?? null;
+    this.validationCache = options.repositoryValidationCache ?? new RepositoryValidationCache();
     this.tokenStore = new TokenStore(this.config.tokenFile, this.config.runnerId);
     this.recovery = new ExecutionRecovery(this.config.recoveryRoot);
     const callbacks: ExecutorCallbacks = {
@@ -300,7 +332,141 @@ export class RunnerClient {
         this.executor.acknowledge(message.payload.executionId, message.payload.throughSeq);
         void this.recovery.acknowledgeLogs(message.payload.executionId, message.payload.throughSeq);
         break;
+      case 'repository.validate':
+        void this.handleRepositoryValidate(message.payload);
+        break;
     }
+  }
+
+  /**
+   * Path-only repository validation. The handler never throws into the socket
+   * message path: every failure becomes a `repository.validation` with a
+   * concrete code so the API can persist an honest result.
+   */
+  private async handleRepositoryValidate(payload: RepositoryValidatePayload): Promise<void> {
+    const payloadHash = repositoryValidationPayloadHash(payload);
+    try {
+      if (!this.repositoryPolicy) {
+        this.sendValidationFailure(
+          payload,
+          ERROR_CODES.REPOSITORY_POLICY_NOT_CONFIGURED,
+          'The runner has no repository path policy',
+          VALIDATION_POLICY_UNCONFIGURED_VERSION,
+        );
+        return;
+      }
+      const policyVersion = this.repositoryPolicy.policyVersion;
+      if (payload.computerId !== this.config.computerId) {
+        this.sendValidationFailure(
+          payload,
+          ERROR_CODES.REPO_VALIDATION_FAILED,
+          'Validation request targets a different computer',
+          policyVersion,
+        );
+        return;
+      }
+
+      const cached = this.validationCache.get(payload.requestId, payloadHash);
+      if (cached.status === 'conflict') {
+        this.sendValidationFailure(
+          payload,
+          ERROR_CODES.REPO_VALIDATION_FAILED,
+          'requestId was already used with a different validation payload',
+          policyVersion,
+        );
+        return;
+      }
+      if (cached.status === 'hit') {
+        // A replay always gets a fresh envelope ID. The cached payload must be
+        // returned byte-for-byte so the API observes the same facts.
+        this.send('repository.validation', cached.payload);
+        return;
+      }
+
+      // Do not pre-check `policy.configError`: `validate()` rejects Windows
+      // device paths before configuration (plan §9.4 precedence) and otherwise
+      // returns REPOSITORY_POLICY_NOT_CONFIGURED for an unusable policy.
+      const result = await this.repositoryPolicy.validate(payload.path);
+      const response = this.toValidationPayload(payload, result);
+      this.validationCache.set(payload.requestId, payloadHash, response);
+      this.send('repository.validation', response);
+    } catch (error) {
+      const policyVersion =
+        this.repositoryPolicy?.policyVersion ?? VALIDATION_POLICY_UNCONFIGURED_VERSION;
+      const response: RepositoryValidationPayload = {
+        requestId: payload.requestId,
+        projectId: payload.projectId,
+        computerId: payload.computerId,
+        bindingId: payload.bindingId,
+        bindingVersion: payload.bindingVersion,
+        ok: false,
+        platform: this.config.platform,
+        policyVersion,
+        errorCode: ERROR_CODES.REPO_VALIDATION_FAILED,
+        message: `Repository validation failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`.slice(0, 2000),
+      };
+      this.validationCache.set(payload.requestId, payloadHash, response);
+      this.send('repository.validation', response);
+    }
+  }
+
+  private toValidationPayload(
+    request: RepositoryValidatePayload,
+    result: Awaited<ReturnType<RepositoryPathPolicy['validate']>>,
+  ): RepositoryValidationPayload {
+    const base = {
+      requestId: request.requestId,
+      projectId: request.projectId,
+      computerId: request.computerId,
+      bindingId: request.bindingId,
+      bindingVersion: request.bindingVersion,
+      platform: result.platform,
+      policyVersion: result.policyVersion,
+    };
+    if (result.ok) {
+      if (!result.canonicalPath || !result.headCommit) {
+        return {
+          ...base,
+          ok: false,
+          errorCode: ERROR_CODES.REPO_VALIDATION_FAILED,
+          message: 'Repository validation succeeded without canonicalPath/headCommit',
+        };
+      }
+      return {
+        ...base,
+        ok: true,
+        canonicalPath: result.canonicalPath,
+        headCommit: result.headCommit,
+      };
+    }
+    return {
+      ...base,
+      ok: false,
+      errorCode: result.errorCode ?? ERROR_CODES.REPO_VALIDATION_FAILED,
+      message: result.message ?? 'Repository validation failed',
+    };
+  }
+
+  private sendValidationFailure(
+    request: RepositoryValidatePayload,
+    errorCode: (typeof ERROR_CODES)[keyof typeof ERROR_CODES],
+    message: string,
+    policyVersion: string,
+  ): void {
+    this.send('repository.validation', {
+      requestId: request.requestId,
+      projectId: request.projectId,
+      computerId: request.computerId,
+      bindingId: request.bindingId,
+      bindingVersion: request.bindingVersion,
+      ok: false,
+      platform: this.config.platform,
+      policyVersion,
+      errorCode,
+      message,
+    } satisfies RepositoryValidationPayload);
   }
 
   private async handleWelcome(
@@ -416,7 +582,7 @@ export class RunnerClient {
   }
 
   private sendRegister(): void {
-    const capabilities = this.capabilities();
+    const capabilities = this.advertisedCapabilities();
     this.send('runner.register', {
       computerId: this.config.computerId,
       runnerVersion: this.config.runnerVersion,
@@ -504,11 +670,17 @@ export class RunnerClient {
     }
   }
 
-  private capabilities(): RunnerCapabilities {
+  /**
+   * Register payload capabilities. `projectIds` is intentionally always empty:
+   * repository selection is now server-supplied via a binding, never a local
+   * project map. Only the two implemented WP-A features are advertised.
+   */
+  advertisedCapabilities(): RunnerCapabilities {
     return {
       runtimes: this.runtimeCapabilities,
       projectIds: [],
       maxConcurrentExecutions: this.config.maxConcurrentExecutions,
+      features: [...RUNNER_IMPLEMENTED_FEATURES],
     };
   }
 

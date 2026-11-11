@@ -1220,6 +1220,8 @@ Rules:
 
 The order matters for deterministic tests. Return the first failure.
 
+**Device-path precedence.** On Windows, a device path (`\\?\` or `\\.\`) is rejected unconditionally and before the policy-configuration check, so even a policy with no allowed roots returns `REPO_PATH_INVALID` rather than `REPOSITORY_POLICY_NOT_CONFIGURED` for such input. Steps 1 and 2 below are categories, not a strict execution order for device paths.
+
 1. **Policy configured**
    - If there are no usable allowed roots → `REPOSITORY_POLICY_NOT_CONFIGURED`.
    - If `worktreeRoot` or `recoveryRoot` is not absolute, or the two overlap (equal or one inside the other) → `REPOSITORY_POLICY_NOT_CONFIGURED`.
@@ -2351,7 +2353,7 @@ Assuming one branch `feature/p2-02-project-aware-runner`:
 - Add unit tests for the full path matrix, including all overlap directions and the disjoint success case.
 - Update `main.ts` logging.
 
-**Exit:** Runner policy tests green on Windows and Linux; `rg HAFT_RUNNER_PROJECTS apps/runner/src` returns nothing; `rg -i "allow.?device" apps/runner` returns nothing.
+**Exit:** Runner policy tests green on Windows and Linux; no executable read of `HAFT_RUNNER_PROJECTS` remains (only the documented ignore-and-warn migration path); `allowDevicePaths` appears only as the fixed `false` hash constant and in tests/docs, never as a configuration field, CLI flag or environment switch.
 
 ### Phase 2 — WP-A Validation API and Runner handler
 

@@ -47,6 +47,7 @@ async function main(): Promise<void> {
   }
   const client = new RunnerClient({
     config,
+    repositoryPolicy: policy,
     onFatal: (message) => {
       log('error', {
         eventType: 'runner.fatal',

@@ -2,6 +2,7 @@ import type {
   ActivityType,
   AgentRuntimeType,
   AgentStatus,
+  ErrorCode,
   ExecutionPhase,
   ExecutionStatus,
   LogLevel,
@@ -138,6 +139,26 @@ export interface ProjectBindingDto {
 
 export interface ProjectDetailDto extends ProjectDto {
   bindings: ProjectBindingDto[];
+}
+
+/**
+ * Result of `POST /api/projects/:projectId/bindings/:bindingId/validate`.
+ *
+ * The flat fields are the runner-reported facts (or the API-recorded attempt
+ * error). `binding` is the persisted row after the conditional update so the
+ * UI does not need an extra GET. The API never synthesizes a missing
+ * canonicalPath/headCommit on success.
+ */
+export interface RepositoryValidationResultDto {
+  binding: ProjectBindingDto;
+  status: ProjectBindingStatus;
+  canonicalPath: string | null;
+  platform: string | null;
+  policyVersion: string | null;
+  headCommit: string | null;
+  validatedAt: string | null;
+  errorCode: ErrorCode | null;
+  message: string | null;
 }
 
 export interface WorkspaceDto {

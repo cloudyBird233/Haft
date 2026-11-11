@@ -11,6 +11,7 @@ import type {
   FailedPayload,
 } from '../src/executor';
 import { RealExecutor } from '../src/real-executor';
+import type { ExecutionRecovery } from '../src/recovery';
 
 interface Captured {
   phases: Array<{ executionId: string; phase: ExecutionPhase }>;
@@ -104,6 +105,8 @@ function createExecutor(
   options: {
     config?: RunnerConfig;
     onTerminate?: (child: FakeChild, force: boolean) => void;
+    omitRepositoryPath?: boolean;
+    recovery?: ExecutionRecovery;
   } = {},
 ): {
   executor: RealExecutor;
@@ -111,6 +114,7 @@ function createExecutor(
   child: FakeChild;
   terminate: ReturnType<typeof vi.fn>;
   spawned: Promise<void>;
+  gitPrepare: ReturnType<typeof vi.fn>;
 } {
   const captured: Captured = {
     phases: [],
@@ -146,8 +150,13 @@ function createExecutor(
   const terminate = vi.fn(async (spawnedChild: ChildProcess, force = false) => {
     options.onTerminate?.(spawnedChild as unknown as FakeChild, force);
   });
+  const gitPrepare = vi.fn(async () => ({
+    path: '/virtual/worktree',
+    branchName: 'haft/execution_real_shutdown',
+    baseCommit: 'a'.repeat(40),
+  }));
 
-  const executor = new RealExecutor(options.config ?? makeConfig(), callbacks, undefined, {
+  const executor = new RealExecutor(options.config ?? makeConfig(), callbacks, options.recovery, {
     resolveExecutable: async () => ({ path: '/virtual/codex', searched: [], error: null }),
     spawnProcess: () => {
       resolveSpawned();
@@ -161,20 +170,16 @@ function createExecutor(
       commandLine: 'codex exec',
     }),
     terminateProcess: terminate,
-    resolveRepositoryPath: () => '/virtual/repository',
+    ...(options.omitRepositoryPath ? {} : { resolveRepositoryPath: () => '/virtual/repository' }),
     git: {
-      prepare: async () => ({
-        path: '/virtual/worktree',
-        branchName: 'haft/execution_real_shutdown',
-        baseCommit: 'a'.repeat(40),
-      }),
+      prepare: gitPrepare,
       collect: async () => null,
       cleanup: async () => ({ path: '', removed: false }),
     },
     shutdownForceWaitMs: 100,
   });
 
-  return { executor, captured, child, terminate, spawned };
+  return { executor, captured, child, terminate, spawned, gitPrepare };
 }
 
 async function waitFor(check: () => boolean, timeoutMs = 3000): Promise<void> {
@@ -188,8 +193,35 @@ async function waitFor(check: () => boolean, timeoutMs = 3000): Promise<void> {
 }
 
 describe('RealExecutor shutdown', () => {
+  it('fails closed without a resolver, before journal or worktree writes', async () => {
+    const journal = {
+      begin: vi.fn().mockResolvedValue(undefined),
+      update: vi.fn().mockResolvedValue(undefined),
+      finish: vi.fn().mockResolvedValue(undefined),
+      flushAll: vi.fn().mockResolvedValue(undefined),
+    };
+    const recovery = {
+      journal,
+      spool: { flush: vi.fn() },
+    } as unknown as ExecutionRecovery;
+    const { executor, captured, gitPrepare } = createExecutor({
+      omitRepositoryPath: true,
+      recovery,
+    });
+
+    executor.start(startPayload());
+    await waitFor(() => captured.failed.length === 1);
+
+    expect(captured.failed[0]?.payload.reason).toContain('PROJECT_BINDING_UNSUPPORTED');
+    expect(gitPrepare).not.toHaveBeenCalled();
+    expect(journal.begin).not.toHaveBeenCalled();
+    expect(journal.update).not.toHaveBeenCalled();
+    expect(journal.finish).not.toHaveBeenCalled();
+    expect(executor.activeExecutionIds()).toEqual([]);
+  });
+
   it('waits for the real child close event before reporting a clean shutdown', async () => {
-    const { executor, captured, child, spawned } = createExecutor({
+    const { executor, captured, child, spawned, gitPrepare } = createExecutor({
       config: makeConfig({ shutdownGraceMs: 500 }),
       onTerminate: (terminatedChild, force) => {
         if (!force) {
@@ -201,6 +233,14 @@ describe('RealExecutor shutdown', () => {
     await spawned;
     await child.promptWritten;
     await waitFor(() => captured.phases.some((entry) => entry.phase === 'running'));
+
+    // WP-B seam: the worktree manager must receive exactly the resolver's
+    // repository path, never a cwd fallback.
+    expect(gitPrepare).toHaveBeenCalledWith(
+      '/virtual/repository',
+      'project_demo',
+      'execution_real_shutdown',
+    );
 
     const startedAt = Date.now();
     const result = await executor.shutdown('Runner shutting down');

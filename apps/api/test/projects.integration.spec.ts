@@ -1,12 +1,13 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import type { INestApplication } from '@nestjs/common';
-import type {
-  ListDto,
-  ProjectBindingDto,
-  ProjectDetailDto,
-  ProjectDto,
-  TaskDto,
+import {
+  ERROR_CODES,
+  type ListDto,
+  type ProjectBindingDto,
+  type ProjectDetailDto,
+  type ProjectDto,
+  type TaskDto,
 } from '@raft-lite/contracts';
 import { createTestApp, type ApiSuccessBody } from './test-app';
 import { PrismaService } from '../src/common/prisma/prisma.service';
@@ -293,7 +294,7 @@ describe('Projects and repository bindings API', () => {
     expect((detail.body as ApiSuccessBody<ProjectDetailDto>).data.bindingCount).toBe(1);
   });
 
-  it('keeps P2-02 binding validation out of the P2-01 API surface', async () => {
+  it('exposes repository validation as an explicit route with no runner side effect', async () => {
     const project = await createProject({ key: 'NORUN', name: 'No Runner Project' });
     const created = await request(server)
       .post(`/api/projects/${project.id}/bindings`)
@@ -302,14 +303,16 @@ describe('Projects and repository bindings API', () => {
     const binding = (created.body as ApiSuccessBody<ProjectBindingDto>).data;
 
     expect(binding.status).toBe('unverified');
-    await request(server)
+    const validation = await request(server)
       .post(`/api/projects/${project.id}/bindings/${binding.id}/validate`)
       .send({})
-      .expect(404);
+      .expect(409);
+    expect(validation.body.error.code).toBe(ERROR_CODES.RUNNER_OFFLINE);
     const after = await request(server).get(`/api/projects/${project.id}`).expect(200);
     expect((after.body as ApiSuccessBody<ProjectDetailDto>).data.bindings[0]).toMatchObject({
       status: 'unverified',
       validatedBindingVersion: null,
+      validationRequestId: null,
     });
   });
 

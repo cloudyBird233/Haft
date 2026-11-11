@@ -9,6 +9,7 @@ import {
   type ProjectBindingDto,
   type ProjectDetailDto,
   type ProjectDto,
+  type RepositoryValidationResultDto,
   type UpdateProjectInput,
 } from '@raft-lite/contracts';
 import type { Prisma } from '@prisma/client';
@@ -21,6 +22,7 @@ import {
   toProjectDetailDto,
   toProjectDto,
 } from '../../common/serializers';
+import { RepositoryValidationService } from '../runners/repository-validation.service';
 
 const IMMUTABLE_BINDING_FIELDS = new Set([
   'id',
@@ -47,7 +49,10 @@ const IMMUTABLE_BINDING_FIELDS = new Set([
 
 @Injectable()
 export class ProjectsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly repositoryValidation: RepositoryValidationService,
+  ) {}
 
   async list(): Promise<ListDto<ProjectDto>> {
     const projects = await this.prisma.project.findMany({
@@ -253,6 +258,14 @@ export class ProjectsService {
     const binding = await this.findBindingRecord(projectId, bindingId);
     await this.prisma.projectRepositoryBinding.delete({ where: { id: binding.id } });
     return { id: binding.id };
+  }
+
+  /**
+   * Explicit user action. Binding create/update/delete never call this method
+   * and never emit a runner message.
+   */
+  validateBinding(projectId: string, bindingId: string): Promise<RepositoryValidationResultDto> {
+    return this.repositoryValidation.validateBinding(projectId, bindingId);
   }
 
   private async findProjectRecord(id: string) {

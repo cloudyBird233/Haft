@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join, normalize, resolve } from 'node:path';
 import { loadConfig } from '../src/config';
+import { containsPath } from '../src/repository-policy';
 
 const absoluteA = join(tmpdir(), 'haft-allowed-a');
 const absoluteB = join(tmpdir(), 'haft-allowed-b');
@@ -143,8 +144,8 @@ describe('runner configuration', () => {
   it('keeps the worktree and recovery roots disjoint by default', () => {
     const config = loadConfig([], {});
     expect(config.worktreeRoot).not.toBe(config.recoveryRoot);
-    expect(config.recoveryRoot.startsWith(config.worktreeRoot)).toBe(false);
-    expect(config.worktreeRoot.startsWith(config.recoveryRoot)).toBe(false);
+    expect(containsPath(config.worktreeRoot, config.recoveryRoot, process.platform)).toBe(false);
+    expect(containsPath(config.recoveryRoot, config.worktreeRoot, process.platform)).toBe(false);
   });
 
   it('defaults the fake runtime list to codex and opencode only', () => {

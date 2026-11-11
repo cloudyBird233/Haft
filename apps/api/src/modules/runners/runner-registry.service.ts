@@ -1,8 +1,11 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { HttpStatus, Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import type {
+  RepositoryValidatePayload,
+  RepositoryValidationPayload,
   RunnerCapabilities,
   RunnerEnvelope,
+  RunnerFeature,
   RunnerInboundMessage,
   RunnerStatus,
 } from '@raft-lite/contracts';
@@ -40,6 +43,30 @@ export interface RunnerConnectionInfo {
   connectedAt: Date;
 }
 
+/**
+ * The live registration facts reported by the authenticated socket. These are
+ * deliberately not read from `capabilitiesJson`: a reconnect or upgrade must be
+ * able to change features/platform without waiting for a database reader to
+ * observe a stale historical row.
+ */
+export interface LiveRunnerRegistration {
+  runnerId: string;
+  computerId: string;
+  platform: string;
+  architecture: string;
+  features: RunnerFeature[];
+  registeredAt: Date;
+}
+
+export interface RepositoryValidationEvent {
+  /** Authenticated socket identity, never the payload's own field. */
+  runnerId: string;
+  computerId: string;
+  platform: string;
+  payload: RepositoryValidationPayload;
+  receivedAt: Date;
+}
+
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000;
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 45_000;
 const START_ACCEPT_TIMEOUT_MS = 20_000;
@@ -54,7 +81,11 @@ const DEFAULT_RECONNECT_GRACE_MS = 60_000;
 export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
   private transport: RunnerTransport | null = null;
   private readonly executionListeners = new Set<(event: RuntimeEvent) => void>();
+  private readonly repositoryValidationListeners = new Set<
+    (event: RepositoryValidationEvent) => void
+  >();
   private readonly connections = new Map<string, RunnerConnectionInfo>();
+  private readonly liveRegistrations = new Map<string, LiveRunnerRegistration>();
   private readonly seenMessages = new Map<string, number>();
   private readonly recoveryTimers = new Map<string, NodeJS.Timeout>();
   private readonly pendingStarts = new Map<
@@ -131,7 +162,9 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
     }
     this.pendingStarts.clear();
     this.connections.clear();
+    this.liveRegistrations.clear();
     this.executionListeners.clear();
+    this.repositoryValidationListeners.clear();
   }
 
   setTransport(transport: RunnerTransport): void {
@@ -153,6 +186,23 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
   onExecutionEvent(listener: (event: RuntimeEvent) => void): () => void {
     this.executionListeners.add(listener);
     return () => this.executionListeners.delete(listener);
+  }
+
+  onRepositoryValidation(listener: (event: RepositoryValidationEvent) => void): () => void {
+    this.repositoryValidationListeners.add(listener);
+    return () => this.repositoryValidationListeners.delete(listener);
+  }
+
+  getLiveRegistration(runnerId: string): LiveRunnerRegistration | null {
+    const registration = this.liveRegistrations.get(runnerId);
+    if (!registration) return null;
+    return { ...registration, features: [...registration.features] };
+  }
+
+  hasLiveFeatures(runnerId: string, required: readonly RunnerFeature[]): boolean {
+    const registration = this.liveRegistrations.get(runnerId);
+    if (!registration) return false;
+    return required.every((feature) => registration.features.includes(feature));
   }
 
   async authenticate(input: RunnerHandshakeInput): Promise<RunnerHandshakeResult> {
@@ -261,6 +311,9 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
     socketId: string;
   }): Promise<void> {
     this.clearRecoveryTimeout(input.runnerId);
+    // A live socket starts with no trusted feature set until its register
+    // message arrives; never reuse features from a previous connection.
+    this.liveRegistrations.delete(input.runnerId);
     const now = new Date();
     this.connections.set(input.runnerId, {
       runnerId: input.runnerId,
@@ -295,6 +348,7 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
       return;
     }
     this.connections.delete(runnerId);
+    this.liveRegistrations.delete(runnerId);
     const now = new Date();
     await this.prisma.runner.updateMany({
       where: { id: runnerId },
@@ -356,6 +410,16 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
       },
     });
 
+    this.liveRegistrations.set(runnerId, {
+      runnerId,
+      computerId: payload.computerId,
+      platform: payload.platform,
+      architecture: payload.architecture,
+      // Missing `features` means the empty set, never "supports everything".
+      features: [...new Set(payload.capabilities.features ?? [])],
+      registeredAt: new Date(),
+    });
+
     // Tell the runner what the server believes is still running. The runner
     // answers with a snapshot, which is the authoritative local view.
     const running = await this.prisma.execution.findMany({
@@ -415,6 +479,8 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
       await this.heartbeat(runnerId, message.payload);
     } else if (message.type === 'runner.snapshot') {
       await this.reconcileSnapshot(runnerId, message.payload);
+    } else if (message.type === 'repository.validation') {
+      this.emitRepositoryValidation(runnerId, message.payload);
     } else if (message.type === 'execution.accepted') {
       const key = pendingKey(runnerId, message.payload.executionId);
       const pending = this.pendingStarts.get(key);
@@ -597,6 +663,20 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
     return this.transport.send(
       runnerId,
       this.envelope(runnerId, 'execution.reconcile', { reason, executionIds }),
+    );
+  }
+
+  sendRepositoryValidate(
+    runnerId: string,
+    payload: RepositoryValidatePayload,
+    messageId: string = randomUUID(),
+  ): boolean {
+    if (!this.transport?.isConnected(runnerId)) {
+      return false;
+    }
+    return this.transport.send(
+      runnerId,
+      this.envelopeWithId(runnerId, 'repository.validate', payload, messageId),
     );
   }
 
@@ -786,14 +866,57 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private emitRepositoryValidation(runnerId: string, payload: RepositoryValidationPayload): void {
+    const connection = this.connections.get(runnerId);
+    const registration = this.liveRegistrations.get(runnerId);
+    if (!connection || !registration || registration.runnerId !== runnerId) {
+      this.logger.warn({
+        eventType: 'repository.validation_rejected',
+        message: 'Validation response arrived without a live authenticated registration',
+        runnerId,
+        status: 'warning',
+      });
+      return;
+    }
+    const event: RepositoryValidationEvent = {
+      runnerId,
+      computerId: connection.computerId,
+      platform: registration.platform,
+      payload,
+      receivedAt: new Date(),
+    };
+    for (const listener of [...this.repositoryValidationListeners]) {
+      try {
+        listener(event);
+      } catch (error) {
+        this.logger.error({
+          eventType: 'repository.validation_listener_failed',
+          message: 'Repository validation listener threw while handling a response',
+          runnerId,
+          status: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
   private envelope(
     runnerId: string,
     type: string,
     payload: Record<string, unknown>,
   ): RunnerEnvelope {
+    return this.envelopeWithId(runnerId, type, payload, randomUUID());
+  }
+
+  private envelopeWithId(
+    runnerId: string,
+    type: string,
+    payload: unknown,
+    messageId: string,
+  ): RunnerEnvelope {
     return {
       protocolVersion: RUNNER_PROTOCOL_VERSION,
-      messageId: randomUUID(),
+      messageId,
       runnerId,
       type,
       sentAt: new Date().toISOString(),
