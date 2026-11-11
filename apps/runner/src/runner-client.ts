@@ -4,6 +4,10 @@ import {
   ERROR_CODES,
   RUNNER_PROTOCOL_VERSION,
   runnerServerMessageSchema,
+  type ExecutionRepositoryAcceptedPayload,
+  type ExecutionRepositoryPayload,
+  type ExecutionRepositoryRejectedPayload,
+  type ExecutionStartRejectedPayload,
   type RepositoryValidatePayload,
   type RepositoryValidationPayload,
   type RunnerCapabilities,
@@ -14,13 +18,23 @@ import {
 } from '@raft-lite/contracts';
 import type { RunnerConfig } from './config';
 import { probeRuntimeCapabilities } from './cli-probe';
-import type { ExecutorCallbacks, RunnerExecutor, ShutdownResult } from './executor';
+import type {
+  ExecutorAdmission,
+  ExecutorCallbacks,
+  RunnerExecutor,
+  ShutdownResult,
+} from './executor';
 import { FakeExecutor } from './fake-executor';
 import { log } from './logger';
 import { ProtocolEventQueue } from './protocol-event-queue';
 import { RealExecutor } from './real-executor';
 import { ExecutionRecovery, type RecoveredExecution } from './recovery';
-import type { RepositoryPathPolicy } from './repository-policy';
+import { RepositoryPolicyError, type RepositoryPathPolicy } from './repository-policy';
+import {
+  RepositoryContextError,
+  RepositoryContextManager,
+  type RepositoryContext,
+} from './repository-context';
 import {
   RepositoryValidationCache,
   repositoryValidationPayloadHash,
@@ -36,17 +50,20 @@ export interface RunnerClientOptions {
    */
   repositoryPolicy?: RepositoryPathPolicy;
   repositoryValidationCache?: RepositoryValidationCache;
+  repositoryContexts?: RepositoryContextManager;
   onFatal?: (message: string) => void;
 }
 
 /**
- * Features this Runner actually implements at the WP-A boundary. Do not add
- * project-binding-v1 or repository-handshake-v1 here until WP-C implements the
- * corresponding messages.
+ * Features this Runner actually implements. All four repository features are
+ * advertised together: handing a Runner a repository handshake without path
+ * policy/validation support would be unsafe.
  */
 export const RUNNER_IMPLEMENTED_FEATURES: readonly RunnerFeature[] = [
+  'project-binding-v1',
   'repository-validation-v1',
   'repository-path-policy-v1',
+  'repository-handshake-v1',
 ];
 
 const VALIDATION_POLICY_UNCONFIGURED_VERSION = 'unconfigured';
@@ -65,7 +82,9 @@ export class RunnerClient {
   private readonly executor: RunnerExecutor;
   private readonly recovery: ExecutionRecovery;
   private readonly repositoryPolicy: RepositoryPathPolicy | null;
+  private readonly repositoryContexts: RepositoryContextManager;
   private readonly validationCache: RepositoryValidationCache;
+  private readonly admissions = new Map<string, Promise<void>>();
   private recoveredExecutions: RecoveredExecution[] = [];
   private readonly onFatal: (message: string) => void;
   private runtimeCapabilities: RunnerRuntimeCapability[] = [];
@@ -83,12 +102,16 @@ export class RunnerClient {
    * the server can never observe delivery ahead of durability.
    */
   private readonly events = new ProtocolEventQueue();
+  private contextSweepTimer: NodeJS.Timeout | null = null;
 
   constructor(options: RunnerClientOptions) {
     this.config = options.config;
     this.onFatal = options.onFatal ?? (() => undefined);
     this.repositoryPolicy = options.repositoryPolicy ?? null;
     this.validationCache = options.repositoryValidationCache ?? new RepositoryValidationCache();
+    this.repositoryContexts =
+      options.repositoryContexts ??
+      new RepositoryContextManager(this.config, this.repositoryPolicy);
     this.tokenStore = new TokenStore(this.config.tokenFile, this.config.runnerId);
     this.recovery = new ExecutionRecovery(this.config.recoveryRoot);
     const callbacks: ExecutorCallbacks = {
@@ -130,6 +153,7 @@ export class RunnerClient {
             summary: payload.summary,
             git: payload.git,
           });
+          this.repositoryContexts.release(session.executionId);
         });
       },
       onFailed: (session, payload) => {
@@ -141,6 +165,7 @@ export class RunnerClient {
             summary: payload.summary,
             git: payload.git,
           });
+          this.repositoryContexts.release(session.executionId);
         });
       },
       onCancelled: (session, payload) => {
@@ -151,17 +176,22 @@ export class RunnerClient {
             exitCode: payload.exitCode,
             git: payload.git,
           });
+          this.repositoryContexts.release(session.executionId);
         });
       },
     };
     this.executor =
       this.config.mode === 'fake'
         ? new FakeExecutor(this.config, callbacks)
-        : new RealExecutor(this.config, callbacks, this.recovery);
+        : new RealExecutor(this.config, callbacks, this.recovery, {
+            repositoryPolicy: this.repositoryPolicy,
+          });
   }
 
   async start(): Promise<void> {
     await this.prepareCapabilities();
+    this.contextSweepTimer = setInterval(() => this.repositoryContexts.sweep(), 60_000);
+    this.contextSweepTimer.unref();
     this.recoveredExecutions = await this.recovery.scan();
     if (this.recoveredExecutions.length > 0) {
       log('warn', {
@@ -197,6 +227,10 @@ export class RunnerClient {
 
   async stop(): Promise<ShutdownResult> {
     this.stopHeartbeat();
+    if (this.contextSweepTimer) {
+      clearInterval(this.contextSweepTimer);
+      this.contextSweepTimer = null;
+    }
     // Keep the socket connected while sessions finalize so their terminal
     // events reach the server. Never assume a fixed delay equals termination.
     const result = await this.executor.shutdown('Runner shutting down');
@@ -316,9 +350,13 @@ export class RunnerClient {
         this.handleServerError(message.payload);
         break;
       case 'execution.start':
-        this.handleStart(message.payload);
+        void this.handleStart(message.payload);
+        break;
+      case 'execution.repository':
+        void this.handleRepository(message.payload);
         break;
       case 'execution.cancel':
+        this.repositoryContexts.release(message.payload.executionId);
         this.executor.cancel(message.payload.executionId, message.payload.reason);
         break;
       case 'execution.reconcile':
@@ -327,6 +365,7 @@ export class RunnerClient {
           message: 'Server asked the runner to reconcile execution state',
           status: 'online',
         });
+        this.sendSnapshot();
         break;
       case 'execution.log.ack':
         this.executor.acknowledge(message.payload.executionId, message.payload.throughSeq);
@@ -505,49 +544,222 @@ export class RunnerClient {
     this.onFatal(`${payload.code}: ${payload.message}`);
   }
 
-  private handleStart(
+  private async handleStart(
     payload: Extract<RunnerServerMessage, { type: 'execution.start' }>['payload'],
-  ): void {
+  ): Promise<void> {
+    const inFlight = this.admissions.get(payload.executionId);
+    if (inFlight) {
+      // A duplicate start waits for the first admission instead of spawning a
+      // second process. The first handler already sent the single accepted.
+      await inFlight;
+      return;
+    }
+    const admission = this.runAdmission(payload);
+    this.admissions.set(payload.executionId, admission);
+    try {
+      await admission;
+    } finally {
+      if (this.admissions.get(payload.executionId) === admission) {
+        this.admissions.delete(payload.executionId);
+      }
+    }
+  }
+
+  private async runAdmission(
+    payload: Extract<RunnerServerMessage, { type: 'execution.start' }>['payload'],
+  ): Promise<void> {
     log('info', {
       eventType: 'runner.execution_received',
       message: `Dispatching ${payload.runtime} execution`,
       executionId: payload.executionId,
       status: 'running',
     });
-    this.send('execution.accepted', {
-      executionId: payload.executionId,
-      acceptedAt: new Date().toISOString(),
-    });
 
-    if (this.config.mode === 'real') {
-      const capability = this.runtimeCapabilities.find((item) => item.runtime === payload.runtime);
-      if (!capability?.installed) {
-        this.send('execution.failed', {
-          executionId: payload.executionId,
-          reason:
-            capability?.message ??
-            `CLI_NOT_INSTALLED: ${payload.runtime} is not available on this runner`,
-          exitCode: null,
-          summary: null,
-          git: null,
-        });
-        return;
-      }
-      if (!capability.authenticated) {
-        this.send('execution.failed', {
-          executionId: payload.executionId,
-          reason:
-            capability.message ??
-            `CLI_NOT_AUTHENTICATED: ${payload.runtime} is not authenticated on this runner`,
-          exitCode: null,
-          summary: null,
-          git: null,
-        });
+    const state = this.repositoryContexts.beginStart(payload.executionId);
+    if (state === 'missing') {
+      this.sendStartRejected(
+        payload.executionId,
+        ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
+        'No ready repository context exists for this execution',
+      );
+      return;
+    }
+    if (state === 'started') {
+      // Duplicate start after the spawn: re-send accepted, never respawn.
+      this.send('execution.accepted', {
+        executionId: payload.executionId,
+        acceptedAt: new Date().toISOString(),
+      });
+      return;
+    }
+    if (state === 'starting') {
+      const inFlight = this.admissions.get(payload.executionId);
+      if (inFlight) {
+        await inFlight;
         return;
       }
     }
 
-    this.executor.start(payload);
+    const context = this.repositoryContexts.get(payload.executionId);
+    if (!context) {
+      this.sendStartRejected(
+        payload.executionId,
+        ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
+        'The repository context disappeared during admission',
+      );
+      return;
+    }
+
+    const failure = await this.admissionFailure(payload, context);
+    if (failure) {
+      // A failed admission requires a new execution.repository handshake.
+      this.repositoryContexts.release(payload.executionId);
+      this.sendStartRejected(payload.executionId, failure.code, failure.message, failure.retryable);
+      return;
+    }
+
+    this.repositoryContexts.markStarted(payload.executionId);
+    // The Runner must never spawn before the API has this acknowledgement.
+    this.send('execution.accepted', {
+      executionId: payload.executionId,
+      acceptedAt: new Date().toISOString(),
+    });
+    this.executor.start(payload, context);
+  }
+
+  private async admissionFailure(
+    payload: Extract<RunnerServerMessage, { type: 'execution.start' }>['payload'],
+    context: RepositoryContext,
+  ): Promise<Extract<ExecutorAdmission, { ok: false }> | null> {
+    if (!this.repositoryPolicy) {
+      return {
+        ok: false,
+        code: ERROR_CODES.REPOSITORY_POLICY_NOT_CONFIGURED,
+        message: 'The runner has no repository path policy',
+        retryable: false,
+      };
+    }
+    if (context.policyVersion !== this.repositoryPolicy.policyVersion) {
+      return {
+        ok: false,
+        code: ERROR_CODES.REPOSITORY_POLICY_CHANGED,
+        message: 'The runner path policy changed after the repository handshake',
+        retryable: false,
+      };
+    }
+    try {
+      await this.repositoryPolicy.assertStillAllowed(context.canonicalPath);
+    } catch (error) {
+      return {
+        ok: false,
+        code:
+          error instanceof RepositoryPolicyError
+            ? error.code
+            : ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
+        message: error instanceof Error ? error.message : String(error),
+        retryable: false,
+      };
+    }
+
+    const admitted = this.executor.canAdmit(payload, context);
+    if (!admitted.ok) {
+      return admitted;
+    }
+
+    if (this.config.mode === 'real') {
+      const capability = this.runtimeCapabilities.find((item) => item.runtime === payload.runtime);
+      if (!capability?.installed) {
+        return {
+          ok: false,
+          code: ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
+          message: `CLI_NOT_INSTALLED: ${
+            capability?.message ?? `${payload.runtime} is not available on this runner`
+          }`,
+          retryable: false,
+        };
+      }
+      if (!capability.authenticated) {
+        return {
+          ok: false,
+          code: ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
+          message: `CLI_NOT_AUTHENTICATED: ${
+            capability.message ?? `${payload.runtime} is not authenticated on this runner`
+          }`,
+          retryable: false,
+        };
+      }
+    }
+    return null;
+  }
+
+  private sendStartRejected(
+    executionId: string,
+    code: ExecutionStartRejectedPayload['code'],
+    message: string,
+    retryable = false,
+  ): void {
+    this.send('execution.start.rejected', {
+      executionId,
+      code,
+      message: message.slice(0, 2000),
+      retryable,
+    } satisfies ExecutionStartRejectedPayload);
+  }
+
+  /**
+   * Creates or reuses the in-memory repository context. It is the only
+   * handshake stage that checks Project.defaultBranch existence and it never
+   * spawns a CLI.
+   */
+  private async handleRepository(payload: ExecutionRepositoryPayload): Promise<void> {
+    try {
+      if (!this.repositoryPolicy) {
+        throw new RepositoryContextError(
+          ERROR_CODES.REPOSITORY_POLICY_NOT_CONFIGURED,
+          'The runner has no repository path policy',
+        );
+      }
+      if (payload.policyVersion !== this.repositoryPolicy.policyVersion) {
+        throw new RepositoryContextError(
+          ERROR_CODES.REPOSITORY_POLICY_CHANGED,
+          'The binding was validated under a different path policy; revalidate it',
+        );
+      }
+      const context = await this.repositoryContexts.prepare(payload);
+      const accepted: ExecutionRepositoryAcceptedPayload = {
+        executionId: payload.executionId,
+        projectId: payload.projectId,
+        bindingId: payload.bindingId,
+        bindingVersion: payload.bindingVersion,
+        policyVersion: context.policyVersion,
+        contextId: context.contextId,
+        canonicalPath: context.canonicalPath,
+        defaultBranch: context.defaultBranch,
+        baseCommit: context.baseCommit,
+        acceptedAt: new Date().toISOString(),
+      };
+      this.send('execution.repository.accepted', accepted);
+    } catch (error) {
+      const code =
+        error instanceof RepositoryContextError
+          ? error.code
+          : ERROR_CODES.REPOSITORY_CONTEXT_REJECTED;
+      // Keep an existing context on a conflicting duplicate: the API may retry
+      // the original payload and must receive the same contextId.
+      if (code !== ERROR_CODES.REPOSITORY_CONTEXT_CONFLICT) {
+        this.repositoryContexts.release(payload.executionId);
+      }
+      const rejected: ExecutionRepositoryRejectedPayload = {
+        executionId: payload.executionId,
+        projectId: payload.projectId,
+        bindingId: payload.bindingId,
+        bindingVersion: payload.bindingVersion,
+        code,
+        message: (error instanceof Error ? error.message : String(error)).slice(0, 2000),
+        retryable: code === ERROR_CODES.REPOSITORY_CONTEXT_REJECTED,
+      };
+      this.send('execution.repository.rejected', rejected);
+    }
   }
 
   private async prepareCapabilities(): Promise<void> {
@@ -672,8 +884,8 @@ export class RunnerClient {
 
   /**
    * Register payload capabilities. `projectIds` is intentionally always empty:
-   * repository selection is now server-supplied via a binding, never a local
-   * project map. Only the two implemented WP-A features are advertised.
+   * repository selection is server-supplied via a binding, never a local
+   * project map. All four repository features are advertised together.
    */
   advertisedCapabilities(): RunnerCapabilities {
     return {

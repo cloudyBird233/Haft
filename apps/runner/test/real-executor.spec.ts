@@ -12,6 +12,8 @@ import type {
 } from '../src/executor';
 import { RealExecutor } from '../src/real-executor';
 import type { ExecutionRecovery } from '../src/recovery';
+import type { RepositoryContext } from '../src/repository-context';
+import type { RepositoryPathPolicy } from '../src/repository-policy';
 
 interface Captured {
   phases: Array<{ executionId: string; phase: ExecutionPhase }>;
@@ -101,11 +103,31 @@ function createFakeChild(pid = 4321): FakeChild {
   return child;
 }
 
+function repositoryContext(
+  overrides: Partial<RepositoryContext> = {},
+): RepositoryContext {
+  return {
+    contextId: 'context_real_shutdown',
+    executionId: 'execution_real_shutdown',
+    projectId: 'project_demo',
+    bindingId: 'binding_real_shutdown',
+    bindingVersion: 1,
+    policyVersion: 'policy-v1',
+    configuredPath: '/virtual/repository',
+    canonicalPath: '/virtual/repository',
+    defaultBranch: 'main',
+    baseCommit: 'a'.repeat(40),
+    state: 'ready',
+    createdAt: Date.now(),
+    lastUsedAt: Date.now(),
+    ...overrides,
+  };
+}
+
 function createExecutor(
   options: {
     config?: RunnerConfig;
     onTerminate?: (child: FakeChild, force: boolean) => void;
-    omitRepositoryPath?: boolean;
     recovery?: ExecutionRecovery;
   } = {},
 ): {
@@ -156,6 +178,11 @@ function createExecutor(
     baseCommit: 'a'.repeat(40),
   }));
 
+  const repositoryPolicy = {
+    policyVersion: 'policy-v1',
+    assertStillAllowed: vi.fn(async () => undefined),
+  } as unknown as RepositoryPathPolicy;
+
   const executor = new RealExecutor(options.config ?? makeConfig(), callbacks, options.recovery, {
     resolveExecutable: async () => ({ path: '/virtual/codex', searched: [], error: null }),
     spawnProcess: () => {
@@ -170,7 +197,7 @@ function createExecutor(
       commandLine: 'codex exec',
     }),
     terminateProcess: terminate,
-    ...(options.omitRepositoryPath ? {} : { resolveRepositoryPath: () => '/virtual/repository' }),
+    repositoryPolicy,
     git: {
       prepare: gitPrepare,
       collect: async () => null,
@@ -193,7 +220,7 @@ async function waitFor(check: () => boolean, timeoutMs = 3000): Promise<void> {
 }
 
 describe('RealExecutor shutdown', () => {
-  it('fails closed without a resolver, before journal or worktree writes', async () => {
+  it('fails closed without a repository context, before journal or worktree writes', async () => {
     const journal = {
       begin: vi.fn().mockResolvedValue(undefined),
       update: vi.fn().mockResolvedValue(undefined),
@@ -205,14 +232,13 @@ describe('RealExecutor shutdown', () => {
       spool: { flush: vi.fn() },
     } as unknown as ExecutionRecovery;
     const { executor, captured, gitPrepare } = createExecutor({
-      omitRepositoryPath: true,
       recovery,
     });
 
-    executor.start(startPayload());
+    executor.start(startPayload(), undefined as unknown as RepositoryContext);
     await waitFor(() => captured.failed.length === 1);
 
-    expect(captured.failed[0]?.payload.reason).toContain('PROJECT_BINDING_UNSUPPORTED');
+    expect(captured.failed[0]?.payload.reason).toContain('REPOSITORY_CONTEXT_NOT_READY');
     expect(gitPrepare).not.toHaveBeenCalled();
     expect(journal.begin).not.toHaveBeenCalled();
     expect(journal.update).not.toHaveBeenCalled();
@@ -229,17 +255,18 @@ describe('RealExecutor shutdown', () => {
         }
       },
     });
-    executor.start(startPayload());
+    executor.start(startPayload(), repositoryContext());
     await spawned;
     await child.promptWritten;
     await waitFor(() => captured.phases.some((entry) => entry.phase === 'running'));
 
-    // WP-B seam: the worktree manager must receive exactly the resolver's
-    // repository path, never a cwd fallback.
+    // The worktree manager must receive exactly the repository handshake's
+    // canonical path and base commit, never a cwd fallback.
     expect(gitPrepare).toHaveBeenCalledWith(
       '/virtual/repository',
       'project_demo',
       'execution_real_shutdown',
+      { baseCommit: 'a'.repeat(40) },
     );
 
     const startedAt = Date.now();
@@ -266,7 +293,7 @@ describe('RealExecutor shutdown', () => {
         }
       },
     });
-    executor.start(startPayload());
+    executor.start(startPayload(), repositoryContext());
     await spawned;
     await child.promptWritten;
     await waitFor(() => captured.phases.some((entry) => entry.phase === 'running'));
@@ -286,7 +313,7 @@ describe('RealExecutor shutdown', () => {
 
   it('reports incomplete cleanup when the child never confirms termination', async () => {
     const { executor, captured, child, spawned } = createExecutor();
-    executor.start(startPayload());
+    executor.start(startPayload(), repositoryContext());
     await spawned;
     await child.promptWritten;
     await waitFor(() => captured.phases.some((entry) => entry.phase === 'running'));

@@ -3,10 +3,11 @@ import type {
   AgentRuntimeType,
   RuntimeAvailabilityDto,
 } from '@raft-lite/contracts';
-import { RUNTIME_LABELS, RUNNER_RUNTIMES } from '@raft-lite/contracts';
+import { RUNTIME_LABELS, RUNNER_RUNTIMES, type RunnerFeature } from '@raft-lite/contracts';
 import { AppException } from '../../common/errors/app.exception';
 import { AppLogger } from '../../common/logger/app-logger';
-import { RunnerRegistryService } from '../runners/runner-registry.service';
+import { RepositoryHandshakeService } from '../runners/repository-handshake.service';
+import { RunnerRegistryService, type LiveRunnerRegistration } from '../runners/runner-registry.service';
 import type {
   AgentRuntime,
   RuntimeContext,
@@ -15,6 +16,17 @@ import type {
 } from './agent-runtime.interface';
 import { MockRuntimeService } from './mock-runtime.service';
 import { RunnerRuntimeService } from './runner-runtime.service';
+
+/**
+ * Features a live runner must advertise for any real execution dispatch.
+ * A partial advertisement is unsupported; validation-only WP-A runners must
+ * not receive an execution handshake.
+ */
+const EXECUTION_REQUIRED_FEATURES: readonly RunnerFeature[] = [
+  'project-binding-v1',
+  'repository-handshake-v1',
+  'repository-path-policy-v1',
+];
 
 /**
  * Single selection point for runtime implementations. ExecutionsService asks
@@ -29,11 +41,12 @@ export class RuntimeRegistryService implements OnModuleDestroy {
   constructor(
     private readonly mock: MockRuntimeService,
     private readonly runners: RunnerRegistryService,
+    private readonly handshake: RepositoryHandshakeService,
     private readonly logger: AppLogger,
   ) {
     this.register(mock);
-    this.register(new RunnerRuntimeService('codex', runners));
-    this.register(new RunnerRuntimeService('opencode', runners));
+    this.register(new RunnerRuntimeService('codex', runners, handshake));
+    this.register(new RunnerRuntimeService('opencode', runners, handshake));
 
     // Runner-backed executions are all emitted by one shared source.
     this.unsubscribers.push(
@@ -111,6 +124,10 @@ export class RuntimeRegistryService implements OnModuleDestroy {
     return this.runners.dispatchCancel(runnerId, executionId, reason);
   }
 
+  getLiveRunnerRegistration(runnerId: string): LiveRunnerRegistration | null {
+    return this.runners.getLiveRegistration(runnerId);
+  }
+
   noteFinished(type: AgentRuntimeType, executionId: string): void {
     const runtime = this.runtimes.get(type);
     if (runtime && 'markFinished' in runtime) {
@@ -120,7 +137,7 @@ export class RuntimeRegistryService implements OnModuleDestroy {
 
   async availability(
     computerId: string | null,
-    projectId: string | null,
+    _projectId: string | null,
   ): Promise<RuntimeAvailabilityDto[]> {
     const result: RuntimeAvailabilityDto[] = [
       {
@@ -159,9 +176,10 @@ export class RuntimeRegistryService implements OnModuleDestroy {
       } else if (!capability.authenticated) {
         reason = capability.message ?? `${RUNTIME_LABELS[runtime]} is not authenticated`;
         reasonCode = 'CLI_NOT_AUTHENTICATED';
-      } else if (projectId && !runner.capabilities.projectIds.includes(projectId)) {
-        reason = 'The project is not mapped in the runner configuration';
-        reasonCode = 'PROJECT_NOT_MAPPED';
+      } else if (!this.runners.hasLiveFeatures(runner.id, EXECUTION_REQUIRED_FEATURES)) {
+        reason =
+          'The runner does not support the P2-02 execution repository handshake; upgrade it';
+        reasonCode = 'PROJECT_BINDING_UNSUPPORTED';
       }
 
       result.push({

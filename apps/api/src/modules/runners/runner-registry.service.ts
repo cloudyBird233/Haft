@@ -1,6 +1,10 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { HttpStatus, Injectable, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import type {
+  ExecutionRepositoryAcceptedPayload,
+  ExecutionRepositoryPayload,
+  ExecutionRepositoryRejectedPayload,
+  ExecutionStartRejectedPayload,
   RepositoryValidatePayload,
   RepositoryValidationPayload,
   RunnerCapabilities,
@@ -36,6 +40,11 @@ export interface RunnerHandshakeResult {
   protocolVersion: number;
 }
 
+export type ExecutionAcceptedPayload = Extract<
+  RunnerInboundMessage,
+  { type: 'execution.accepted' }
+>['payload'];
+
 export interface RunnerConnectionInfo {
   runnerId: string;
   computerId: string;
@@ -67,9 +76,63 @@ export interface RepositoryValidationEvent {
   receivedAt: Date;
 }
 
+export interface RunnerRegisteredEvent {
+  runnerId: string;
+  computerId: string;
+  platform: string;
+  features: RunnerFeature[];
+  registeredAt: Date;
+}
+
+/**
+ * Typed repository-handshake messages raised from the authenticated inbound
+ * queue. The `runnerId` is the socket identity, never a payload field.
+ */
+export type RunnerProtocolEvent =
+  | {
+      type: 'execution.repository.accepted';
+      runnerId: string;
+      payload: ExecutionRepositoryAcceptedPayload;
+      receivedAt: Date;
+    }
+  | {
+      type: 'execution.repository.rejected';
+      runnerId: string;
+      payload: ExecutionRepositoryRejectedPayload;
+      receivedAt: Date;
+    }
+  | {
+      type: 'execution.start.rejected';
+      runnerId: string;
+      payload: ExecutionStartRejectedPayload;
+      receivedAt: Date;
+    }
+  | {
+      type: 'execution.accepted';
+      runnerId: string;
+      payload: ExecutionAcceptedPayload;
+      receivedAt: Date;
+    };
+
+export interface ExecutionStartDispatchPayload {
+  executionId: string;
+  runtime: 'codex' | 'opencode';
+  taskId: string;
+  taskTitle: string;
+  taskDescription: string;
+  projectId: string;
+  prompt: string;
+  options?: {
+    model?: string | null;
+    agent?: string | null;
+    variant?: string | null;
+    sandbox?: string | null;
+    timeoutMs?: number;
+  };
+}
+
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000;
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = 45_000;
-const START_ACCEPT_TIMEOUT_MS = 20_000;
 const DEFAULT_RECONNECT_GRACE_MS = 60_000;
 
 /**
@@ -84,18 +147,14 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
   private readonly repositoryValidationListeners = new Set<
     (event: RepositoryValidationEvent) => void
   >();
+  private readonly protocolListeners = new Set<
+    (event: RunnerProtocolEvent) => Promise<void> | void
+  >();
+  private readonly runnerRegisteredListeners = new Set<(event: RunnerRegisteredEvent) => void>();
   private readonly connections = new Map<string, RunnerConnectionInfo>();
   private readonly liveRegistrations = new Map<string, LiveRunnerRegistration>();
   private readonly seenMessages = new Map<string, number>();
   private readonly recoveryTimers = new Map<string, NodeJS.Timeout>();
-  private readonly pendingStarts = new Map<
-    string,
-    {
-      resolve: () => void;
-      reject: (error: Error) => void;
-      timer: NodeJS.Timeout;
-    }
-  >();
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private readonly heartbeatTimeoutMs = Math.max(
     10_000,
@@ -156,15 +215,12 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
       clearTimeout(timer);
     }
     this.recoveryTimers.clear();
-    for (const pending of this.pendingStarts.values()) {
-      clearTimeout(pending.timer);
-      pending.reject(new Error('Runner registry is shutting down'));
-    }
-    this.pendingStarts.clear();
     this.connections.clear();
     this.liveRegistrations.clear();
     this.executionListeners.clear();
     this.repositoryValidationListeners.clear();
+    this.protocolListeners.clear();
+    this.runnerRegisteredListeners.clear();
   }
 
   setTransport(transport: RunnerTransport): void {
@@ -191,6 +247,16 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
   onRepositoryValidation(listener: (event: RepositoryValidationEvent) => void): () => void {
     this.repositoryValidationListeners.add(listener);
     return () => this.repositoryValidationListeners.delete(listener);
+  }
+
+  onProtocolEvent(listener: (event: RunnerProtocolEvent) => Promise<void> | void): () => void {
+    this.protocolListeners.add(listener);
+    return () => this.protocolListeners.delete(listener);
+  }
+
+  onRunnerRegistered(listener: (event: RunnerRegisteredEvent) => void): () => void {
+    this.runnerRegisteredListeners.add(listener);
+    return () => this.runnerRegisteredListeners.delete(listener);
   }
 
   getLiveRegistration(runnerId: string): LiveRunnerRegistration | null {
@@ -420,10 +486,32 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
       registeredAt: new Date(),
     });
 
-    // Tell the runner what the server believes is still running. The runner
-    // answers with a snapshot, which is the authoritative local view.
+    const event: RunnerRegisteredEvent = {
+      runnerId,
+      computerId: payload.computerId,
+      platform: payload.platform,
+      features: [...new Set(payload.capabilities.features ?? [])],
+      registeredAt: new Date(),
+    };
+    for (const listener of [...this.runnerRegisteredListeners]) {
+      try {
+        listener(event);
+      } catch (error) {
+        this.logger.error({
+          eventType: 'runner.registration_listener_failed',
+          message: 'Runner registration listener threw',
+          runnerId,
+          status: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    // Tell the runner what the server believes is still running. `start_sent`
+    // is included so a reconnect can reconcile an accepted start; pre-start
+    // dispatch states are owned by the repository handshake service.
     const running = await this.prisma.execution.findMany({
-      where: { runnerId, status: 'running' },
+      where: { runnerId, status: 'running', dispatchState: { in: ['start_sent', 'running'] } },
       select: { id: true },
     });
     if (running.length > 0) {
@@ -481,14 +569,46 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
       await this.reconcileSnapshot(runnerId, message.payload);
     } else if (message.type === 'repository.validation') {
       this.emitRepositoryValidation(runnerId, message.payload);
-    } else if (message.type === 'execution.accepted') {
-      const key = pendingKey(runnerId, message.payload.executionId);
-      const pending = this.pendingStarts.get(key);
-      if (pending) {
-        clearTimeout(pending.timer);
-        this.pendingStarts.delete(key);
-        pending.resolve();
+    } else if (message.type === 'execution.repository.accepted') {
+      if (!(await this.ownsExecution(runnerId, message.payload.executionId))) {
+        return;
       }
+      await this.emitProtocolEvent({
+        type: message.type,
+        runnerId,
+        payload: message.payload,
+        receivedAt: new Date(),
+      });
+    } else if (message.type === 'execution.repository.rejected') {
+      if (!(await this.ownsExecution(runnerId, message.payload.executionId))) {
+        return;
+      }
+      await this.emitProtocolEvent({
+        type: message.type,
+        runnerId,
+        payload: message.payload,
+        receivedAt: new Date(),
+      });
+    } else if (message.type === 'execution.start.rejected') {
+      if (!(await this.ownsExecution(runnerId, message.payload.executionId))) {
+        return;
+      }
+      await this.emitProtocolEvent({
+        type: message.type,
+        runnerId,
+        payload: message.payload,
+        receivedAt: new Date(),
+      });
+    } else if (message.type === 'execution.accepted') {
+      if (!(await this.ownsExecution(runnerId, message.payload.executionId))) {
+        return;
+      }
+      await this.emitProtocolEvent({
+        type: message.type,
+        runnerId,
+        payload: message.payload,
+        receivedAt: new Date(),
+      });
     } else if (message.type === 'execution.phase') {
       if (!(await this.ownsExecution(runnerId, message.payload.executionId))) {
         return;
@@ -566,80 +686,67 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
     this.rememberMessage(message.messageId);
   }
 
-  async dispatchStart(input: {
-    runnerId: string;
-    executionId: string;
-    runtime: 'codex' | 'opencode';
-    taskId: string;
-    taskTitle: string;
-    taskDescription: string;
-    projectId: string;
-    prompt: string;
-    options?: {
-      model?: string | null;
-      agent?: string | null;
-      variant?: string | null;
-      sandbox?: string | null;
-      timeoutMs?: number;
-    };
-  }): Promise<void> {
-    if (!this.transport?.isConnected(input.runnerId)) {
-      throw new Error('The assigned runner is not connected');
+  /**
+   * Sends (or retries) `execution.repository` with the caller-supplied stable
+   * message id. Retries must reuse the exact same envelope.
+   */
+  sendExecutionRepository(
+    runnerId: string,
+    payload: ExecutionRepositoryPayload,
+    messageId: string,
+  ): boolean {
+    if (!this.transport?.isConnected(runnerId)) {
+      return false;
     }
-    const runner = await this.findRunner(input.runnerId);
-    if (!runner) {
-      throw new Error('The assigned runner is no longer paired');
-    }
-    const running = await this.prisma.execution.count({
-      where: { runnerId: input.runnerId, status: 'running' },
-    });
-    if (running > runner.maxConcurrentExecutions) {
-      throw new Error('The runner has reached its maximum concurrent executions');
-    }
+    return this.transport.send(
+      runnerId,
+      this.envelopeWithId(runnerId, 'execution.repository', payload, messageId),
+    );
+  }
 
-    const key = pendingKey(input.runnerId, input.executionId);
-    if (this.pendingStarts.has(key)) {
-      throw new Error('This execution is already being dispatched to the runner');
+  /** Sends a pre-built envelope so handshake retries are byte-identical. */
+  sendEnvelope(runnerId: string, message: RunnerEnvelope): boolean {
+    if (!this.transport?.isConnected(runnerId)) {
+      return false;
     }
+    return this.transport.send(runnerId, message);
+  }
 
-    const message = this.envelope(input.runnerId, 'execution.start', {
-      executionId: input.executionId,
-      runtime: input.runtime,
-      taskId: input.taskId,
-      taskTitle: input.taskTitle,
-      taskDescription: input.taskDescription,
-      projectId: input.projectId,
-      prompt: input.prompt,
-      options: input.options ?? {},
-    });
+  buildEnvelope(
+    runnerId: string,
+    type: string,
+    payload: unknown,
+    messageId: string = randomUUID(),
+  ): RunnerEnvelope {
+    return this.envelopeWithId(runnerId, type, payload, messageId);
+  }
 
-    const accepted = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingStarts.delete(key);
-        // The runner may have started the work but missed the acceptance
-        // window (for example while blocked). Ask it to stop so a timed-out
-        // dispatch cannot leave an unsupervised process behind.
-        this.dispatchCancel(
-          input.runnerId,
-          input.executionId,
-          'Execution start was not acknowledged by the runner in time',
-        );
-        reject(new Error('Runner did not accept the execution before the dispatch timeout'));
-      }, START_ACCEPT_TIMEOUT_MS);
-      timer.unref();
-      this.pendingStarts.set(key, { resolve, reject, timer });
-    });
-
-    const sent = this.transport.send(input.runnerId, message);
-    if (!sent) {
-      const pending = this.pendingStarts.get(key);
-      if (pending) {
-        clearTimeout(pending.timer);
-        this.pendingStarts.delete(key);
-      }
-      throw new Error('The assigned runner is not connected');
+  sendExecutionStart(runnerId: string, payload: ExecutionStartDispatchPayload): boolean {
+    if (!this.transport?.isConnected(runnerId)) {
+      return false;
     }
-    await accepted;
+    return this.transport.send(
+      runnerId,
+      this.envelope(runnerId, 'execution.start', {
+        executionId: payload.executionId,
+        runtime: payload.runtime,
+        taskId: payload.taskId,
+        taskTitle: payload.taskTitle,
+        taskDescription: payload.taskDescription,
+        projectId: payload.projectId,
+        prompt: payload.prompt,
+        options: payload.options ?? {},
+      }),
+    );
+  }
+
+  /**
+   * Narrow public bridge for recovered handshake failures. It lets the
+   * handshake service feed the existing runtime-event listener chain without
+   * exposing the private emitter or injecting RuntimeRegistryService.
+   */
+  publishExecutionEvent(event: RuntimeEvent): void {
+    this.emit(event);
   }
 
   dispatchCancel(runnerId: string, executionId: string, reason?: string): boolean {
@@ -715,8 +822,12 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
     payload: { executions: Array<{ executionId: string; lastSeq: number }> },
   ): Promise<void> {
     const running = await this.prisma.execution.findMany({
-      where: { runnerId, status: 'running' },
-      select: { id: true, createdAt: true },
+      where: {
+        runnerId,
+        status: 'running',
+        dispatchState: { in: ['start_sent', 'running'] },
+      },
+      select: { id: true, createdAt: true, dispatchState: true },
     });
     const serverIds = new Set(running.map((execution) => execution.id));
     const reportedIds = new Set(payload.executions.map((execution) => execution.executionId));
@@ -755,6 +866,19 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
           runnerId,
           executionId: execution.id,
           status: 'running',
+        });
+        continue;
+      }
+      if (execution.dispatchState === 'start_sent') {
+        // WP-D owns the 30 s RUNNER_START_UNCONFIRMED grace. WP-C must not
+        // report RUNNER_RESTARTED for an execution whose CLI never started.
+        this.logger.warn({
+          eventType: 'runner.start_unconfirmed_pending',
+          message:
+            'Execution start is unconfirmed; recovery grace is handled by the handshake service',
+          runnerId,
+          executionId: execution.id,
+          status: 'warning',
         });
         continue;
       }
@@ -860,6 +984,23 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
     return this.prisma.runner.findUnique({ where: { id: runnerId } });
   }
 
+  private async emitProtocolEvent(event: RunnerProtocolEvent): Promise<void> {
+    for (const listener of [...this.protocolListeners]) {
+      try {
+        await listener(event);
+      } catch (error) {
+        this.logger.error({
+          eventType: 'runner.protocol_listener_failed',
+          message: 'Protocol event listener threw while handling a handshake message',
+          runnerId: event.runnerId,
+          executionId: event.payload.executionId,
+          status: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
   private emit(event: RuntimeEvent): void {
     for (const listener of [...this.executionListeners]) {
       listener(event);
@@ -961,10 +1102,6 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
       await this.markDisconnected(runnerId, this.connections.get(runnerId)?.socketId);
     }
   }
-}
-
-function pendingKey(runnerId: string, executionId: string): string {
-  return `${runnerId}:${executionId}`;
 }
 
 function hashToken(token: string): string {

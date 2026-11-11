@@ -7,7 +7,13 @@ import type {
   RunnerRuntimeType,
 } from '@raft-lite/contracts';
 import type { RunnerConfig } from './config';
-import type { ExecutorCallbacks, RunnerExecutor, ShutdownResult } from './executor';
+import type {
+  ExecutorAdmission,
+  ExecutorCallbacks,
+  RunnerExecutor,
+  ShutdownResult,
+} from './executor';
+import type { RepositoryContext } from './repository-context';
 
 export type { CancelledPayload, CompletedPayload, ExecutorCallbacks, FailedPayload } from './executor';
 
@@ -52,17 +58,34 @@ export class FakeExecutor implements RunnerExecutor {
     private readonly callbacks: ExecutorCallbacks,
   ) {}
 
-  start(payload: ExecutionStartMessage['payload']): void {
+  canAdmit(
+    payload: ExecutionStartMessage['payload'],
+    _context: RepositoryContext,
+  ): ExecutorAdmission {
+    if (!this.config.fakeRuntimes.includes(payload.runtime)) {
+      return {
+        ok: false,
+        code: 'REPOSITORY_CONTEXT_NOT_READY',
+        message: `RUNTIME_NOT_ENABLED: ${payload.runtime} is not enabled for this runner`,
+        retryable: false,
+      };
+    }
     if (this.sessions.has(payload.executionId)) {
-      return;
+      return { ok: true };
     }
     if (this.sessions.size >= this.config.maxConcurrentExecutions) {
-      this.callbacks.onFailed(this.createSession(payload), {
-        reason: 'RUNNER_BUSY: maximum concurrent executions reached',
-        exitCode: null,
-        summary: null,
-        git: null,
-      });
+      return {
+        ok: false,
+        code: 'REPOSITORY_CONTEXT_NOT_READY',
+        message: 'RUNNER_BUSY: maximum concurrent executions reached',
+        retryable: true,
+      };
+    }
+    return { ok: true };
+  }
+
+  start(payload: ExecutionStartMessage['payload'], context: RepositoryContext): void {
+    if (this.sessions.has(payload.executionId)) {
       return;
     }
 
@@ -74,7 +97,7 @@ export class FakeExecutor implements RunnerExecutor {
       session,
       'system',
       'info',
-      `Project ${payload.projectId} mapped; simulated worktree created.`,
+      `Repository context ${context.contextId} prepared for ${context.defaultBranch}; simulated worktree created.`,
     );
 
     if (this.shouldFail(payload)) {

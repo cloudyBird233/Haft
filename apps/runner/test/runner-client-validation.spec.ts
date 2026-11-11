@@ -337,7 +337,7 @@ describe('RunnerClient repository.validate', () => {
 });
 
 describe('RunnerClient capabilities', () => {
-  it('advertises only the two implemented WP-A features with an empty projectIds', () => {
+  it('advertises all four repository features with an empty projectIds', () => {
     const { client } = createClient(
       stubPolicy(async () => ({ ok: false, platform: process.platform, policyVersion: 'p' })),
     );
@@ -346,11 +346,11 @@ describe('RunnerClient capabilities', () => {
     expect(capabilities.projectIds).toEqual([]);
     expect(capabilities.features).toEqual([...RUNNER_IMPLEMENTED_FEATURES]);
     expect(capabilities.features).toEqual([
+      'project-binding-v1',
       'repository-validation-v1',
       'repository-path-policy-v1',
+      'repository-handshake-v1',
     ]);
-    expect(capabilities.features).not.toContain('project-binding-v1');
-    expect(capabilities.features).not.toContain('repository-handshake-v1');
     expect(makeConfig()).not.toHaveProperty('projectPaths');
   });
 });

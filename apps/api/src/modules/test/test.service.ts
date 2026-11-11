@@ -50,12 +50,25 @@ export class TestService {
         { projectId, bindingId },
       );
     }
+    const runner = await this.prisma.runner.findFirst({
+      where: { computerId: binding.computerId },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, platform: true },
+    });
     const updated = await this.prisma.projectRepositoryBinding.update({
       where: { id: binding.id },
       data: {
         status: 'ready',
         validatedBindingVersion: binding.bindingVersion,
         lastValidatedAt: new Date(),
+        // P2-02 execution prechecks require the full validation facts. A
+        // ready binding must name the Runner and platform that validated it.
+        canonicalPath: binding.path,
+        policyVersion: 'test-policy-v1',
+        platform: runner?.platform ?? 'win32',
+        validatedByRunnerId: runner?.id ?? null,
+        validationErrorCode: null,
+        validationError: null,
       },
       include: projectBindingRelations,
     });

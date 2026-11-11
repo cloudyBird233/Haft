@@ -5,6 +5,7 @@ import {
   type GitExecutionResult,
 } from '@raft-lite/contracts';
 import type { RunnerConfig } from './config';
+import { containsPath } from './repository-policy';
 import {
   buildCliEnvironment,
   errorMessage,
@@ -45,7 +46,7 @@ export class GitWorktreeManager {
   constructor(
     private readonly config: Pick<
       RunnerConfig,
-      'gitBinary' | 'worktreeRoot' | 'keepWorktrees'
+      'gitBinary' | 'worktreeRoot' | 'keepWorktrees' | 'platform'
     >,
   ) {}
 
@@ -53,6 +54,7 @@ export class GitWorktreeManager {
     projectPath: string,
     projectId: string,
     executionId: string,
+    options: { baseCommit?: string } = {},
   ): Promise<WorktreeInfo> {
     const project = resolve(projectPath);
     let info;
@@ -75,7 +77,7 @@ export class GitWorktreeManager {
     }
 
     const base = await this.git(project, ['rev-parse', 'HEAD']);
-    const baseCommit = base.stdout.trim();
+    const baseCommit = options.baseCommit?.trim() || base.stdout.trim();
     if (!baseCommit) {
       throw new GitWorktreeError('PROJECT_HAS_NO_COMMITS', `${project} has no commits to branch from`);
     }
@@ -106,6 +108,15 @@ export class GitWorktreeManager {
       sanitizeSegment(executionId),
     );
     assertInside(root, worktreePath);
+    if (
+      containsPath(project, worktreePath, this.config.platform) ||
+      containsPath(worktreePath, project, this.config.platform)
+    ) {
+      throw new GitWorktreeError(
+        'REPO_PATH_NESTED_IN_WORKTREE_ROOT',
+        'The worktree and repository must not contain each other',
+      );
+    }
 
     try {
       const existing = await stat(worktreePath);

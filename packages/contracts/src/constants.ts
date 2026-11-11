@@ -28,6 +28,29 @@ export type TaskPriority = (typeof TASK_PRIORITIES)[number];
 export const EXECUTION_STATUSES = ['running', 'completed', 'failed', 'cancelled'] as const;
 export type ExecutionStatus = (typeof EXECUTION_STATUSES)[number];
 
+/**
+ * Protocol-phase indicator persisted independently of `status`/`phase`.
+ * It must never be rendered as a replacement for the user-visible status.
+ */
+export const DISPATCH_STATES = [
+  'created',
+  'repository_preparing',
+  'repository_ready',
+  'start_sent',
+  'running',
+  'terminal',
+] as const;
+export type DispatchState = (typeof DISPATCH_STATES)[number];
+
+export const DISPATCH_STATE_LABELS: Record<DispatchState, string> = {
+  created: 'Created',
+  repository_preparing: 'Preparing repository',
+  repository_ready: 'Repository ready',
+  start_sent: 'Starting CLI',
+  running: 'Running',
+  terminal: 'Terminal',
+};
+
 export const LOG_LEVELS = ['info', 'success', 'warning', 'error'] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
 

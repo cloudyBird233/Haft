@@ -121,6 +121,7 @@ describe('Runner protocol v1 integration', () => {
       authenticated?: boolean;
       projectIds?: string[];
       features?: string[];
+      platform?: string;
     } = {},
   ): Promise<void> {
     send(
@@ -129,7 +130,7 @@ describe('Runner protocol v1 integration', () => {
       {
         computerId,
         runnerVersion: 'test-runner/1.0.0',
-        platform: 'win32',
+        platform: options.platform ?? 'win32',
         architecture: 'x64',
         capabilities: {
           runtimes: [
@@ -150,9 +151,14 @@ describe('Runner protocol v1 integration', () => {
           ],
           projectIds: options.projectIds ?? [SEED_IDS.project],
           maxConcurrentExecutions: 1,
-          // P2-01 does not consume runner features. P2-02 will advertise and
-          // enforce repository validation/path-policy capabilities.
-          features: options.features ?? [],
+          // WP-C runs the execution repository handshake; a partial feature
+          // advertisement is unsupported by the runtime gate.
+          features: options.features ?? [
+            'project-binding-v1',
+            'repository-validation-v1',
+            'repository-path-policy-v1',
+            'repository-handshake-v1',
+          ],
         },
       },
       runnerId,
@@ -216,6 +222,27 @@ describe('Runner protocol v1 integration', () => {
     return { agentId: agent.id, taskId: task.id };
   }
 
+  async function acceptRepositoryHandshake(
+    connected: ConnectedRunner,
+    repository: Extract<RunnerServerMessage, { type: 'execution.repository' }>,
+    binding: ProjectBindingDto,
+    overrides: Record<string, unknown> = {},
+  ): Promise<void> {
+    send(connected.socket, 'execution.repository.accepted', {
+      executionId: repository.payload.executionId,
+      projectId: repository.payload.projectId,
+      bindingId: repository.payload.bindingId,
+      bindingVersion: repository.payload.bindingVersion,
+      policyVersion: repository.payload.policyVersion,
+      contextId: `context_${repository.payload.executionId}`,
+      canonicalPath: binding.canonicalPath ?? repository.payload.path,
+      defaultBranch: repository.payload.defaultBranch,
+      baseCommit: 'a'.repeat(40),
+      acceptedAt: new Date().toISOString(),
+      ...overrides,
+    });
+  }
+
   async function startAndAccept(connected: ConnectedRunner): Promise<{
     executionId: string;
     taskId: string;
@@ -225,10 +252,13 @@ describe('Runner protocol v1 integration', () => {
   }> {
     const binding = await ensureReadyBinding();
     const { agentId, taskId } = await createCodexTask();
-    const startMessage = waitForMessage(connected.socket, 'execution.start', 5000);
+    const repositoryMessage = waitForMessage(connected.socket, 'execution.repository', 8000);
     const startResponse = Promise.resolve(
       request(server).post(`/api/tasks/${taskId}/start`).send({}),
     );
+    const repository = await repositoryMessage;
+    const startMessage = waitForMessage(connected.socket, 'execution.start', 5000);
+    await acceptRepositoryHandshake(connected, repository, binding);
     const start = await startMessage;
     send(connected.socket, 'execution.accepted', {
       executionId: start.payload.executionId,
@@ -240,7 +270,7 @@ describe('Runner protocol v1 integration', () => {
     return { executionId: start.payload.executionId, taskId, agentId, binding, start };
   }
 
-  it('pairs, registers, and exposes runtime availability for mapped projects', async () => {
+  it('pairs, registers, and exposes runtime availability without a project map', async () => {
     const connected = await connectRunner();
     expect(connected.welcome.payload.issuedToken).toBeTruthy();
     await registerRunner(connected);
@@ -261,13 +291,34 @@ describe('Runner protocol v1 integration', () => {
       .items[0];
     expect(runner).toMatchObject({ id: RUNNER_ID, status: 'online' });
 
-    const unmapped = await request(server)
+    // The WP-B projectIds gate is gone: the project id no longer vetoes a
+    // connected, feature-complete runner.
+    const otherProject = await request(server)
       .get(`/api/runtimes?computerId=${COMPUTER_ID}&projectId=project_other`)
       .expect(200);
-    const codex = (
-      unmapped.body as ApiSuccessBody<{ items: RuntimeAvailabilityDto[] }>
+    const otherCodex = (
+      otherProject.body as ApiSuccessBody<{ items: RuntimeAvailabilityDto[] }>
     ).data.items.find((item) => item.runtime === 'codex');
-    expect(codex).toMatchObject({ available: false, reasonCode: 'PROJECT_NOT_MAPPED' });
+    expect(otherCodex).toMatchObject({ available: true, runnerId: RUNNER_ID });
+  });
+
+  it('rejects a runner that does not advertise the execution handshake features', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected, RUNNER_ID, COMPUTER_ID, {
+      features: ['repository-validation-v1', 'repository-path-policy-v1'],
+    });
+
+    const response = await request(server)
+      .get(`/api/runtimes?computerId=${COMPUTER_ID}&projectId=${SEED_IDS.project}`)
+      .expect(200);
+    const codex = (
+      response.body as ApiSuccessBody<{ items: RuntimeAvailabilityDto[] }>
+    ).data.items.find((item) => item.runtime === 'codex');
+    expect(codex).toMatchObject({
+      available: false,
+      reasonCode: 'PROJECT_BINDING_UNSUPPORTED',
+      runnerId: RUNNER_ID,
+    });
   });
 
   it('blocks real executions until the binding is ready for its current version', async () => {
@@ -461,10 +512,13 @@ describe('Runner protocol v1 integration', () => {
 
     let executionId = '';
     try {
-      const startMessage = waitForMessage(connected.socket, 'execution.start', 5000);
+      const repositoryMessage = waitForMessage(connected.socket, 'execution.repository', 8000);
       const startResponse = Promise.resolve(
         request(server).post(`/api/tasks/${taskId}/start`).send({}),
       );
+      const repository = await repositoryMessage;
+      const startMessage = waitForMessage(connected.socket, 'execution.start', 5000);
+      await acceptRepositoryHandshake(connected, repository, binding);
       const start = await startMessage;
       send(connected.socket, 'execution.accepted', {
         executionId: start.payload.executionId,
@@ -852,6 +906,361 @@ describe('Runner protocol v1 integration', () => {
     });
     const logs = await request(server).get(`/api/executions/${executionId}/logs`).expect(200);
     expect((logs.body as ApiSuccessBody<ListDto<ExecutionLogDto>>).data.total).toBe(0);
+  });
+
+  it('never sends execution.start without a valid execution.repository.accepted', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    const binding = await ensureReadyBinding();
+    const { taskId } = await createCodexTask();
+
+    const received: string[] = [];
+    const handler = (raw: unknown): void => {
+      const parsed = runnerServerMessageSchema.safeParse(raw);
+      if (parsed.success) received.push(parsed.data.type);
+    };
+    connected.socket.on('runner.message', handler);
+    try {
+      const repositoryMessage = waitForMessage(connected.socket, 'execution.repository', 8000);
+      const responsePromise = Promise.resolve(
+        request(server).post(`/api/tasks/${taskId}/start`).send({}),
+      );
+      const repository = await repositoryMessage;
+      expect(repository.payload).toMatchObject({
+        projectId: SEED_IDS.project,
+        bindingId: binding.id,
+        bindingVersion: binding.bindingVersion,
+        policyVersion: binding.policyVersion,
+        defaultBranch: 'main',
+      });
+
+      // No execution.start until the API has the repository ACK.
+      await delay(300);
+      expect(received).toEqual(['execution.repository']);
+
+      const startMessage = waitForMessage(connected.socket, 'execution.start', 5000);
+      await acceptRepositoryHandshake(connected, repository, binding);
+      const start = await startMessage;
+      send(connected.socket, 'execution.accepted', {
+        executionId: start.payload.executionId,
+        acceptedAt: new Date().toISOString(),
+      });
+      const response = await responsePromise;
+      expect(response.status).toBe(201);
+      const execution = (response.body as ApiSuccessBody<ExecutionDto>).data;
+
+      expect(received.indexOf('execution.start')).toBeGreaterThan(
+        received.indexOf('execution.repository'),
+      );
+      expect(execution).toMatchObject({
+        status: 'running',
+        dispatchState: 'running',
+        repositoryProjectId: SEED_IDS.project,
+        repositoryBindingId: binding.id,
+        repositoryBindingVersion: binding.bindingVersion,
+        repositoryDefaultBranch: 'main',
+        repositoryPath: binding.canonicalPath,
+        repositoryPolicyVersion: binding.policyVersion,
+        repositoryContextId: `context_${execution.id}`,
+        repositoryBaseCommit: 'a'.repeat(40),
+      });
+      expect(execution.repositoryPreparedAt).toBeTruthy();
+
+      const events = await prisma.repositoryHandshakeEvent.findMany({
+        where: { executionId: execution.id },
+        orderBy: { createdAt: 'asc' },
+      });
+      expect(events.map((event) => event.state)).toEqual([
+        'repository_preparing',
+        'repository_ready',
+        'start_sent',
+        'running',
+      ]);
+    } finally {
+      connected.socket.off('runner.message', handler);
+    }
+  });
+
+  it('retries execution.repository with the same messageId and payload', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    const binding = await ensureReadyBinding();
+    const { taskId } = await createCodexTask();
+
+    const repositories: Array<Extract<RunnerServerMessage, { type: 'execution.repository' }>> = [];
+    const handler = (raw: unknown): void => {
+      const parsed = runnerServerMessageSchema.safeParse(raw);
+      if (parsed.success && parsed.data.type === 'execution.repository') {
+        repositories.push(parsed.data);
+      }
+    };
+    connected.socket.on('runner.message', handler);
+    try {
+      const responsePromise = Promise.resolve(
+        request(server).post(`/api/tasks/${taskId}/start`).send({}),
+      );
+      await waitFor(() => Promise.resolve(repositories.length >= 2), 8000);
+      const [first, second] = repositories;
+      expect(first?.messageId).toBe(second?.messageId);
+      expect(first?.sentAt).toBe(second?.sentAt);
+      expect(first?.payload).toEqual(second?.payload);
+
+      // Duplicate ACK for one logical context: exactly one transition.
+      const startMessage = waitForMessage(connected.socket, 'execution.start', 5000);
+      await acceptRepositoryHandshake(connected, second!, binding);
+      const start = await startMessage;
+      send(connected.socket, 'execution.accepted', {
+        executionId: start.payload.executionId,
+        acceptedAt: new Date().toISOString(),
+      });
+      const response = await responsePromise;
+      expect(response.status).toBe(201);
+      const execution = (response.body as ApiSuccessBody<ExecutionDto>).data;
+      expect(
+        await prisma.repositoryHandshakeEvent.count({
+          where: { executionId: execution.id, state: 'repository_ready' },
+        }),
+      ).toBe(1);
+    } finally {
+      connected.socket.off('runner.message', handler);
+    }
+  });
+
+  it('fails the execution when the repository ACK does not match the binding', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    const binding = await ensureReadyBinding();
+    const { taskId, agentId } = await createCodexTask();
+    const beforeTask = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
+
+    const outbound: string[] = [];
+    const cancels: Array<Extract<RunnerServerMessage, { type: 'execution.cancel' }>> = [];
+    const handler = (raw: unknown): void => {
+      const parsed = runnerServerMessageSchema.safeParse(raw);
+      if (!parsed.success) return;
+      outbound.push(parsed.data.type);
+      if (parsed.data.type === 'execution.cancel') cancels.push(parsed.data);
+    };
+    connected.socket.on('runner.message', handler);
+    try {
+      const repositoryMessage = waitForMessage(connected.socket, 'execution.repository', 8000);
+      const responsePromise = Promise.resolve(
+        request(server).post(`/api/tasks/${taskId}/start`).send({}),
+      );
+      const repository = await repositoryMessage;
+      await acceptRepositoryHandshake(connected, repository, binding, {
+        canonicalPath: `${binding.canonicalPath}-other`,
+      });
+      const response = await responsePromise;
+      expect(response.status).toBe(500);
+      expect(response.body.error.code).toBe('RUNTIME_START_FAILED');
+      expect(response.body.error.details).toMatchObject({
+        code: 'REPOSITORY_CONTEXT_MISMATCH',
+      });
+
+      const failed = await waitFor(async () => {
+        const row = await prisma.execution.findUnique({ where: { id: repository.payload.executionId } });
+        return row?.status === 'failed' ? row : null;
+      });
+      expect(failed).toMatchObject({
+        status: 'failed',
+        phase: 'failed',
+        dispatchState: 'terminal',
+      });
+      expect(failed.failureReason).toMatch(/^REPOSITORY_CONTEXT_MISMATCH: /);
+      expect(outbound).not.toContain('execution.start');
+      expect(cancels.length).toBeGreaterThanOrEqual(1);
+      expect(cancels[0]?.payload.reason).toContain('REPOSITORY_CONTEXT_MISMATCH');
+
+      const taskAfter = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
+      expect(taskAfter.status).toBe(beforeTask.status);
+      const agentAfter = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      expect(agentAfter.status).toBe('idle');
+
+      // A late execution.accepted must not resurrect a terminal execution.
+      send(connected.socket, 'execution.accepted', {
+        executionId: repository.payload.executionId,
+        acceptedAt: new Date().toISOString(),
+      });
+      await delay(200);
+      const stillFailed = await prisma.execution.findUniqueOrThrow({
+        where: { id: repository.payload.executionId },
+      });
+      expect(stillFailed.status).toBe('failed');
+      expect(stillFailed.dispatchState).toBe('terminal');
+    } finally {
+      connected.socket.off('runner.message', handler);
+    }
+  });
+
+  it('unverifies the binding and fails when the policy changes after the ACK', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    const binding = await ensureReadyBinding();
+    const { taskId } = await createCodexTask();
+
+    const outbound: string[] = [];
+    const handler = (raw: unknown): void => {
+      const parsed = runnerServerMessageSchema.safeParse(raw);
+      if (parsed.success) outbound.push(parsed.data.type);
+    };
+    connected.socket.on('runner.message', handler);
+    try {
+      const repositoryMessage = waitForMessage(connected.socket, 'execution.repository', 8000);
+      const responsePromise = Promise.resolve(
+        request(server).post(`/api/tasks/${taskId}/start`).send({}),
+      );
+      const repository = await repositoryMessage;
+      await prisma.projectRepositoryBinding.update({
+        where: { id: binding.id },
+        data: { policyVersion: 'policy-changed-during-handshake' },
+      });
+      await acceptRepositoryHandshake(connected, repository, binding);
+      const response = await responsePromise;
+      expect(response.status).toBe(500);
+      expect(response.body.error.details).toMatchObject({
+        code: 'REPOSITORY_POLICY_CHANGED',
+      });
+
+      const after = await prisma.projectRepositoryBinding.findUniqueOrThrow({
+        where: { id: binding.id },
+      });
+      expect(after).toMatchObject({
+        status: 'unverified',
+        canonicalPath: null,
+        validatedByRunnerId: null,
+        validatedBindingVersion: null,
+        policyVersion: null,
+        validationErrorCode: 'REPOSITORY_POLICY_CHANGED',
+      });
+      const execution = await prisma.execution.findUniqueOrThrow({
+        where: { id: repository.payload.executionId },
+      });
+      expect(execution.failureReason).toMatch(/^REPOSITORY_POLICY_CHANGED: /);
+      expect(execution.dispatchState).toBe('terminal');
+      expect(outbound).not.toContain('execution.start');
+      expect(outbound).toContain('execution.cancel');
+    } finally {
+      connected.socket.off('runner.message', handler);
+    }
+  });
+
+  it('rejects a binding validated by another runner or platform before creating an execution', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    const binding = await ensureReadyBinding();
+    const { taskId, agentId } = await createCodexTask();
+    const beforeTask = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
+
+    // Same runner id, different live platform: the binding does not transfer.
+    await registerRunner(connected, RUNNER_ID, COMPUTER_ID, { platform: 'linux' });
+    const platformMismatch = await request(server)
+      .post(`/api/tasks/${taskId}/start`)
+      .send({})
+      .expect(409);
+    expect(platformMismatch.body.error.code).toBe('PROJECT_BINDING_NOT_READY');
+    expect(platformMismatch.body.error.details).toMatchObject({
+      bindingId: binding.id,
+      bindingPlatform: 'win32',
+      selectedRunnerId: RUNNER_ID,
+      selectedRunnerPlatform: 'linux',
+    });
+
+    // A replacement runner never inherits a validation performed by another.
+    await registerRunner(connected);
+    await prisma.computer.upsert({
+      where: { id: 'computer_previous' },
+      update: {},
+      create: {
+        id: 'computer_previous',
+        name: 'Previous Workstation',
+        hostname: 'previous',
+        status: 'offline',
+      },
+    });
+    await prisma.runner.upsert({
+      where: { id: 'runner_previous' },
+      update: {},
+      create: {
+        id: 'runner_previous',
+        computerId: 'computer_previous',
+        tokenHash: 'f'.repeat(64),
+        platform: 'win32',
+        status: 'offline',
+      },
+    });
+    await prisma.projectRepositoryBinding.update({
+      where: { id: binding.id },
+      data: { validatedByRunnerId: 'runner_previous' },
+    });
+    const runnerMismatch = await request(server)
+      .post(`/api/tasks/${taskId}/start`)
+      .send({})
+      .expect(409);
+    expect(runnerMismatch.body.error.code).toBe('PROJECT_BINDING_NOT_READY');
+    expect(runnerMismatch.body.error.details).toMatchObject({
+      bindingId: binding.id,
+      validatedByRunnerId: 'runner_previous',
+      selectedRunnerId: RUNNER_ID,
+    });
+
+    expect(await prisma.execution.count({ where: { taskId } })).toBe(0);
+    const taskAfter = await prisma.task.findUniqueOrThrow({ where: { id: taskId } });
+    expect(taskAfter.status).toBe(beforeTask.status);
+    const agentAfter = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+    expect(agentAfter.status).toBe('idle');
+  });
+
+  it('fails and cancels when the runner rejects execution.start', async () => {
+    const connected = await connectRunner();
+    await registerRunner(connected);
+    const binding = await ensureReadyBinding();
+    const { taskId } = await createCodexTask();
+
+    const outbound: string[] = [];
+    const cancels: Array<Extract<RunnerServerMessage, { type: 'execution.cancel' }>> = [];
+    const handler = (raw: unknown): void => {
+      const parsed = runnerServerMessageSchema.safeParse(raw);
+      if (!parsed.success) return;
+      outbound.push(parsed.data.type);
+      if (parsed.data.type === 'execution.cancel') cancels.push(parsed.data);
+    };
+    connected.socket.on('runner.message', handler);
+    try {
+      const repositoryMessage = waitForMessage(connected.socket, 'execution.repository', 8000);
+      const responsePromise = Promise.resolve(
+        request(server).post(`/api/tasks/${taskId}/start`).send({}),
+      );
+      const repository = await repositoryMessage;
+      const startMessage = waitForMessage(connected.socket, 'execution.start', 5000);
+      await acceptRepositoryHandshake(connected, repository, binding);
+      const start = await startMessage;
+      send(connected.socket, 'execution.start.rejected', {
+        executionId: start.payload.executionId,
+        code: 'REPOSITORY_CONTEXT_NOT_READY',
+        message: 'RUNNER_BUSY: maximum concurrent executions reached',
+        retryable: true,
+      });
+
+      const response = await responsePromise;
+      expect(response.status).toBe(500);
+      expect(response.body.error.code).toBe('RUNTIME_START_FAILED');
+      expect(response.body.error.details).toMatchObject({
+        code: 'REPOSITORY_CONTEXT_NOT_READY',
+      });
+      const execution = await prisma.execution.findUniqueOrThrow({
+        where: { id: start.payload.executionId },
+      });
+      expect(execution).toMatchObject({
+        status: 'failed',
+        dispatchState: 'terminal',
+        failureReason:
+          'REPOSITORY_CONTEXT_NOT_READY: RUNNER_BUSY: maximum concurrent executions reached',
+      });
+      expect(cancels[0]?.payload.reason).toContain('REPOSITORY_CONTEXT_NOT_READY');
+    } finally {
+      connected.socket.off('runner.message', handler);
+    }
   });
 });
 

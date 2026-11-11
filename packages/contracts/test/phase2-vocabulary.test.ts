@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   ACCEPTANCE_STATUSES,
+  DISPATCH_STATES,
+  DISPATCH_STATE_LABELS,
   ERROR_CODES,
   ERROR_CODE_VALUES,
   EXECUTION_STATUSES,
@@ -13,6 +15,7 @@ import {
   errorCodeSchema,
   runnerFeatureSchema,
   type AcceptanceStatus,
+  type DispatchState,
   type ErrorCode,
   type RunnerFeature,
 } from '../src';
@@ -106,6 +109,31 @@ describe('acceptance status vocabulary', () => {
     for (const status of ACCEPTANCE_STATUSES) {
       expect(EXECUTION_STATUSES as readonly string[]).not.toContain(status);
     }
+  });
+});
+
+describe('execution dispatch state vocabulary', () => {
+  it('freezes exactly the six P2-02 dispatch states in order', () => {
+    expect(DISPATCH_STATES).toEqual([
+      'created',
+      'repository_preparing',
+      'repository_ready',
+      'start_sent',
+      'running',
+      'terminal',
+    ]);
+    expect(new Set(DISPATCH_STATES).size).toBe(DISPATCH_STATES.length);
+  });
+
+  it('labels every dispatch state and keeps the terminal state distinct', () => {
+    for (const state of DISPATCH_STATES) {
+      const typed: DispatchState = state;
+      expect(DISPATCH_STATE_LABELS[typed]).toBeTruthy();
+    }
+    expect(Object.keys(DISPATCH_STATE_LABELS)).toEqual([...DISPATCH_STATES]);
+    // `running` intentionally exists in both vocabularies; `terminal` must not
+    // be confused with a user-visible execution status.
+    expect(EXECUTION_STATUSES as readonly string[]).not.toContain('terminal');
   });
 });
 

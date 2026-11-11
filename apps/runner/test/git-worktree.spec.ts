@@ -53,6 +53,7 @@ describe('GitWorktreeManager', () => {
     const repo = await initRepo(root);
     const manager = new GitWorktreeManager({
       gitBinary: 'git',
+      platform: process.platform,
       worktreeRoot: join(root, 'worktrees'),
       keepWorktrees: false,
     });
@@ -110,6 +111,7 @@ describe('GitWorktreeManager', () => {
 
     const manager = new GitWorktreeManager({
       gitBinary: 'git',
+      platform: process.platform,
       worktreeRoot: join(root, 'worktrees'),
       keepWorktrees: true,
     });
@@ -166,6 +168,7 @@ describe('GitWorktreeManager', () => {
     ]);
     const manager = new GitWorktreeManager({
       gitBinary: 'git',
+      platform: process.platform,
       worktreeRoot: join(root, 'worktrees'),
       keepWorktrees: true,
     });
@@ -183,6 +186,7 @@ describe('GitWorktreeManager', () => {
     const repo = await initRepo(root);
     const manager = new GitWorktreeManager({
       gitBinary: 'git',
+      platform: process.platform,
       worktreeRoot: join(root, 'worktrees'),
       keepWorktrees: true,
     });
@@ -207,6 +211,7 @@ describe('GitWorktreeManager', () => {
     const repo = await initRepo(root);
     const manager = new GitWorktreeManager({
       gitBinary: 'git',
+      platform: process.platform,
       worktreeRoot: join(root, 'worktrees'),
       keepWorktrees: true,
     });
@@ -227,6 +232,7 @@ describe('GitWorktreeManager', () => {
     const repo = await initRepo(root);
     const manager = new GitWorktreeManager({
       gitBinary: 'git',
+      platform: process.platform,
       worktreeRoot: join(root, 'worktrees'),
       keepWorktrees: true,
     });
@@ -243,6 +249,7 @@ describe('GitWorktreeManager', () => {
     await mkdir(subdirectory);
     const manager = new GitWorktreeManager({
       gitBinary: 'git',
+      platform: process.platform,
       worktreeRoot: join(root, 'worktrees'),
       keepWorktrees: false,
     });

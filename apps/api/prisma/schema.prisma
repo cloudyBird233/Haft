@@ -155,42 +155,49 @@ model Task {
 }
 
 model Execution {
-  id                       String                    @id @default(cuid())
-  taskId                   String
-  agentId                  String
-  runnerId                 String?
-  repositoryProjectId      String?
-  repositoryBindingId      String?
-  repositoryBindingVersion Int?
-  repositoryDefaultBranch  String?
-  runtime                  String                    @default("mock")
-  status                   String                    @default("running")
-  phase                    String                    @default("running")
-  progress                 Int                       @default(0)
-  progressMode             String                    @default("determinate")
-  exitCode                 Int?
-  summary                  String?
-  branchName               String?
-  baseCommit               String?
-  headCommit               String?
-  changedFiles             Int                       @default(0)
-  diffStat                 String                    @default("")
-  gitStatus                String                    @default("")
-  diffTruncated            Boolean                   @default(false)
-  lastRunnerSeq            Int                       @default(0)
-  startedAt                DateTime                  @default(now())
-  endedAt                  DateTime?
-  failureReason            String?
-  cancelReason             String?
-  createdAt                DateTime                  @default(now())
-  updatedAt                DateTime                  @updatedAt
-  task                     Task                      @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  agent                    Agent                     @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  runner                   Runner?                   @relation(fields: [runnerId], references: [id], onDelete: SetNull)
-  repositoryBinding        ProjectRepositoryBinding? @relation(fields: [repositoryBindingId], references: [id], onDelete: SetNull)
-  logs                     ExecutionLog[]
-  artifacts                ExecutionArtifact[]
-  activities               Activity[]
+  id                        String                     @id @default(cuid())
+  taskId                    String
+  agentId                   String
+  runnerId                  String?
+  repositoryProjectId       String?
+  repositoryBindingId       String?
+  repositoryBindingVersion  Int?
+  repositoryDefaultBranch   String?
+  repositoryPath            String?
+  repositoryPolicyVersion   String?
+  repositoryContextId       String?
+  repositoryBaseCommit      String?
+  repositoryPreparedAt      DateTime?
+  dispatchState             String                     @default("created")
+  runtime                   String                     @default("mock")
+  status                    String                     @default("running")
+  phase                     String                     @default("running")
+  progress                  Int                        @default(0)
+  progressMode              String                     @default("determinate")
+  exitCode                  Int?
+  summary                   String?
+  branchName                String?
+  baseCommit                String?
+  headCommit                String?
+  changedFiles              Int                        @default(0)
+  diffStat                  String                     @default("")
+  gitStatus                 String                     @default("")
+  diffTruncated             Boolean                    @default(false)
+  lastRunnerSeq             Int                        @default(0)
+  startedAt                 DateTime                   @default(now())
+  endedAt                   DateTime?
+  failureReason             String?
+  cancelReason              String?
+  createdAt                 DateTime                   @default(now())
+  updatedAt                 DateTime                   @updatedAt
+  task                      Task                       @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  agent                     Agent                      @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  runner                    Runner?                    @relation(fields: [runnerId], references: [id], onDelete: SetNull)
+  repositoryBinding         ProjectRepositoryBinding?  @relation(fields: [repositoryBindingId], references: [id], onDelete: SetNull)
+  logs                      ExecutionLog[]
+  artifacts                 ExecutionArtifact[]
+  activities                Activity[]
+  repositoryHandshakeEvents RepositoryHandshakeEvent[]
 
   @@index([taskId])
   @@index([agentId])
@@ -198,6 +205,24 @@ model Execution {
   @@index([repositoryBindingId])
   @@index([status])
   @@index([phase])
+  @@index([dispatchState])
+  @@index([runnerId, dispatchState])
+}
+
+/// Durable audit trail for the execution repository handshake. It never stores
+/// prompts, tokens, diffs or raw repository contents.
+model RepositoryHandshakeEvent {
+  id             String    @id @default(cuid())
+  executionId    String
+  state          String
+  bindingVersion Int?
+  policyVersion  String?
+  code           String?
+  message        String?
+  createdAt      DateTime  @default(now())
+  execution      Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+
+  @@index([executionId, createdAt])
 }
 
 /// Durable execution payload that is too large for the execution list DTO.

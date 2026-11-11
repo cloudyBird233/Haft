@@ -1,4 +1,5 @@
 import type {
+  ErrorCode,
   ExecutionPhase,
   ExecutionStartMessage,
   GitExecutionResult,
@@ -6,6 +7,7 @@ import type {
   RunnerLogEntry,
   RunnerRuntimeType,
 } from '@raft-lite/contracts';
+import type { RepositoryContext } from './repository-context';
 
 /**
  * Minimal session view shared by the deterministic Fake Runner and the real
@@ -61,8 +63,20 @@ export interface ShutdownResult {
   forced: boolean;
 }
 
+export type ExecutorAdmission =
+  { ok: true } | { ok: false; code: ErrorCode; message: string; retryable: boolean };
+
 export interface RunnerExecutor {
-  start(payload: ExecutionStartMessage['payload']): void;
+  /**
+   * Synchronous admission check performed before `execution.accepted`.
+   * It must not spawn a CLI and must cover runtime enablement, capacity and
+   * duplicate execution ids.
+   */
+  canAdmit(
+    payload: ExecutionStartMessage['payload'],
+    context: RepositoryContext,
+  ): ExecutorAdmission;
+  start(payload: ExecutionStartMessage['payload'], context: RepositoryContext): void;
   cancel(executionId: string, reason?: string): void;
   acknowledge(executionId: string, throughSeq: number): void;
   pendingLogs(executionId: string): RunnerLogEntry[];

@@ -14,6 +14,7 @@ import { createCliOutputParser, type CliLogLine, type CliOutputParser } from './
 import type {
   CancelledPayload,
   CompletedPayload,
+  ExecutorAdmission,
   ExecutorCallbacks,
   FailedPayload,
   RunnerExecutor,
@@ -31,6 +32,8 @@ import {
 import { inspectProcess, type ProcessIdentity } from './process-identity';
 import type { ExecutionRecovery } from './recovery';
 import type { ExecutionJournalPatch } from './execution-journal';
+import type { RepositoryPathPolicy } from './repository-policy';
+import type { RepositoryContext } from './repository-context';
 
 const MAX_PENDING_LOGS = 10_000;
 const CANCEL_GRACE_MS = 5_000;
@@ -49,11 +52,11 @@ export interface RealExecutorDependencies {
   terminateProcess(child: ChildProcess, force?: boolean): Promise<void>;
   git: Pick<GitWorktreeManager, 'prepare' | 'collect' | 'cleanup'>;
   /**
-   * Temporary WP-B seam. The production default returns null so a real
-   * execution fails closed until the WP-C execution-repository context
-   * supplies the canonical path. Tests inject an explicit path.
+   * The single path authority. Production always injects the instance built
+   * in `main.ts`; a missing policy is treated as REPOSITORY_POLICY_NOT_CONFIGURED
+   * so a real execution can never fall back to an unchecked path.
    */
-  resolveRepositoryPath?(payload: ExecutionStartMessage['payload']): string | null;
+  repositoryPolicy?: RepositoryPathPolicy | null;
   shutdownForceWaitMs: number;
 }
 
@@ -108,9 +111,7 @@ export class RealExecutor implements RunnerExecutor {
   private readonly spawnProcess: RealExecutorDependencies['spawnProcess'];
   private readonly inspectProcess: RealExecutorDependencies['inspectProcess'];
   private readonly terminateProcess: RealExecutorDependencies['terminateProcess'];
-  private readonly resolveRepositoryPath: NonNullable<
-    RealExecutorDependencies['resolveRepositoryPath']
-  >;
+  private readonly repositoryPolicy: RepositoryPathPolicy | null;
   private readonly shutdownForceWaitMs: number;
 
   constructor(
@@ -124,46 +125,58 @@ export class RealExecutor implements RunnerExecutor {
     this.spawnProcess = dependencies.spawnProcess ?? spawn;
     this.inspectProcess = dependencies.inspectProcess ?? inspectProcess;
     this.terminateProcess = dependencies.terminateProcess ?? terminateProcess;
-    this.resolveRepositoryPath = dependencies.resolveRepositoryPath ?? (() => null);
+    this.repositoryPolicy = dependencies.repositoryPolicy ?? null;
     this.shutdownForceWaitMs = dependencies.shutdownForceWaitMs ?? SHUTDOWN_FORCE_WAIT_MS;
   }
 
-  start(payload: ExecutionStartMessage['payload']): void {
+  canAdmit(
+    payload: ExecutionStartMessage['payload'],
+    _context: RepositoryContext,
+  ): ExecutorAdmission {
     if (!this.config.realRuntimes.includes(payload.runtime)) {
-      this.failBeforeStart(
-        payload,
-        `RUNTIME_NOT_ENABLED: ${payload.runtime} is not enabled for this runner`,
-      );
-      return;
+      return {
+        ok: false,
+        code: 'REPOSITORY_CONTEXT_NOT_READY',
+        message: `RUNTIME_NOT_ENABLED: ${payload.runtime} is not enabled for this runner`,
+        retryable: false,
+      };
     }
+    if (this.sessions.has(payload.executionId)) {
+      return { ok: true };
+    }
+    if (this.sessions.size >= this.config.maxConcurrentExecutions) {
+      return {
+        ok: false,
+        code: 'REPOSITORY_CONTEXT_NOT_READY',
+        message: 'RUNNER_BUSY: maximum concurrent executions reached',
+        retryable: true,
+      };
+    }
+    return { ok: true };
+  }
+
+  start(payload: ExecutionStartMessage['payload'], context: RepositoryContext): void {
     if (this.sessions.has(payload.executionId)) {
       return;
     }
-    if (this.sessions.size >= this.config.maxConcurrentExecutions) {
-      this.failBeforeStart(payload, 'RUNNER_BUSY: maximum concurrent executions reached');
-      return;
-    }
-
-    // WP-B transition seam: without a server-supplied repository context the
-    // real executor must fail before creating a session, journal entry or
-    // worktree. There is deliberately no cwd fallback.
-    const projectPath = this.resolveRepositoryPath(payload);
-    if (!projectPath) {
+    // Admission has already passed. A missing context here is a programming
+    // error, not a user-facing pre-start rejection.
+    if (!context?.canonicalPath) {
       this.failBeforeStart(
         payload,
-        'PROJECT_BINDING_UNSUPPORTED: No repository context is available; the repository handshake is required before a real execution can start',
+        'REPOSITORY_CONTEXT_NOT_READY: No repository context is available on the real execution session',
         false,
       );
       return;
     }
 
     const session = this.createSession(payload);
-    session.projectPath = projectPath;
+    session.projectPath = context.canonicalPath;
     this.sessions.set(session.executionId, session);
     this.emitPhase(session, 'preparing', 'Runner accepted the execution');
     this.log(session, 'system', 'info', `Real ${payload.runtime} runner accepted the execution.`);
 
-    void this.prepareAndRun(session, payload).catch((error: unknown) => {
+    void this.prepareAndRun(session, payload, context).catch((error: unknown) => {
       if (session.cancelled) {
         void this.finalize(session, 'cancelled', {
           reason: session.cancelReason ?? 'Cancelled by operator',
@@ -287,6 +300,7 @@ export class RealExecutor implements RunnerExecutor {
   private async prepareAndRun(
     session: RealSession,
     payload: ExecutionStartMessage['payload'],
+    context: RepositoryContext,
   ): Promise<void> {
     // Invariant established by `start()`. Never pass '' to git.prepare: it
     // would resolve to the runner process cwd and silently reintroduce the
@@ -297,12 +311,22 @@ export class RealExecutor implements RunnerExecutor {
         'No repository context is available on the real execution session',
       );
     }
+    if (!this.repositoryPolicy) {
+      throw new RunnerFailure(
+        'REPOSITORY_POLICY_NOT_CONFIGURED',
+        'The runner has no repository path policy',
+      );
+    }
+    // TOCTOU guard: re-check allowed-root containment and bidirectional
+    // worktree/recovery isolation immediately before the journal/worktree.
+    await this.repositoryPolicy.assertStillAllowed(context.canonicalPath);
     await this.beginJournal(session, payload);
 
     const worktree = await this.git.prepare(
       session.projectPath,
       payload.projectId,
       payload.executionId,
+      { baseCommit: context.baseCommit },
     );
     session.worktree = worktree;
     await this.persistJournal(

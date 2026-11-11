@@ -6,6 +6,7 @@ import type {
   RuntimeStatus,
 } from './agent-runtime.interface';
 import { RunnerRegistryService } from '../runners/runner-registry.service';
+import type { RepositoryHandshakeService } from '../runners/repository-handshake.service';
 
 /**
  * Server-side adapter for a runner-hosted CLI runtime.
@@ -19,6 +20,7 @@ export class RunnerRuntimeService implements AgentRuntime {
   constructor(
     readonly type: RunnerRuntimeType,
     private readonly runners: RunnerRegistryService,
+    private readonly handshake: RepositoryHandshakeService,
   ) {}
 
   async start(context: RuntimeContext): Promise<void> {
@@ -26,7 +28,7 @@ export class RunnerRuntimeService implements AgentRuntime {
       throw new Error(`${this.type} runtime requires a connected runner`);
     }
     const prompt = buildPrompt(context);
-    await this.runners.dispatchStart({
+    await this.handshake.dispatch({
       runnerId: context.runnerId,
       executionId: context.executionId,
       runtime: this.type,

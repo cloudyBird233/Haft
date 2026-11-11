@@ -2,6 +2,7 @@ import type {
   ActivityType,
   AgentRuntimeType,
   AgentStatus,
+  DispatchState,
   ErrorCode,
   ExecutionPhase,
   ExecutionStatus,
@@ -257,6 +258,12 @@ export interface ExecutionDto {
   repositoryBindingId: string | null;
   repositoryBindingVersion: number | null;
   repositoryDefaultBranch: string | null;
+  repositoryPath: string | null;
+  repositoryPolicyVersion: string | null;
+  repositoryContextId: string | null;
+  repositoryBaseCommit: string | null;
+  repositoryPreparedAt: string | null;
+  dispatchState: DispatchState;
   status: ExecutionStatus;
   phase: ExecutionPhase;
   progress: number;

@@ -12,6 +12,7 @@ import {
   type CompletedPayload,
   type FailedPayload,
 } from '../src/fake-executor';
+import type { RepositoryContext } from '../src/repository-context';
 
 interface Captured {
   phases: Array<{ executionId: string; phase: ExecutionPhase; message?: string | null }>;
@@ -69,6 +70,25 @@ function startPayload(
   };
 }
 
+function repositoryContext(overrides: Partial<RepositoryContext> = {}): RepositoryContext {
+  return {
+    contextId: 'context_runner_test',
+    executionId: 'execution_runner_test',
+    projectId: 'project_demo',
+    bindingId: 'binding_runner_test',
+    bindingVersion: 1,
+    policyVersion: 'policy-v1',
+    configuredPath: 'C:\\repo\\demo',
+    canonicalPath: 'C:\\repo\\demo',
+    defaultBranch: 'main',
+    baseCommit: 'a'.repeat(40),
+    state: 'ready',
+    createdAt: Date.now(),
+    lastUsedAt: Date.now(),
+    ...overrides,
+  };
+}
+
 function createExecutor(config = makeConfig()): { executor: FakeExecutor; captured: Captured } {
   const captured: Captured = {
     phases: [],
@@ -114,7 +134,7 @@ async function waitFor(check: () => boolean, timeoutMs = 3000): Promise<void> {
 describe('FakeExecutor', () => {
   it('emits phases, logs, progress and a completed result without a real model', async () => {
     const { executor, captured } = createExecutor();
-    executor.start(startPayload());
+    executor.start(startPayload(), repositoryContext());
 
     await waitFor(() => captured.completed.length === 1);
 
@@ -143,7 +163,7 @@ describe('FakeExecutor', () => {
 
   it('keeps unacknowledged logs for replay and drops acknowledged ones', async () => {
     const { executor, captured } = createExecutor();
-    executor.start(startPayload());
+    executor.start(startPayload(), repositoryContext());
     await waitFor(() => captured.logs.length >= 2);
 
     const pending = executor.pendingLogs('execution_runner_test');
@@ -158,7 +178,7 @@ describe('FakeExecutor', () => {
 
   it('cancels the execution and never reports completion', async () => {
     const { executor, captured } = createExecutor(makeConfig({ stepMs: 100 }));
-    executor.start(startPayload());
+    executor.start(startPayload(), repositoryContext());
     await waitFor(() => captured.logs.length >= 1);
     executor.cancel('execution_runner_test', 'Stop requested');
 
@@ -174,6 +194,7 @@ describe('FakeExecutor', () => {
       startPayload({
         taskTitle: 'Failure path [fail]',
       }),
+      repositoryContext(),
     );
 
     await waitFor(() => captured.failed.length === 1);
@@ -186,7 +207,7 @@ describe('FakeExecutor', () => {
 
   it('reports active sessions in a snapshot while running', async () => {
     const { executor, captured } = createExecutor(makeConfig({ stepMs: 200 }));
-    executor.start(startPayload());
+    executor.start(startPayload(), repositoryContext());
     const snapshot = executor.snapshot();
     expect(snapshot).toHaveLength(1);
     expect(snapshot[0]).toMatchObject({
@@ -200,7 +221,7 @@ describe('FakeExecutor', () => {
 
   it('waits for each session to terminate during shutdown', async () => {
     const { executor, captured } = createExecutor(makeConfig({ stepMs: 1000 }));
-    executor.start(startPayload());
+    executor.start(startPayload(), repositoryContext());
     await waitFor(() => captured.logs.length >= 1);
 
     const startedAt = Date.now();

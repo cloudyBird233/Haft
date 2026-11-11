@@ -33,6 +33,8 @@ import { ActivitiesService } from '../activities/activities.service';
 import { EventsGateway } from '../events/events.gateway';
 import type { RuntimeEvent } from '../runtime/agent-runtime.interface';
 import { RuntimeRegistryService } from '../runtime/runtime-registry.service';
+import { RepositoryHandshakeService } from '../runners/repository-handshake.service';
+import { RepositoryDispatchError } from '../runners/repository-errors';
 
 const RUNNER_CANCEL_TIMEOUT_MS = Math.max(
   5_000,
@@ -50,6 +52,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     private readonly events: EventsGateway,
     private readonly logger: AppLogger,
     private readonly runtimes: RuntimeRegistryService,
+    private readonly handshake: RepositoryHandshakeService,
   ) {}
 
   onModuleInit(): void {
@@ -160,6 +163,10 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       bindingVersion: number;
       validatedBindingVersion: number | null;
       status: string;
+      canonicalPath: string | null;
+      policyVersion: string | null;
+      platform: string | null;
+      validatedByRunnerId: string | null;
     } | null = null;
     if (requiresRunner) {
       if (!task.assignee.computerId || !task.assignee.computer) {
@@ -188,6 +195,10 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
           bindingVersion: true,
           validatedBindingVersion: true,
           status: true,
+          canonicalPath: true,
+          policyVersion: true,
+          platform: true,
+          validatedByRunnerId: true,
         },
       });
       if (!repositoryBinding) {
@@ -212,6 +223,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
           HttpStatus.CONFLICT,
         );
       }
+      assertBindingRunnerIdentity(repositoryBinding, runnerId, this.runtimes);
     }
 
     const runnerComputerId = requiresRunner ? task.assignee.computerId : null;
@@ -244,6 +256,10 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         bindingVersion: number;
         validatedBindingVersion: number | null;
         status: string;
+        canonicalPath: string | null;
+        policyVersion: string | null;
+        platform: string | null;
+        validatedByRunnerId: string | null;
       } | null = null;
       if (requiresRunner) {
         if (!runnerComputerId) {
@@ -265,6 +281,10 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
             bindingVersion: true,
             validatedBindingVersion: true,
             status: true,
+            canonicalPath: true,
+            policyVersion: true,
+            platform: true,
+            validatedByRunnerId: true,
           },
         });
         if (!currentBinding) {
@@ -278,6 +298,14 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         ) {
           throw bindingNotReady(currentBinding);
         }
+        if (!runnerId) {
+          throw new AppException(
+            'RUNNER_OFFLINE',
+            'No connected runner is available for this execution',
+            HttpStatus.CONFLICT,
+          );
+        }
+        assertBindingRunnerIdentity(currentBinding, runnerId, this.runtimes);
         bindingSnapshot = currentBinding;
       }
 
@@ -297,6 +325,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
           phase: requiresRunner ? 'queued' : 'running',
           progress: 0,
           progressMode: requiresRunner ? 'indeterminate' : 'determinate',
+          dispatchState: requiresRunner ? 'created' : 'running',
         },
         include: executionRelations,
       });
@@ -383,10 +412,15 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         'RUNTIME_START_FAILED',
         'The runtime could not start this execution',
         HttpStatus.INTERNAL_SERVER_ERROR,
+        error instanceof RepositoryDispatchError
+          ? { code: error.code, retryable: error.retryable }
+          : undefined,
       );
     }
 
-    return executionDto;
+    // Re-read after a successful dispatch so the response reflects the
+    // post-handshake dispatch state and the prepared repository snapshot.
+    return this.getExecutionDto(execution.id);
   }
 
   async list(query: ExecutionListQuery): Promise<ListDto<ExecutionDto>> {
@@ -519,6 +553,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
           phase: 'cancelled',
           endedAt,
           cancelReason: reason,
+          dispatchState: 'terminal',
         },
       }),
       this.prisma.task.update({
@@ -661,29 +696,55 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     error: unknown;
   }): Promise<void> {
     const endedAt = new Date();
-    const failureReason = 'The runtime failed to start this execution';
-    await this.prisma.$transaction([
-      this.prisma.execution.update({
+    const failureReason = formatStartFailureReason(input.error);
+    const applied = await this.prisma.$transaction(async (tx) => {
+      const current = await tx.execution.findUnique({
         where: { id: input.executionId },
+        select: { status: true },
+      });
+      // Idempotent: a recovered failure or a duplicate caller may already have
+      // made the row terminal. Never overwrite its reason or restore twice.
+      if (!current || current.status !== 'running') {
+        return false;
+      }
+      const updated = await tx.execution.updateMany({
+        where: { id: input.executionId, status: 'running' },
         data: {
           status: 'failed',
           phase: 'failed',
           endedAt,
           failureReason,
+          dispatchState: 'terminal',
         },
-      }),
-      this.prisma.task.update({
+      });
+      if (updated.count === 0) {
+        return false;
+      }
+      await tx.task.update({
         where: { id: input.taskId },
         data: { status: input.previousTaskStatus },
-      }),
-      this.prisma.agent.update({
+      });
+      await tx.agent.update({
         where: { id: input.agentId },
         data: {
           status: input.previousAgentStatus,
           lastActiveAt: input.previousAgentLastActiveAt,
         },
-      }),
-    ]);
+      });
+      return true;
+    });
+
+    if (!applied) {
+      this.logger.warn({
+        eventType: 'runtime.start_rollback_skipped',
+        message: 'Execution start failure was already handled by another path',
+        taskId: input.taskId,
+        agentId: input.agentId,
+        executionId: input.executionId,
+        status: 'warning',
+      });
+      return;
+    }
 
     await this.appendLog(input.executionId, 'error', `Execution failed to start: ${failureReason}`);
     const [executionDto, taskDto, agentDto] = await Promise.all([
@@ -865,6 +926,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
           progress: outcome === 'completed' ? 100 : current.progress,
           progressMode: outcome === 'completed' ? 'determinate' : current.progressMode,
           endedAt,
+          dispatchState: 'terminal',
           ...(metadata.exitCode !== undefined ? { exitCode: metadata.exitCode } : {}),
           ...(metadata.summary !== undefined ? { summary: metadata.summary } : {}),
           ...(outcome === 'failed' && metadata.reason ? { failureReason: metadata.reason } : {}),
@@ -912,6 +974,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     });
 
     this.runtimes.noteFinished(current.runtime as AgentRuntimeType, id);
+    this.handshake.noteTerminal(id);
 
     if (outcome === 'failed' && metadata.reason) {
       const errorLog = await this.prisma.executionLog.findFirst({
@@ -1085,10 +1148,73 @@ interface BindingState {
   bindingVersion: number;
   validatedBindingVersion: number | null;
   status: string;
+  canonicalPath: string | null;
+  policyVersion: string | null;
+  platform: string | null;
+  validatedByRunnerId: string | null;
 }
 
 function isReadyBinding(binding: BindingState): boolean {
-  return binding.status === 'ready' && binding.validatedBindingVersion === binding.bindingVersion;
+  return (
+    binding.status === 'ready' &&
+    binding.validatedBindingVersion === binding.bindingVersion &&
+    Boolean(binding.canonicalPath) &&
+    Boolean(binding.policyVersion) &&
+    Boolean(binding.platform) &&
+    Boolean(binding.validatedByRunnerId)
+  );
+}
+
+/**
+ * A ready binding is scoped to the Runner that validated it and to that
+ * Runner's live platform. It never transfers to a replacement Runner.
+ */
+function assertBindingRunnerIdentity(
+  binding: BindingState,
+  runnerId: string,
+  runtimes: RuntimeRegistryService,
+): void {
+  const live = runtimes.getLiveRunnerRegistration(runnerId);
+  if (!live) {
+    throw new AppException(
+      ERROR_CODES.RUNNER_OFFLINE,
+      'The assigned runner is no longer connected',
+      HttpStatus.CONFLICT,
+      { runnerId },
+    );
+  }
+  if (
+    binding.validatedByRunnerId !== runnerId ||
+    !binding.platform ||
+    binding.platform !== live.platform
+  ) {
+    throw new AppException(
+      ERROR_CODES.PROJECT_BINDING_NOT_READY,
+      'The repository binding must be validated on the selected runner and platform',
+      HttpStatus.CONFLICT,
+      {
+        bindingId: binding.id,
+        bindingVersion: binding.bindingVersion,
+        validatedByRunnerId: binding.validatedByRunnerId,
+        bindingPlatform: binding.platform,
+        selectedRunnerId: runnerId,
+        selectedRunnerPlatform: live.platform,
+      },
+    );
+  }
+}
+
+function formatStartFailureReason(error: unknown): string {
+  if (error instanceof RepositoryDispatchError) {
+    // The error may already carry the code prefix (for example a message
+    // forwarded verbatim from the Runner). Never render it twice.
+    const prefix = `${error.code}: `;
+    const message = error.message.startsWith(prefix)
+      ? error.message.slice(prefix.length)
+      : error.message;
+    return `${error.code}: ${message}`.slice(0, 2000);
+  }
+  return 'The runtime failed to start this execution';
 }
 
 function bindingMissing(projectId: string, computerId: string): AppException {
@@ -1124,6 +1250,8 @@ function runtimeUnavailable(
     'RUNNER_NOT_REGISTERED',
     'RUNNER_OFFLINE',
     'COMPUTER_OFFLINE',
+    'PROJECT_BINDING_UNSUPPORTED',
+    'PROJECT_BINDING_NOT_READY',
   ]);
   const code = reasonCode ?? 'RUNTIME_NOT_AVAILABLE';
   return new AppException(
