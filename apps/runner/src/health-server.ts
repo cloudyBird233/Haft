@@ -20,14 +20,17 @@ export function startHealthServer(
       return;
     }
     const connected = client.isConnected();
-    const ready = request.url !== '/ready' || connected;
+    const recoveryBlocked = client.isRecoveryBlocked();
+    const ready = request.url !== '/ready' || (connected && !recoveryBlocked);
     response.writeHead(ready ? 200 : 503, { 'content-type': 'application/json' });
     response.end(
       JSON.stringify({
-        status: ready ? 'ok' : 'connecting',
+        status: ready ? 'ok' : recoveryBlocked ? 'degraded' : 'connecting',
         runnerId,
         mode: client.mode(),
         connected,
+        recoveryBlocked,
+        recoveryBlockedReason: client.recoveryBlockedReason(),
         activeExecutionIds: client.activeExecutionIds(),
         pendingLogCount: client.pendingLogCount(),
         timestamp: new Date().toISOString(),

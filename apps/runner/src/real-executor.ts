@@ -30,11 +30,21 @@ import {
   terminateProcess,
   type ResolvedExecutable,
 } from './process-utils';
-import { inspectProcess, waitForProcessExit, type ProcessIdentity } from './process-identity';
+import {
+  inspectProcess,
+  waitForProcessExit,
+  type ProcessIdentity,
+} from './process-identity';
+import { guardPathFor, type TreeTerminationResult } from './process-guard';
 import type { ExecutionRecovery } from './recovery';
 import type { ExecutionJournalPatch } from './execution-journal';
 import type { RepositoryPathPolicy } from './repository-policy';
 import type { RepositoryContext } from './repository-context';
+import {
+  prepareProcessSupervisor,
+  spawnSupervisedProcess,
+  type SupervisedProcess,
+} from './supervised-process';
 
 const MAX_PENDING_LOGS = 10_000;
 const CANCEL_GRACE_MS = 5_000;
@@ -52,6 +62,13 @@ export interface RealExecutorDependencies {
   resolveExecutable(command: string): Promise<ResolvedExecutable>;
   probeAuthentication(runtime: RunnerRuntimeType, executable: string): Promise<AuthProbeResult>;
   spawnProcess(command: string, args: readonly string[], options: SpawnOptions): ChildProcess;
+  /** Test seam; production builds CLI arguments from the protocol payload. */
+  buildArgs(
+    runtime: RunnerRuntimeType,
+    payload: ExecutionStartMessage['payload'],
+    worktreePath: string,
+    config: RunnerConfig,
+  ): string[];
   inspectProcess(pid: number): Promise<ProcessIdentity | null>;
   terminateProcess(child: ChildProcess, force?: boolean): Promise<void>;
   waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean>;
@@ -73,6 +90,7 @@ interface RealSession extends RunnerSessionView {
   timedOut: boolean;
   finished: boolean;
   child: ChildProcess | null;
+  managed: SupervisedProcess | null;
   parser: CliOutputParser;
   worktree: WorktreeInfo | null;
   projectPath: string | null;
@@ -95,6 +113,12 @@ interface RealSession extends RunnerSessionView {
   identityPending: boolean;
   /** A close event that arrived while the identity was still being persisted. */
   pendingExit: { code: number | null; signal: NodeJS.Signals | null } | null;
+  /** Random token that binds this session to one supervisor guard. */
+  launchToken: string;
+  /** True only after the whole protected tree is proven gone. */
+  treeConfirmedGone: boolean;
+  /** Last verified termination result, for diagnostics and shutdown. */
+  termination: TreeTerminationResult | null;
 }
 
 interface FinalizeResult {
@@ -130,6 +154,8 @@ export class RealExecutor implements RunnerExecutor {
   private readonly resolveExecutable: RealExecutorDependencies['resolveExecutable'];
   private readonly probeAuthentication: RealExecutorDependencies['probeAuthentication'];
   private readonly spawnProcess: RealExecutorDependencies['spawnProcess'];
+  private readonly buildArgs: RealExecutorDependencies['buildArgs'];
+  private readonly supervised: boolean;
   private readonly inspectProcess: RealExecutorDependencies['inspectProcess'];
   private readonly terminateProcess: RealExecutorDependencies['terminateProcess'];
   private readonly waitForProcessExit: RealExecutorDependencies['waitForProcessExit'];
@@ -145,7 +171,9 @@ export class RealExecutor implements RunnerExecutor {
     this.git = dependencies.git ?? new GitWorktreeManager(config);
     this.resolveExecutable = dependencies.resolveExecutable ?? resolveExecutable;
     this.probeAuthentication = dependencies.probeAuthentication ?? probeAuthentication;
+    this.supervised = dependencies.spawnProcess === undefined;
     this.spawnProcess = dependencies.spawnProcess ?? spawn;
+    this.buildArgs = dependencies.buildArgs ?? buildCliArgs;
     this.inspectProcess = dependencies.inspectProcess ?? inspectProcess;
     this.terminateProcess = dependencies.terminateProcess ?? terminateProcess;
     this.waitForProcessExit = dependencies.waitForProcessExit ?? waitForProcessExit;
@@ -297,10 +325,10 @@ export class RealExecutor implements RunnerExecutor {
       return;
     }
 
-    void this.terminateProcess(child, false);
+    void this.requestTermination(session, false);
     session.forceKillTimer = setTimeout(() => {
       if (!session.finished) {
-        void this.terminateProcess(child, true);
+        void this.requestTermination(session, true);
       }
     }, CANCEL_GRACE_MS);
     this.scheduleTerminalFallback(session, 'cancelled');
@@ -376,7 +404,7 @@ export class RealExecutor implements RunnerExecutor {
           'Graceful shutdown timed out; force-terminating the CLI process tree.',
         );
         if (session.child) {
-          await this.terminateProcess(session.child, true);
+          await this.requestTermination(session, true);
         } else {
           await this.finalize(session, 'cancelled', {
             reason: `${reason}: the CLI had not started`,
@@ -419,6 +447,11 @@ export class RealExecutor implements RunnerExecutor {
     // TOCTOU guard: re-check allowed-root containment and bidirectional
     // worktree/recovery isolation immediately before the journal/worktree.
     await this.repositoryPolicy.assertStillAllowed(context.canonicalPath);
+    // Resolve/compile the process supervisor before any durable launch intent
+    // or CLI spawn. Failure is a pre-execution failure, never an orphan.
+    if (this.supervised) {
+      await prepareProcessSupervisor();
+    }
     await this.beginJournal(session, payload);
     this.assertJournalUsable(session);
 
@@ -429,6 +462,12 @@ export class RealExecutor implements RunnerExecutor {
       { baseCommit: context.baseCommit },
     );
     this.assertJournalUsable(session);
+    if (this.recovery?.isWorktreeBlocked(worktree.path)) {
+      throw new RunnerFailure(
+        'RECOVERY_BLOCKED_WORKTREE',
+        `Worktree ${worktree.path} belongs to an uncertain recovered execution and must not be reused`,
+      );
+    }
     session.worktree = worktree;
     await this.persistJournal(
       session,
@@ -481,7 +520,7 @@ export class RealExecutor implements RunnerExecutor {
       return;
     }
 
-    const args = buildCliArgs(payload.runtime, payload, worktree.path, this.config);
+    const args = this.buildArgs(payload.runtime, payload, worktree.path, this.config);
     this.log(
       session,
       'system',
@@ -491,17 +530,35 @@ export class RealExecutor implements RunnerExecutor {
     this.assertJournalUsable(session);
 
     let child: ChildProcess;
-    try {
-      child = this.spawnProcess(executable, args, {
-        cwd: worktree.path,
-        env: buildCliEnvironment(),
-        shell: false,
-        windowsHide: true,
-        detached: process.platform !== 'win32',
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (error) {
-      throw new RunnerFailure('CLI_SPAWN_FAILED', errorMessage(error));
+    if (this.supervised) {
+      try {
+        const managed = await spawnSupervisedProcess({
+          command: executable,
+          args,
+          cwd: worktree.path,
+          env: buildCliEnvironment(),
+          executionId: payload.executionId,
+          launchToken: session.launchToken,
+          recoveryRoot: this.config.recoveryRoot,
+        });
+        session.managed = managed;
+        child = managed.child;
+      } catch (error) {
+        throw new RunnerFailure('CLI_SPAWN_FAILED', errorMessage(error));
+      }
+    } else {
+      try {
+        child = this.spawnProcess(executable, args, {
+          cwd: worktree.path,
+          env: buildCliEnvironment(),
+          shell: false,
+          windowsHide: true,
+          detached: process.platform !== 'win32',
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } catch (error) {
+        throw new RunnerFailure('CLI_SPAWN_FAILED', errorMessage(error));
+      }
     }
 
     session.child = child;
@@ -519,12 +576,11 @@ export class RealExecutor implements RunnerExecutor {
     child.stdout?.on('data', onOutput('stdout'));
     child.stderr?.on('data', onOutput('stderr'));
 
-    child.stdin?.on('error', () => {
-      // The CLI may exit before consuming the whole prompt; the close handler
-      // reports the real outcome.
+    child.stdin?.on('error', (error) => {
+      this.handleStdinFailure(session, error);
     });
     child.once('error', (error) => {
-      this.fail(session, `CLI_SPAWN_FAILED: ${errorMessage(error)}`);
+      this.handleChildError(session, error);
     });
     child.once('close', (code, signal) => {
       void this.finishFromClose(session, code, signal);
@@ -566,19 +622,19 @@ export class RealExecutor implements RunnerExecutor {
         'error',
         `CLI exceeded the ${timeoutMs}ms timeout and will be terminated.`,
       );
-      void this.terminateProcess(child, true);
+      void this.requestTermination(session, true);
       this.scheduleTerminalFallback(session, 'timeout');
     }, timeoutMs);
 
     try {
       child.stdin?.end(payload.prompt);
     } catch (error) {
-      this.fail(session, `CLI_STDIN_FAILED: ${errorMessage(error)}`);
+      this.handleStdinFailure(session, error);
       return;
     }
 
     if (session.cancelled) {
-      void this.terminateProcess(child, true);
+      void this.requestTermination(session, true);
       this.scheduleTerminalFallback(session, 'cancelled');
     }
   }
@@ -595,6 +651,10 @@ export class RealExecutor implements RunnerExecutor {
       // Never decide a terminal outcome before the PID identity is durable;
       // otherwise a fast exit could hide a failed identity write.
       session.pendingExit = { code, signal };
+      return;
+    }
+
+    if (!(await this.confirmTreeAfterClose(session))) {
       return;
     }
 
@@ -639,6 +699,9 @@ export class RealExecutor implements RunnerExecutor {
     result: FinalizeResult,
   ): Promise<void> {
     if (session.finished) return;
+    if (!(await this.confirmTreeAfterClose(session))) {
+      return;
+    }
     session.finished = true;
     session.identityPending = false;
     session.pendingExit = null;
@@ -675,8 +738,9 @@ export class RealExecutor implements RunnerExecutor {
     // A completed/cancelled execution is only reported after its terminal
     // journal record is durable. If the journal cannot be finalized, surface a
     // failure instead of reporting a success the recovery scan cannot confirm.
+    let journalFinalized = false;
     try {
-      await this.finishJournal(session, finalOutcome);
+      journalFinalized = await this.finishJournal(session, finalOutcome);
     } catch (error) {
       const journalFinishError = errorMessage(error);
       finalOutcome = 'failed';
@@ -692,6 +756,22 @@ export class RealExecutor implements RunnerExecutor {
     }
 
     session.phase = finalOutcome;
+
+    if (!journalFinalized) {
+      // F-06: the active journal is the authority. Without a durable terminal
+      // record, no execution.failed/completed event may be reported: the next
+      // startup scan must retry the unresolved execution. Keep the session so
+      // heartbeats and snapshots still show that work is outstanding.
+      this.uncertainOrphans.add(session.executionId);
+      this.log(
+        session,
+        'system',
+        'error',
+        'The recovery journal could not be finalized; the execution stays active and no terminal event will be sent.',
+        false,
+      );
+      return;
+    }
 
     if (finalOutcome === 'completed') {
       const summary =
@@ -753,11 +833,147 @@ export class RealExecutor implements RunnerExecutor {
 
   private fail(session: RealSession, reason: string): void {
     if (session.finished) return;
+    const child = session.child;
+    const processMayExist = Boolean(child?.pid) && !this.childExited(child);
+    if (child && processMayExist) {
+      // A JavaScript error is not evidence that the OS process exited.
+      void this.abortSpawnedProcess(session, child, reason);
+      return;
+    }
     void this.finalize(session, 'failed', {
       reason,
       exitCode: session.exitCode,
       summary: session.parser.lastSummary(),
     });
+  }
+
+  private handleChildError(session: RealSession, error: unknown): void {
+    if (session.finished) return;
+    const child = session.child;
+    if (!child?.pid) {
+      // No process identifier was ever exposed: the spawn itself failed before
+      // a CLI existed. Recording a failed journal is safe.
+      this.fail(session, `CLI_SPAWN_FAILED: ${errorMessage(error)}`);
+      return;
+    }
+    void this.abortSpawnedProcess(
+      session,
+      child,
+      `CLI_SPAWN_FAILED: ${errorMessage(error)}`,
+    );
+  }
+
+  private handleStdinFailure(session: RealSession, error: unknown): void {
+    if (session.finished || session.journalAborted) return;
+    const child = session.child;
+    if (!child?.pid) {
+      this.fail(session, `CLI_STDIN_FAILED: ${errorMessage(error)}`);
+      return;
+    }
+    void this.abortSpawnedProcess(
+      session,
+      child,
+      `CLI_STDIN_FAILED: ${errorMessage(error)}`,
+    );
+  }
+
+  private childExited(child: ChildProcess | null): boolean {
+    return Boolean(child && (child.exitCode !== null || child.signalCode !== null));
+  }
+
+  /**
+   * A close event only proves that the supervisor/root exited. Before any
+   * terminal journal write, the protected tree must be proven gone.
+   */
+  private async confirmTreeAfterClose(session: RealSession): Promise<boolean> {
+    if (session.treeConfirmedGone) return true;
+    if (!session.managed) {
+      // Legacy injected child (unit tests). Production never takes this path.
+      session.treeConfirmedGone = true;
+      return true;
+    }
+    const verification = await session.managed.verifyTreeGone(5_000);
+    if (!verification.confirmed) {
+      this.markUncertain(
+        session,
+        `PROCESS_TREE_NOT_CONFIRMED: ${verification.reason}`,
+      );
+      return false;
+    }
+    session.treeConfirmedGone = true;
+    return true;
+  }
+
+  private async requestTermination(
+    session: RealSession,
+    force: boolean,
+  ): Promise<TreeTerminationResult> {
+    if (session.managed) {
+      let result: TreeTerminationResult;
+      try {
+        result = await session.managed.terminate(force);
+      } catch (error) {
+        result = {
+          requested: true,
+          confirmed: false,
+          killIssued: false,
+          identityMismatch: false,
+          reason: `Termination threw: ${errorMessage(error)}`,
+          supervisor: null,
+          cli: null,
+          groupMemberCount: 0,
+          cgroupMemberCount: 0,
+        };
+      }
+      session.termination = result;
+      if (result.confirmed) {
+        session.treeConfirmedGone = true;
+      }
+      return result;
+    }
+
+    const child = session.child;
+    if (!child?.pid || this.childExited(child)) {
+      session.treeConfirmedGone = true;
+      const result: TreeTerminationResult = {
+        requested: true,
+        confirmed: true,
+        killIssued: false,
+        identityMismatch: false,
+        reason: 'The CLI process had already exited',
+        supervisor: null,
+        cli: null,
+        groupMemberCount: 0,
+        cgroupMemberCount: 0,
+      };
+      session.termination = result;
+      return result;
+    }
+    let error: string | null = null;
+    try {
+      await this.terminateProcess(child, force);
+      const exited = await this.waitForProcessExit(child.pid, JOURNAL_ABORT_CONFIRM_MS);
+      if (!exited && !this.childExited(child)) {
+        error = `PID ${child.pid} did not exit after termination`;
+      }
+    } catch (caught) {
+      error = errorMessage(caught);
+    }
+    const confirmed = !error || this.childExited(child);
+    session.treeConfirmedGone = confirmed;
+    const result: TreeTerminationResult = {
+      requested: true,
+      confirmed,
+      killIssued: true,
+      identityMismatch: false,
+      reason: error ?? 'The CLI process tree was terminated and its exit was confirmed',
+      supervisor: null,
+      cli: null,
+      groupMemberCount: 0,
+      cgroupMemberCount: 0,
+    };
+    session.termination = result;
+    return result;
   }
 
   private failBeforeStart(
@@ -779,23 +995,49 @@ export class RealExecutor implements RunnerExecutor {
   private scheduleTerminalFallback(session: RealSession, outcome: 'cancelled' | 'timeout'): void {
     if (session.fallbackTimer) return;
     session.fallbackTimer = setTimeout(() => {
-      if (session.finished) return;
-      if (session.child) {
-        void this.terminateProcess(session.child, true);
-      }
-      if (outcome === 'timeout') {
-        this.fail(
-          session,
-          `CLI_TIMEOUT: the ${session.runtime} CLI did not exit after being terminated`,
-        );
-        return;
-      }
-      void this.finalize(session, 'cancelled', {
-        reason: session.cancelReason ?? 'Cancelled by operator',
+      void this.handleTerminalFallback(session, outcome);
+    }, TERMINAL_FALLBACK_MS);
+  }
+
+  /**
+   * The 15s fallback is only a retrigger for cleanup. It never assumes the
+   * process exited. A terminal journal write is allowed only after the whole
+   * protected tree is verified gone.
+   */
+  private async handleTerminalFallback(
+    session: RealSession,
+    outcome: 'cancelled' | 'timeout',
+  ): Promise<void> {
+    if (session.finished) return;
+    session.fallbackTimer = null;
+    const result = await this.requestTermination(session, true);
+    if (session.finished) return;
+    if (!result.confirmed) {
+      this.markUncertain(
+        session,
+        `${
+          outcome === 'timeout'
+            ? `CLI_TIMEOUT: the ${session.runtime} CLI exceeded its timeout`
+            : 'CLI_CANCEL_UNCONFIRMED: cancellation was requested'
+        }; the protected process tree could not be confirmed terminated (${
+          result.reason
+        }); the recovery journal was left active for manual recovery`,
+      );
+      return;
+    }
+    if (outcome === 'timeout') {
+      await this.finalize(session, 'failed', {
+        reason: `CLI_TIMEOUT: the ${session.runtime} CLI exceeded its execution timeout`,
         exitCode: session.exitCode,
         summary: session.parser.lastSummary(),
       });
-    }, TERMINAL_FALLBACK_MS);
+      return;
+    }
+    await this.finalize(session, 'cancelled', {
+      reason: session.cancelReason ?? 'Cancelled by operator',
+      exitCode: session.exitCode,
+      summary: session.parser.lastSummary(),
+    });
   }
 
   private writeParsed(session: RealSession, line: CliLogLine): void {
@@ -834,7 +1076,11 @@ export class RealExecutor implements RunnerExecutor {
     message: string | null,
   ): Promise<void> {
     session.phase = phase;
-    await this.persistJournal(session, { phase, status: 'active' }, true);
+    await this.persistJournal(
+      session,
+      { phase, status: 'active', ...(phase === 'running' ? { spawnState: 'running' } : {}) },
+      true,
+    );
     this.callbacks.onPhase(session, phase, message);
   }
 
@@ -896,6 +1142,7 @@ export class RealExecutor implements RunnerExecutor {
       timedOut: false,
       finished: false,
       child: null,
+      managed: null,
       parser: createCliOutputParser(payload.runtime),
       worktree: null,
       projectPath: null,
@@ -913,6 +1160,9 @@ export class RealExecutor implements RunnerExecutor {
       journalError: null,
       identityPending: false,
       pendingExit: null,
+      launchToken: randomUUID(),
+      treeConfirmedGone: false,
+      termination: null,
     };
   }
 
@@ -959,6 +1209,19 @@ export class RealExecutor implements RunnerExecutor {
         startedAt: session.startedAt,
         updatedAt: new Date().toISOString(),
         finishedAt: null,
+        launchToken: session.launchToken,
+        guardPath: this.supervised
+          ? guardPathFor(this.config.recoveryRoot, session.executionId, session.launchToken)
+          : null,
+        supervisorPid: null,
+        supervisorStartTime: null,
+        cliPid: null,
+        cliStartTime: null,
+        processKind: this.supervised ? 'supervisor' : 'direct',
+        spawnState: 'intent',
+        recoveryBlockedReason: null,
+        recoveryBlockedAt: null,
+        recoveryNote: null,
       });
       session.journalStarted = true;
     } catch (error) {
@@ -982,41 +1245,76 @@ export class RealExecutor implements RunnerExecutor {
     if (!pid) {
       throw new RunnerFailure(
         'RECOVERY_JOURNAL_PID_MISSING',
-        'The spawned CLI did not expose a PID; recovery identity cannot be recorded',
+        'The spawned process did not expose a PID; recovery identity cannot be recorded',
       );
     }
 
-    let identity: ProcessIdentity | null;
+    let patch: ExecutionJournalPatch;
+    if (session.managed) {
+      const guard = await session.managed.ready;
+      let supervisorIdentity: ProcessIdentity | null;
+      try {
+        supervisorIdentity = await this.inspectProcess(guard.supervisorPid);
+      } catch (error) {
+        throw new RunnerFailure(
+          'RECOVERY_JOURNAL_PID_IDENTITY_FAILED',
+          `Could not inspect supervisor PID ${guard.supervisorPid}: ${errorMessage(error)}`,
+        );
+      }
+      if (session.finished) return;
+      if (
+        !supervisorIdentity ||
+        !this.sameStartTime(guard.supervisorStartTime, supervisorIdentity.startTime)
+      ) {
+        throw new RunnerFailure(
+          'RECOVERY_JOURNAL_PID_IDENTITY_FAILED',
+          `Supervisor PID ${guard.supervisorPid} has no matching start marker`,
+        );
+      }
+      session.processStartTime = guard.supervisorStartTime;
+      session.processGroupId = guard.processGroupId ?? guard.supervisorPid;
+      patch = {
+        pid: guard.supervisorPid,
+        processStartTime: guard.supervisorStartTime,
+        processGroupId: guard.processGroupId,
+        supervisorPid: guard.supervisorPid,
+        supervisorStartTime: guard.supervisorStartTime,
+        cliPid: guard.cliPid,
+        cliStartTime: guard.cliStartTime,
+        processKind: 'supervisor',
+        spawnState: 'supervisor-ready',
+        phase: session.phase,
+      };
+    } else {
+      let identity: ProcessIdentity | null;
+      try {
+        identity = await this.inspectProcess(pid);
+      } catch (error) {
+        throw new RunnerFailure(
+          'RECOVERY_JOURNAL_PID_IDENTITY_FAILED',
+          `Could not inspect PID ${pid}: ${errorMessage(error)}`,
+        );
+      }
+      if (session.finished) return;
+      if (!identity) {
+        throw new RunnerFailure(
+          'RECOVERY_JOURNAL_PID_IDENTITY_FAILED',
+          `PID ${pid} has no verifiable start marker; recovery identity cannot be recorded`,
+        );
+      }
+      session.processStartTime = identity.startTime;
+      session.processGroupId = identity.processGroupId ?? pid;
+      patch = {
+        pid,
+        processStartTime: session.processStartTime,
+        processGroupId: session.processGroupId,
+        processKind: 'direct',
+        phase: session.phase,
+      };
+    }
+
     try {
-      identity = await this.inspectProcess(pid);
-    } catch (error) {
-      throw new RunnerFailure(
-        'RECOVERY_JOURNAL_PID_IDENTITY_FAILED',
-        `Could not inspect PID ${pid}: ${errorMessage(error)}`,
-      );
-    }
-    if (session.finished) return;
-    if (!identity) {
-      throw new RunnerFailure(
-        'RECOVERY_JOURNAL_PID_IDENTITY_FAILED',
-        `PID ${pid} has no verifiable start marker; recovery identity cannot be recorded`,
-      );
-    }
-
-    session.processStartTime = identity.startTime;
-    session.processGroupId = identity.processGroupId ?? pid;
-
-    try {
-      await this.persistJournal(
-        session,
-        {
-          pid,
-          processStartTime: session.processStartTime,
-          processGroupId: session.processGroupId,
-          phase: session.phase,
-        },
-        true,
-      );
+      await this.persistJournal(session, patch, true);
     } catch (error) {
       throw new RunnerFailure(
         'RECOVERY_JOURNAL_PID_WRITE_FAILED',
@@ -1028,10 +1326,21 @@ export class RealExecutor implements RunnerExecutor {
     const pendingExit = session.pendingExit;
     session.pendingExit = null;
     if (pendingExit) {
-      // The CLI exited during the identity write. Decide its real outcome now
-      // that the durable identity is in place.
+      // The process exited during the identity write. Decide its real outcome
+      // now that the durable identity is in place.
       await this.finishFromClose(session, pendingExit.code, pendingExit.signal);
     }
+  }
+
+  private sameStartTime(left: string, right: string): boolean {
+    if (left === right) return true;
+    if (/^\d+$/.test(left) || /^\d+$/.test(right)) return false;
+    const leftDate = Date.parse(left);
+    const rightDate = Date.parse(right);
+    if (!Number.isNaN(leftDate) && !Number.isNaN(rightDate)) {
+      return Math.abs(leftDate - rightDate) <= 2;
+    }
+    return false;
   }
 
   private persistJournal(
@@ -1048,9 +1357,10 @@ export class RealExecutor implements RunnerExecutor {
   private async finishJournal(
     session: RealSession,
     outcome: 'completed' | 'failed' | 'cancelled',
-  ): Promise<void> {
-    if (!this.recovery || !session.journalStarted) return;
+  ): Promise<boolean> {
+    if (!this.recovery || !session.journalStarted) return true;
     await this.recovery.journal.finish(session.executionId, outcome, outcome, session.lastSeq);
+    return true;
   }
 
   private assertJournalUsable(session: RealSession): void {
@@ -1079,7 +1389,7 @@ export class RealExecutor implements RunnerExecutor {
     if (!child) return;
     void this.abortSpawnedProcess(session, child, `RECOVERY_JOURNAL_WRITE_FAILED: ${detail}`).catch(
       (abortError: unknown) => {
-        this.finalizeUnconfirmed(
+        this.markUncertain(
           session,
           `RECOVERY_JOURNAL_WRITE_FAILED: ${detail}; terminating the CLI failed: ${errorMessage(
             abortError,
@@ -1110,24 +1420,35 @@ export class RealExecutor implements RunnerExecutor {
     let exited = alreadyExited;
 
     if (!exited) {
-      try {
-        await this.terminateProcess(child, true);
-      } catch (error) {
-        terminationError = errorMessage(error);
+      if (session.managed) {
+        // F-02: the managed path owns the protected tree. Never fall back to a
+        // root-PID-only kill here; the supervisor/guard must confirm the whole
+        // tree is gone before the terminal journal decision.
+        const result = await this.requestTermination(session, true);
+        exited = result.confirmed;
+        if (!result.confirmed) {
+          terminationError = result.reason;
+        }
+      } else {
+        try {
+          await this.terminateProcess(child, true);
+        } catch (error) {
+          terminationError = errorMessage(error);
+        }
+        if (pid) {
+          try {
+            exited = await this.waitForProcessExit(pid, JOURNAL_ABORT_CONFIRM_MS);
+          } catch (error) {
+            terminationError = terminationError ?? errorMessage(error);
+            exited = false;
+          }
+        }
+        // The child close event is also authoritative: Node observed the
+        // process exit even if the PID disappeared before the next poll.
+        if (!exited) {
+          exited = child.exitCode !== null || child.signalCode !== null;
+        }
       }
-    }
-    if (!exited && pid) {
-      try {
-        exited = await this.waitForProcessExit(pid, JOURNAL_ABORT_CONFIRM_MS);
-      } catch (error) {
-        terminationError = terminationError ?? errorMessage(error);
-        exited = false;
-      }
-    }
-    // The child close event is also authoritative: Node observed the process
-    // exit even if the PID disappeared from the OS table before the next poll.
-    if (!exited) {
-      exited = child.exitCode !== null || child.signalCode !== null;
     }
 
     if (exited) {
@@ -1173,14 +1494,15 @@ export class RealExecutor implements RunnerExecutor {
       }
     }
 
-    this.finalizeUnconfirmed(session, uncertain);
+    this.markUncertain(session, uncertain);
   }
 
   /**
-   * Reports a failed terminal event without pretending the journal was
-   * finalized. The active journal record and worktree remain as evidence.
+   * Keeps an execution active when the process tree could not be proven gone.
+   * No terminal protocol event is emitted: the active journal is the evidence
+   * and the next startup scan must retry the verified termination.
    */
-  private finalizeUnconfirmed(session: RealSession, reason: string): void {
+  private markUncertain(session: RealSession, reason: string): void {
     if (session.finished) return;
     session.finished = true;
     session.identityPending = false;
@@ -1188,14 +1510,9 @@ export class RealExecutor implements RunnerExecutor {
     this.clearTimers(session);
     session.phase = 'failed';
     this.uncertainOrphans.add(session.executionId);
-    this.callbacks.onFailed(session, {
-      reason: reason.slice(0, 2000),
-      exitCode: session.exitCode,
-      summary: session.parser.lastSummary(),
-      git: null,
-    });
-    this.sessions.delete(session.executionId);
-    this.admittedExecutables.delete(session.executionId);
+    this.log(session, 'stderr', 'error', reason, false);
+    // The session intentionally stays in `sessions`: a heartbeat/snapshot must
+    // keep showing the outstanding work instead of pretending the runner is idle.
   }
 
   private describeError(error: unknown): string {

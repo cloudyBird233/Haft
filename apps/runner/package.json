@@ -7,9 +7,10 @@
     "dev": "tsx watch src/main.ts",
     "start": "tsx src/main.ts",
     "start:prod": "node dist/main.js",
-    "build": "tsup src/main.ts --format cjs --clean --sourcemap",
+    "build": "tsup src/main.ts src/process-supervisor-child.ts src/recovery-admin.ts --format cjs --clean --sourcemap",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "recovery-admin": "tsx src/recovery-admin.ts"
   },
   "dependencies": {
     "@raft-lite/contracts": "workspace:*",

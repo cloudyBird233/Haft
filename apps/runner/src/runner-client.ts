@@ -28,7 +28,12 @@ import { FakeExecutor } from './fake-executor';
 import { log } from './logger';
 import { ProtocolEventQueue } from './protocol-event-queue';
 import { RealExecutor, type RealExecutorDependencies } from './real-executor';
-import { ExecutionRecovery, type RecoveredExecution } from './recovery';
+import {
+  ExecutionRecovery,
+  type RecoveredExecution,
+  type RecoveryBlockedEntry,
+  type RecoveryScanResult,
+} from './recovery';
 import { RepositoryPolicyError, type RepositoryPathPolicy } from './repository-policy';
 import {
   RepositoryContextCancelledError,
@@ -52,6 +57,8 @@ export interface RunnerClientOptions {
   repositoryPolicy?: RepositoryPathPolicy;
   repositoryValidationCache?: RepositoryValidationCache;
   repositoryContexts?: RepositoryContextManager;
+  /** Test seam: a recovery instance with a deterministic journal/guard fixture. */
+  recovery?: ExecutionRecovery;
   /** Test seam for deterministic live-admission/spawn assertions. */
   realExecutorDependencies?: Partial<RealExecutorDependencies>;
   onFatal?: (message: string) => void;
@@ -89,6 +96,8 @@ export class RunnerClient {
   private readonly validationCache: RepositoryValidationCache;
   private readonly admissions = new Map<string, Promise<void>>();
   private recoveredExecutions: RecoveredExecution[] = [];
+  private recoveryBlocked: RecoveryBlockedEntry[] = [];
+  private recoveryClean = true;
   private readonly onFatal: (message: string) => void;
   private runtimeCapabilities: RunnerRuntimeCapability[] = [];
   private socket: Socket | null = null;
@@ -116,7 +125,7 @@ export class RunnerClient {
       options.repositoryContexts ??
       new RepositoryContextManager(this.config, this.repositoryPolicy);
     this.tokenStore = new TokenStore(this.config.tokenFile, this.config.runnerId);
-    this.recovery = new ExecutionRecovery(this.config.recoveryRoot);
+    this.recovery = options.recovery ?? new ExecutionRecovery(this.config.recoveryRoot);
     const callbacks: ExecutorCallbacks = {
       onPhase: (session, phase, message) => {
         this.events.enqueue(session.executionId, () => {
@@ -196,14 +205,8 @@ export class RunnerClient {
     await this.prepareCapabilities();
     this.contextSweepTimer = setInterval(() => this.repositoryContexts.sweep(), 60_000);
     this.contextSweepTimer.unref();
-    this.recoveredExecutions = await this.recovery.scan();
-    if (this.recoveredExecutions.length > 0) {
-      log('warn', {
-        eventType: 'runner.recovery_found',
-        message: `Runner found ${this.recoveredExecutions.length} interrupted execution(s) from a previous process`,
-        status: 'degraded',
-      });
-    }
+    const recoveryScan = await this.recovery.scan();
+    this.applyRecoveryScan(recoveryScan);
     this.token = await this.tokenStore.read();
     if (!this.token && !this.config.bootstrapToken) {
       throw new Error(
@@ -223,6 +226,44 @@ export class RunnerClient {
 
   activeExecutionIds(): string[] {
     return this.executor.activeExecutionIds();
+  }
+
+  isRecoveryBlocked(): boolean {
+    return !this.recoveryClean || this.recoveryBlocked.length > 0;
+  }
+
+  /** Applies a completed recovery scan; kept separate so startup and tests share it. */
+  applyRecoveryScan(scan: RecoveryScanResult): void {
+    this.recoveredExecutions = scan.executions;
+    this.recoveryBlocked = scan.blocked;
+    this.recoveryClean = scan.clean;
+    if (this.recoveredExecutions.length > 0) {
+      log('warn', {
+        eventType: 'runner.recovery_found',
+        message: `Runner found ${this.recoveredExecutions.length} interrupted execution(s) from a previous process`,
+        status: 'degraded',
+      });
+    }
+    if (!this.recoveryClean) {
+      log('error', {
+        eventType: 'runner.recovery_blocked',
+        message:
+          'Recovery could not prove the state of every previous execution; new work is blocked until an operator resolves it',
+        status: 'error',
+        blocked: this.recoveryBlocked,
+        statePath: scan.statePath,
+      });
+    }
+  }
+
+  recoveryBlockedReason(): string | null {
+    if (this.recoveryBlocked.length === 0) {
+      return this.recoveryClean ? null : 'recovery left unresolved evidence; run recovery-admin status';
+    }
+    return this.recoveryBlocked
+      .map((entry) => entry.reason)
+      .join('; ')
+      .slice(0, 2000);
   }
 
   pendingLogCount(): number {
@@ -620,6 +661,17 @@ export class RunnerClient {
     const executionId = payload.executionId;
     let acceptedSent = false;
     try {
+      if (this.isRecoveryBlocked()) {
+        // F-05/F-07: a previous execution has an unproven process state. No new
+        // work may start on this Runner until an operator resolves it.
+        this.repositoryContexts.release(executionId);
+        this.sendStartRejected(
+          executionId,
+          ERROR_CODES.RUNNER_START_UNCONFIRMED,
+          `RUNNER_RECOVERY_BLOCKED: ${this.recoveryBlockedReason() ?? 'previous execution state is uncertain'}`,
+        );
+        return;
+      }
       if (this.repositoryContexts.isCancelled(executionId)) {
         // Cancellation already owns the terminal path. Still answer a late
         // start deterministically so an old API process cannot mistake the
@@ -918,6 +970,20 @@ export class RunnerClient {
     const pending: RecoveredExecution[] = [];
     for (let index = 0; index < this.recoveredExecutions.length; index += 1) {
       const report = this.recoveredExecutions[index] as RecoveredExecution;
+      if (!report.journalFinalized) {
+        // F-06: no terminal event may claim a reliable outcome while the
+        // active journal still marks the execution unresolved. It remains on
+        // disk for the next startup and blocks new work.
+        log('error', {
+          eventType: 'runner.recovery_unfinalized',
+          message:
+            report.blockedReason ??
+            'A recovered execution could not be finalized and stays active for manual recovery',
+          status: 'error',
+          executionId: report.record.executionId,
+        });
+        continue;
+      }
       const entries =
         report.logs.length > 0
           ? report.logs
@@ -991,7 +1057,11 @@ export class RunnerClient {
       const active = this.executor.activeExecutionIds();
       this.send('runner.heartbeat', {
         activeExecutionIds: active,
-        status: active.length > 0 ? 'busy' : 'online',
+        status: this.isRecoveryBlocked()
+          ? 'degraded'
+          : active.length > 0
+            ? 'busy'
+            : 'online',
         uptimeMs: Date.now() - this.startedAt,
       });
     };

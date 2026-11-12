@@ -49,6 +49,21 @@ export default tseslint.config(
     },
   },
   {
+    // Real OS fixtures are deliberately plain CommonJS so they can be spawned
+    // by the supervisor without a TypeScript loader.
+    files: ['apps/runner/test/fixtures/**/*.cjs'],
+    languageOptions: {
+      sourceType: 'commonjs',
+      globals: {
+        ...globals.node,
+      },
+    },
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off',
+      'no-console': 'off',
+    },
+  },
+  {
     // NestJS resolves constructor dependencies from decorator metadata. Importing
     // injected classes with `import type` erases that metadata at compile time,
     // so keep the API free to use regular imports for DI tokens.

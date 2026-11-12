@@ -1,5 +1,4 @@
 import { readFile } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
 import { runProcess } from './process-utils';
 
 /**
@@ -64,24 +63,75 @@ export async function waitForProcessExit(
   return !isProcessAlive(pid);
 }
 
+export interface ProcessTreeTerminationResult {
+  requested: boolean;
+  /** True only after the root PID is observed gone. */
+  confirmed: boolean;
+  pid: number;
+  error: string | null;
+}
+
 /**
  * Terminates a process tree by root PID.
  *
  * Windows uses `taskkill /T /F`, which is the only reliable tree kill for
- * `.cmd` shims that spawn a Node child. POSIX runners spawn the CLI as its own
- * process group, so a negative PID signal reaches the whole tree.
+ * `.cmd` shims that spawn a Node child. Its exit code is checked; a failed
+ * taskkill is reported as unconfirmed instead of silently succeeding. POSIX
+ * runners spawn the CLI as its own process group, so a negative PID signal
+ * reaches the whole tree.
+ *
+ * Confirmation of the root PID is necessary but not sufficient: callers that
+ * own a guard must also verify cgroup/process-group/Job Object membership.
  */
-export async function terminateProcessTree(pid: number, force = true): Promise<void> {
-  if (!Number.isInteger(pid) || pid <= 0) return;
+export async function terminateProcessTree(
+  pid: number,
+  force = true,
+  taskkillBinary = 'taskkill',
+): Promise<ProcessTreeTerminationResult> {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return { requested: false, confirmed: false, pid, error: 'Invalid PID' };
+  }
+  if (!isProcessAlive(pid)) {
+    return { requested: true, confirmed: true, pid, error: null };
+  }
 
   if (process.platform === 'win32') {
-    await runQuietly('taskkill', ['/pid', String(pid), '/T', '/F'], 10_000);
+    let result;
     try {
-      process.kill(pid);
-    } catch {
-      // The process may already have exited.
+      result = await runProcess(
+        taskkillBinary,
+        ['/pid', String(pid), '/T', '/F'],
+        { timeoutMs: 15_000, maxOutputBytes: 64 * 1024 },
+      );
+    } catch (error) {
+      return {
+        requested: true,
+        confirmed: false,
+        pid,
+        error: `taskkill could not be started: ${errorMessage(error)}`,
+      };
     }
-    return;
+    if (result.code !== 0) {
+      // taskkill reports "not found" when the process raced its own exit; that
+      // is the only failure that may still be treated as a confirmed exit.
+      if (!isProcessAlive(pid)) {
+        return { requested: true, confirmed: true, pid, error: null };
+      }
+      const detail = (result.stderr || result.stdout).trim();
+      return {
+        requested: true,
+        confirmed: false,
+        pid,
+        error: `taskkill exited with code ${result.code}${detail ? `: ${detail.slice(0, 500)}` : ''}`,
+      };
+    }
+    const gone = await waitForProcessExit(pid, 5000);
+    return {
+      requested: true,
+      confirmed: gone,
+      pid,
+      error: gone ? null : `taskkill reported success but PID ${pid} is still alive`,
+    };
   }
 
   const signal = force ? 'SIGKILL' : 'SIGTERM';
@@ -90,10 +140,25 @@ export async function terminateProcessTree(pid: number, force = true): Promise<v
   } catch {
     try {
       process.kill(pid, signal);
-    } catch {
-      // The process may already have exited or the group may not exist.
+    } catch (error) {
+      if (!isProcessAlive(pid)) {
+        return { requested: true, confirmed: true, pid, error: null };
+      }
+      return {
+        requested: true,
+        confirmed: false,
+        pid,
+        error: `Could not signal PID ${pid}: ${errorMessage(error)}`,
+      };
     }
   }
+  const gone = await waitForProcessExit(pid, 5000);
+  return {
+    requested: true,
+    confirmed: gone,
+    pid,
+    error: gone ? null : `PID ${pid} did not exit after ${signal}`,
+  };
 }
 
 async function inspectWindowsProcess(pid: number): Promise<ProcessIdentity | null> {
@@ -158,6 +223,8 @@ async function inspectLinuxProcess(pid: number): Promise<ProcessIdentity | null>
     .trim()
     .split(/\s+/);
   // fields[0] is field 3 (state); field 22 (starttime) is fields[19].
+  const state = fields[0];
+  if (state === 'Z' || state === 'X') return null;
   const startTime = fields[19];
   if (!startTime) return null;
   const commandLine = await readFile(`/proc/${pid}/cmdline`, 'utf8')
@@ -209,38 +276,10 @@ function toInteger(value: unknown): number | null {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-async function runQuietly(binary: string, args: string[], timeoutMs: number): Promise<void> {
-  await new Promise<void>((resolvePromise) => {
-    let child;
-    try {
-      child = spawn(binary, args, {
-        shell: false,
-        windowsHide: true,
-        stdio: 'ignore',
-      });
-    } catch {
-      resolvePromise();
-      return;
-    }
-    const timer = setTimeout(() => {
-      try {
-        child.kill();
-      } catch {
-        // Ignore cleanup failures.
-      }
-      resolvePromise();
-    }, timeoutMs);
-    child.once('close', () => {
-      clearTimeout(timer);
-      resolvePromise();
-    });
-    child.once('error', () => {
-      clearTimeout(timer);
-      resolvePromise();
-    });
-  });
-}
-
 function delay(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

@@ -19,6 +19,7 @@ export interface ExecutionJournalRecord {
   executionId: string;
   runtime: RunnerRuntimeType;
   projectId: string | null;
+  /** Protected-root PID: the supervisor for new records, the CLI for legacy records. */
   pid: number | null;
   processStartTime: string | null;
   processGroupId: number | null;
@@ -31,6 +32,20 @@ export interface ExecutionJournalRecord {
   startedAt: string;
   updatedAt: string;
   finishedAt: string | null;
+  /** Random token that ties the journal to exactly one supervisor/guard file. */
+  launchToken?: string | null;
+  /** Absolute path of the supervisor's durable guard file. */
+  guardPath?: string | null;
+  supervisorPid?: number | null;
+  supervisorStartTime?: string | null;
+  cliPid?: number | null;
+  cliStartTime?: string | null;
+  processKind?: 'supervisor' | 'direct' | null;
+  /** Durable point in the launch sequence. */
+  spawnState?: 'intent' | 'supervisor-ready' | 'running' | null;
+  recoveryBlockedReason?: string | null;
+  recoveryBlockedAt?: string | null;
+  recoveryNote?: string | null;
 }
 
 export type ExecutionJournalPatch = Partial<
@@ -46,8 +61,32 @@ export type ExecutionJournalPatch = Partial<
     | 'status'
     | 'lastSequence'
     | 'finishedAt'
+    | 'launchToken'
+    | 'guardPath'
+    | 'supervisorPid'
+    | 'supervisorStartTime'
+    | 'cliPid'
+    | 'cliStartTime'
+    | 'processKind'
+    | 'spawnState'
+    | 'recoveryBlockedReason'
+    | 'recoveryBlockedAt'
+    | 'recoveryNote'
   >
 >;
+
+export interface CorruptJournalEntry {
+  /** Original journal path, or the quarantined path if it was renamed. */
+  path: string;
+  quarantinedPath: string | null;
+  error: string;
+  detectedAt: string;
+}
+
+export interface ExecutionJournalListResult {
+  records: ExecutionJournalRecord[];
+  corrupt: CorruptJournalEntry[];
+}
 
 const UPDATE_DEBOUNCE_MS = 100;
 const STATUS_VALUES: ExecutionJournalStatus[] = [
@@ -110,6 +149,23 @@ export class ExecutionJournal {
   }
 
   async begin(record: ExecutionJournalRecord): Promise<void> {
+    const inMemory = this.records.get(record.executionId);
+    if (inMemory?.status === 'active') {
+      throw new Error(
+        `Execution journal ${record.executionId} is already active; refusing to overwrite recovery evidence`,
+      );
+    }
+    const existing = await this.readFileDetailed(this.fileFor(record.executionId));
+    if (existing.kind === 'corrupt') {
+      throw new Error(
+        `Execution journal ${record.executionId} is corrupt; refusing to overwrite recovery evidence`,
+      );
+    }
+    if (existing.kind === 'ok' && existing.record.status === 'active') {
+      throw new Error(
+        `Execution journal ${record.executionId} is already active; refusing to overwrite recovery evidence`,
+      );
+    }
     this.records.set(record.executionId, { ...record });
     this.pending.delete(record.executionId);
     try {
@@ -228,21 +284,46 @@ export class ExecutionJournal {
   }
 
   async list(): Promise<ExecutionJournalRecord[]> {
+    return (await this.listDetailed()).records;
+  }
+
+  /**
+   * Lists every readable journal and, separately, every corrupt one. Corruption
+   * is never collapsed into an empty result: recovery must be able to block
+   * startup when it cannot prove what a damaged record was doing.
+   */
+  async listDetailed(): Promise<ExecutionJournalListResult> {
     await this.flushAll();
     let entries;
     try {
       entries = await readdir(this.root, { withFileTypes: true });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { records: [], corrupt: [] };
+      }
       throw error;
     }
     const records: ExecutionJournalRecord[] = [];
+    const corrupt: CorruptJournalEntry[] = [];
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-      const record = await this.readFile(join(this.root, entry.name));
-      if (record) records.push(record);
+      // Operator resolution sidecars live next to quarantined evidence; they
+      // are not execution journals and must not be re-quarantined.
+      if (entry.name.endsWith('.resolution.json')) continue;
+      const result = await this.readFileDetailed(join(this.root, entry.name));
+      if (result.kind === 'ok') {
+        // Keep the loaded record addressable by finish()/update(); a startup
+        // scan must be able to finalize a journal written by a previous process.
+        this.records.set(result.record.executionId, result.record);
+        records.push(result.record);
+      } else if (result.kind === 'corrupt') {
+        corrupt.push(result.entry);
+      }
     }
-    return records.sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+    return {
+      records: records.sort((left, right) => left.startedAt.localeCompare(right.startedAt)),
+      corrupt: corrupt.sort((left, right) => left.path.localeCompare(right.path)),
+    };
   }
 
   async remove(executionId: string): Promise<void> {
@@ -279,36 +360,67 @@ export class ExecutionJournal {
   }
 
   private async readFile(file: string): Promise<ExecutionJournalRecord | null> {
+    const result = await this.readFileDetailed(file);
+    return result.kind === 'ok' ? result.record : null;
+  }
+
+  private async readFileDetailed(
+    file: string,
+  ): Promise<
+    | { kind: 'ok'; record: ExecutionJournalRecord }
+    | { kind: 'missing' }
+    | { kind: 'corrupt'; entry: CorruptJournalEntry }
+  > {
     let raw: string;
     try {
       raw = await readFile(file, 'utf8');
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'missing' };
       throw error;
     }
     let parsed: Partial<ExecutionJournalRecord>;
     try {
       parsed = JSON.parse(raw) as Partial<ExecutionJournalRecord>;
     } catch (error) {
-      this.options.onCorruptJournal?.(file, error);
-      await this.quarantine(file);
-      return null;
+      return {
+        kind: 'corrupt',
+        entry: await this.recordCorruption(file, error),
+      };
     }
     if (!isValidRecord(parsed)) {
-      const error = new Error('Execution journal failed validation');
-      this.options.onCorruptJournal?.(file, error);
-      await this.quarantine(file);
-      return null;
+      return {
+        kind: 'corrupt',
+        entry: await this.recordCorruption(
+          file,
+          new Error('Execution journal failed validation'),
+        ),
+      };
     }
-    return parsed as ExecutionJournalRecord;
+    return { kind: 'ok', record: parsed as ExecutionJournalRecord };
   }
 
-  private async quarantine(file: string): Promise<void> {
+  private async recordCorruption(
+    file: string,
+    error: unknown,
+  ): Promise<CorruptJournalEntry> {
+    this.options.onCorruptJournal?.(file, error);
+    const quarantinedPath = await this.quarantine(file);
+    return {
+      path: file,
+      quarantinedPath,
+      error: error instanceof Error ? error.message : String(error),
+      detectedAt: new Date().toISOString(),
+    };
+  }
+
+  /** Renames a corrupt journal next to itself; it is never deleted. */
+  private async quarantine(file: string): Promise<string | null> {
     const target = `${file}.corrupt-${Date.now()}`;
     try {
       await rename(file, target);
+      return target;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
     }
   }
@@ -385,8 +497,34 @@ function isValidRecord(value: Partial<ExecutionJournalRecord>): boolean {
     typeof value.status === 'string' &&
     STATUS_VALUES.includes(value.status as ExecutionJournalStatus) &&
     typeof value.startedAt === 'string' &&
-    typeof value.lastSequence === 'number',
+    typeof value.lastSequence === 'number' &&
+    optionalString(value.launchToken) &&
+    optionalString(value.guardPath) &&
+    optionalString(value.supervisorStartTime) &&
+    optionalString(value.cliStartTime) &&
+    optionalString(value.recoveryBlockedReason) &&
+    optionalString(value.recoveryBlockedAt) &&
+    optionalString(value.recoveryNote) &&
+    optionalNumber(value.supervisorPid) &&
+    optionalNumber(value.cliPid) &&
+    (value.processKind === undefined ||
+      value.processKind === null ||
+      value.processKind === 'supervisor' ||
+      value.processKind === 'direct') &&
+    (value.spawnState === undefined ||
+      value.spawnState === null ||
+      value.spawnState === 'intent' ||
+      value.spawnState === 'supervisor-ready' ||
+      value.spawnState === 'running'),
   );
+}
+
+function optionalString(value: unknown): boolean {
+  return value === undefined || value === null || typeof value === 'string';
+}
+
+function optionalNumber(value: unknown): boolean {
+  return value === undefined || value === null || (typeof value === 'number' && value > 0);
 }
 
 function sanitize(value: string): string {

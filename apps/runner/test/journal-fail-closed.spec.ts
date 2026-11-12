@@ -174,6 +174,7 @@ function createHarness(options: HarnessOptions = {}): {
   const recovery = {
     journal,
     spool: { flush: vi.fn() },
+    isWorktreeBlocked: () => false,
   } as unknown as ExecutionRecovery;
 
   const captured: Captured = {
@@ -413,26 +414,24 @@ describe('Recovery journal fail-closed (J1-J10)', () => {
 
     harness.executor.start(startPayload(), repositoryContext());
     await harness.spawned;
-    await waitFor(() => harness.captured.failed.length === 1);
+    await waitFor(() => harness.waitForProcessExit.mock.calls.length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(harness.terminate).toHaveBeenCalledWith(harness.child, true);
-    expect(harness.captured.failed[0]?.payload.reason).toContain(
-      'could not be confirmed terminated',
-    );
-    expect(harness.captured.failed[0]?.payload.reason).toContain('left active for manual recovery');
+    expect(harness.captured.failed).toHaveLength(0);
     expect(harness.captured.completed).toHaveLength(0);
     // The journal must stay active so the next startup scan retries.
     expect(journal.finish).not.toHaveBeenCalled();
-    expect(harness.executor.activeExecutionIds()).toEqual([]);
+    expect(harness.executor.activeExecutionIds()).toContain(EXECUTION_ID);
 
     const shutdown = await harness.executor.shutdown();
     expect(shutdown.clean).toBe(false);
     expect(shutdown.remainingExecutionIds).toContain(EXECUTION_ID);
 
-    // A late close event must not produce a second terminal event.
+    // A late close event must not produce a terminal event.
     harness.child.close(null, 'SIGKILL');
     await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(harness.captured.failed).toHaveLength(1);
+    expect(harness.captured.failed).toHaveLength(0);
   });
 
   it('J5: a mid-run persistJournal failure is surfaced and aborts the execution', async () => {
@@ -459,7 +458,7 @@ describe('Recovery journal fail-closed (J1-J10)', () => {
     );
   });
 
-  it('J6: finishJournal write failure never reports a completed execution', async () => {
+  it('J6: finishJournal write failure never reports a completed or reliable failed execution', async () => {
     const journal = fakeJournal({
       finish: vi.fn().mockRejectedValue(new Error('finish journal write failed')),
     });
@@ -469,26 +468,31 @@ describe('Recovery journal fail-closed (J1-J10)', () => {
     await harness.spawned;
     await harness.child.promptWritten;
     harness.child.close(0, null);
-    await waitFor(() => harness.captured.failed.length === 1);
+    const finishMock = journal.finish as unknown as ReturnType<typeof vi.fn>;
+    await waitFor(() => finishMock.mock.calls.length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(harness.captured.completed).toHaveLength(0);
-    expect(harness.captured.failed[0]?.payload.reason).toContain('RECOVERY_JOURNAL_FINISH_FAILED');
-    expect(harness.captured.failed[0]?.payload.reason).toContain('finish journal write failed');
+    expect(harness.captured.failed).toHaveLength(0);
     expect(journal.finish).toHaveBeenCalledTimes(1);
-    expect(harness.executor.activeExecutionIds()).toEqual([]);
+    // The execution stays active locally; the journal is the evidence.
+    expect(harness.executor.activeExecutionIds()).toContain(EXECUTION_ID);
   });
 
-  it('J7a: a restart with no journal directory returns an empty scan', async () => {
+  it('J7a: a restart with no journal directory returns an empty, clean scan', async () => {
     const root = join(await makeRoot(), 'missing-recovery-root');
     const deps = recoveryDependencies();
     const recovery = new ExecutionRecovery(root, deps);
 
-    expect(await recovery.scan()).toEqual([]);
+    const scan = await recovery.scan();
+    expect(scan.executions).toEqual([]);
+    expect(scan.corrupted).toEqual([]);
+    expect(scan.clean).toBe(true);
     expect(deps.inspectProcess).not.toHaveBeenCalled();
     expect(deps.terminateProcessTree).not.toHaveBeenCalled();
   });
 
-  it('J7b: a journal without a PID is reported interrupted, never completed', async () => {
+  it('J7b: a journal without a PID blocks recovery and is never finalized', async () => {
     const root = await makeRoot();
     const deps = recoveryDependencies();
     const recovery = new ExecutionRecovery(root, deps);
@@ -500,16 +504,21 @@ describe('Recovery journal fail-closed (J1-J10)', () => {
       }),
     );
 
-    const [report] = await recovery.scan();
+    const report = (await recovery.scan()).executions[0];
 
     expect(deps.inspectProcess).not.toHaveBeenCalled();
     expect(deps.terminateProcessTree).not.toHaveBeenCalled();
-    expect(report).toMatchObject({ processAlive: false, journalFinalized: true });
-    expect(report?.summary).toContain('no surviving CLI process');
-    expect((await recovery.journal.read(EXECUTION_ID))?.status).toBe('interrupted');
+    expect(report).toMatchObject({
+      processAlive: false,
+      journalFinalized: false,
+      recoveryBlocked: true,
+      treeConfirmedGone: false,
+    });
+    expect(report?.summary).toContain('PID_NOT_RECORDED');
+    expect((await recovery.journal.read(EXECUTION_ID))?.status).toBe('active');
   });
 
-  it('J7c: a restart treats an unverifiable live PID as interrupted and never kills it', async () => {
+  it('J7c: a restart treats an unverifiable live PID as blocked and never kills it', async () => {
     const root = await makeRoot();
     const deps = recoveryDependencies({
       inspectProcess: vi.fn().mockResolvedValue({
@@ -523,33 +532,38 @@ describe('Recovery journal fail-closed (J1-J10)', () => {
     const recovery = new ExecutionRecovery(root, deps);
     await recovery.journal.begin(journalRecord({ processStartTime: null }));
 
-    const [report] = await recovery.scan();
+    const report = (await recovery.scan()).executions[0];
 
     expect(deps.inspectProcess).toHaveBeenCalledWith(4242);
     expect(deps.terminateProcessTree).not.toHaveBeenCalled();
     expect(report).toMatchObject({
       processAlive: true,
       processIdentityUnverified: true,
-      journalFinalized: true,
+      journalFinalized: false,
+      recoveryBlocked: true,
     });
-    expect(report?.summary).toContain('could not be verified');
-    expect((await recovery.journal.read(EXECUTION_ID))?.status).toBe('interrupted');
+    expect(report?.summary).toContain('PID_IDENTITY_UNVERIFIED');
+    expect((await recovery.journal.read(EXECUTION_ID))?.status).toBe('active');
   });
 
-  it('J8: a corrupt journal fails closed and is quarantined as evidence', async () => {
+  it('J8: a corrupt journal blocks recovery and is quarantined as evidence', async () => {
     const root = await makeRoot();
     const deps = recoveryDependencies();
     await writeFile(join(root, 'broken.json'), '{not-json', 'utf8');
     const recovery = new ExecutionRecovery(root, deps);
 
-    expect(await recovery.scan()).toEqual([]);
+    const scan = await recovery.scan();
+    expect(scan.executions).toEqual([]);
+    expect(scan.corrupted).toHaveLength(1);
+    expect(scan.clean).toBe(false);
+    expect(scan.blocked.some((entry) => entry.kind === 'corrupt-journal')).toBe(true);
     expect(deps.inspectProcess).not.toHaveBeenCalled();
     expect(deps.terminateProcessTree).not.toHaveBeenCalled();
     const files = await readdir(root);
     expect(files.some((name) => name.includes('.corrupt-'))).toBe(true);
   });
 
-  it('J9: a reused PID is left untouched and never reported as success', async () => {
+  it('J9: a reused PID is left untouched, blocks recovery and stays active', async () => {
     const root = await makeRoot();
     const deps = recoveryDependencies({
       inspectProcess: vi.fn().mockResolvedValue({
@@ -563,12 +577,17 @@ describe('Recovery journal fail-closed (J1-J10)', () => {
     const recovery = new ExecutionRecovery(root, deps);
     await recovery.journal.begin(journalRecord());
 
-    const [report] = await recovery.scan();
+    const report = (await recovery.scan()).executions[0];
 
     expect(deps.terminateProcessTree).not.toHaveBeenCalled();
-    expect(report).toMatchObject({ pidReused: true, orphanTerminated: false });
+    expect(report).toMatchObject({
+      pidReused: true,
+      orphanTerminated: false,
+      journalFinalized: false,
+      recoveryBlocked: true,
+    });
     expect(report?.summary).toContain('different process');
-    expect((await recovery.journal.read(EXECUTION_ID))?.status).toBe('interrupted');
+    expect((await recovery.journal.read(EXECUTION_ID))?.status).toBe('active');
   });
 
   it('J10: normal start, run and exit leave a completed journal and one terminal event', async () => {

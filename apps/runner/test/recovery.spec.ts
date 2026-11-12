@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RunnerLogEntry } from '@raft-lite/contracts';
@@ -74,7 +74,9 @@ describe('ExecutionRecovery', () => {
     await recovery.appendLog(value.executionId, logEntry(1));
     await recovery.spool.flush();
 
-    const [report] = await recovery.scan();
+    const scan = await recovery.scan();
+    expect(scan.clean).toBe(true);
+    const report = scan.executions[0];
     expect(report).toMatchObject({
       processAlive: false,
       pidReused: false,
@@ -82,9 +84,10 @@ describe('ExecutionRecovery', () => {
       orphanTerminated: false,
       orphanStillAlive: false,
       worktreeExists: true,
+      journalFinalized: true,
     });
     expect(report?.logs.map((entry) => entry.sequence)).toEqual([1]);
-    expect(report?.summary).toContain('no surviving CLI process');
+    expect(report?.summary).toContain('no surviving protected CLI process');
     expect(report?.summary).toContain('worktree preserved');
     expect(deps.terminateProcessTree).not.toHaveBeenCalled();
     expect((await recovery.journal.read(value.executionId))?.status).toBe('interrupted');
@@ -103,8 +106,8 @@ describe('ExecutionRecovery', () => {
     await recovery.appendLog(value.executionId, logEntry(1));
     await recovery.spool.flush();
 
-    const [report] = await recovery.scan();
-    expect(report).toMatchObject({ worktreeExists: false });
+    const report = (await recovery.scan()).executions[0];
+    expect(report).toMatchObject({ worktreeExists: false, journalFinalized: true });
     expect(report?.summary).toContain('could not be found');
     expect((await recovery.journal.read(value.executionId))?.status).toBe('interrupted');
     expect(await recovery.readLogs(value.executionId)).toHaveLength(1);
@@ -125,18 +128,20 @@ describe('ExecutionRecovery', () => {
     const recovery = new ExecutionRecovery(root, deps);
     await recovery.journal.begin(record());
 
-    const [report] = await recovery.scan();
+    const report = (await recovery.scan()).executions[0];
     expect(deps.terminateProcessTree).toHaveBeenCalledWith(4242);
     expect(deps.waitForProcessExit).toHaveBeenCalled();
     expect(report).toMatchObject({
       processAlive: true,
       orphanTerminated: true,
       orphanStillAlive: false,
+      treeConfirmedGone: true,
+      journalFinalized: true,
     });
-    expect(report?.summary).toContain('orphaned CLI process tree was terminated');
+    expect(report?.summary).toContain('orphaned protected process tree was terminated');
   });
 
-  it('never kills a PID that was reused by another process', async () => {
+  it('never kills a PID that was reused by another process and blocks recovery', async () => {
     const root = await makeRoot();
     const deps = dependencies({
       inspectProcess: vi.fn().mockResolvedValue({
@@ -150,10 +155,20 @@ describe('ExecutionRecovery', () => {
     const recovery = new ExecutionRecovery(root, deps);
     await recovery.journal.begin(record());
 
-    const [report] = await recovery.scan();
+    const scan = await recovery.scan();
+    const report = scan.executions[0];
     expect(deps.terminateProcessTree).not.toHaveBeenCalled();
-    expect(report).toMatchObject({ pidReused: true, orphanTerminated: false });
+    expect(report).toMatchObject({
+      pidReused: true,
+      orphanTerminated: false,
+      journalFinalized: false,
+      recoveryBlocked: true,
+    });
     expect(report?.summary).toContain('different process');
+    expect(scan.clean).toBe(false);
+    expect(scan.blocked[0]?.reason).toContain('PID_REUSED');
+    // The journal stays active as recovery evidence.
+    expect((await recovery.journal.read('execution_recovery'))?.status).toBe('active');
   });
 
   it('never kills a process whose identity or ownership does not match', async () => {
@@ -170,10 +185,12 @@ describe('ExecutionRecovery', () => {
     const recovery = new ExecutionRecovery(root, deps);
     await recovery.journal.begin(record());
 
-    const [report] = await recovery.scan();
+    const scan = await recovery.scan();
+    const report = scan.executions[0];
     expect(deps.terminateProcessTree).not.toHaveBeenCalled();
-    expect(report).toMatchObject({ ownershipMismatch: true });
+    expect(report).toMatchObject({ ownershipMismatch: true, recoveryBlocked: true });
     expect(report?.summary).toContain('does not belong to this execution');
+    expect((await recovery.journal.read('execution_recovery'))?.status).toBe('active');
   });
 
   it('leaves a process untouched when no start time was recorded', async () => {
@@ -190,10 +207,72 @@ describe('ExecutionRecovery', () => {
     const recovery = new ExecutionRecovery(root, deps);
     await recovery.journal.begin(record({ processStartTime: null }));
 
-    const [report] = await recovery.scan();
+    const scan = await recovery.scan();
+    const report = scan.executions[0];
     expect(deps.terminateProcessTree).not.toHaveBeenCalled();
-    expect(report).toMatchObject({ processIdentityUnverified: true });
-    expect(report?.summary).toContain('could not be verified');
+    expect(report).toMatchObject({
+      processIdentityUnverified: true,
+      recoveryBlocked: true,
+      journalFinalized: false,
+    });
+    expect(report?.summary).toContain('PID_IDENTITY_UNVERIFIED');
+    expect((await recovery.journal.read('execution_recovery'))?.status).toBe('active');
+  });
+
+  it('blocks recovery for an active journal without a PID', async () => {
+    const root = await makeRoot();
+    const deps = dependencies();
+    const recovery = new ExecutionRecovery(root, deps);
+    await recovery.journal.begin(
+      record({ pid: null, processStartTime: null, processGroupId: null }),
+    );
+
+    const scan = await recovery.scan();
+    const report = scan.executions[0];
+    expect(deps.inspectProcess).not.toHaveBeenCalled();
+    expect(report).toMatchObject({
+      journalFinalized: false,
+      recoveryBlocked: true,
+      treeConfirmedGone: false,
+    });
+    expect(report?.summary).toContain('PID_NOT_RECORDED');
+    expect(scan.blocked[0]?.kind).toBe('journal');
+    expect((await recovery.journal.read('execution_recovery'))?.status).toBe('active');
+  });
+
+  it('blocks recovery for a supervisor journal whose guard is missing', async () => {
+    const root = await makeRoot();
+    const recovery = new ExecutionRecovery(root, dependencies());
+    await recovery.journal.begin(
+      record({
+        pid: null,
+        processStartTime: null,
+        processGroupId: null,
+        processKind: 'supervisor',
+        launchToken: 'token-1',
+        guardPath: join(root, 'guards', 'execution_recovery.token-1.guard.json'),
+      }),
+    );
+
+    const scan = await recovery.scan();
+    const report = scan.executions[0];
+    expect(report).toMatchObject({ recoveryBlocked: true, journalFinalized: false });
+    expect(report?.summary).toContain('SUPERVISOR_GUARD_MISSING');
+    expect((await recovery.journal.read('execution_recovery'))?.status).toBe('active');
+  });
+
+  it('keeps corrupt journals as evidence and exposes the corruption', async () => {
+    const root = await makeRoot();
+    const recovery = new ExecutionRecovery(root, dependencies());
+    await writeFile(join(root, 'broken.json'), '{not-json', 'utf8');
+
+    const scan = await recovery.scan();
+    expect(scan.executions).toEqual([]);
+    expect(scan.corrupted).toHaveLength(1);
+    expect(scan.clean).toBe(false);
+    expect(scan.blocked.some((entry) => entry.kind === 'corrupt-journal')).toBe(true);
+    const files = await readdir(root);
+    expect(files.some((name) => name.includes('.corrupt-'))).toBe(true);
   });
 
   it('ignores terminal journals so a completed execution is never replayed', async () => {
@@ -202,7 +281,7 @@ describe('ExecutionRecovery', () => {
     const recovery = new ExecutionRecovery(root, deps);
     await recovery.journal.begin(record({ status: 'completed', phase: 'completed' }));
 
-    expect(await recovery.scan()).toEqual([]);
+    expect((await recovery.scan()).executions).toEqual([]);
     expect(deps.inspectProcess).not.toHaveBeenCalled();
   });
 });

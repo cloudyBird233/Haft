@@ -133,6 +133,7 @@ function createFakeRecovery(): ExecutionRecovery {
   return {
     journal,
     spool: { flush: vi.fn() },
+    isWorktreeBlocked: () => false,
   } as unknown as ExecutionRecovery;
 }
 
@@ -248,6 +249,7 @@ describe('RealExecutor shutdown', () => {
     const recovery = {
       journal,
       spool: { flush: vi.fn() },
+      isWorktreeBlocked: () => false,
     } as unknown as ExecutionRecovery;
     const { executor, captured, gitPrepare } = createExecutor({
       recovery,
