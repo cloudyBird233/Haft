@@ -4,11 +4,7 @@ import { join } from 'node:path';
 import type { ExecutionPhase, RunnerRuntimeType } from '@raft-lite/contracts';
 
 export type ExecutionJournalStatus =
-  | 'active'
-  | 'completed'
-  | 'failed'
-  | 'cancelled'
-  | 'interrupted';
+  'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 
 /**
  * Durable description of one in-flight execution.
@@ -62,6 +58,19 @@ const STATUS_VALUES: ExecutionJournalStatus[] = [
   'interrupted',
 ];
 
+export interface ExecutionJournalOptions {
+  /**
+   * Test seam for the atomic write. Production uses the default temporary-file
+   * plus rename implementation. A rejected promise is a hard journal failure;
+   * callers must fail closed.
+   */
+  atomicWrite?: (target: string, contents: string) => Promise<void>;
+  /** Reports a rejected debounced write that no caller is awaiting. */
+  onBackgroundError?: (executionId: string, error: unknown) => void;
+  /** Reports a journal file that could not be parsed or validated. */
+  onCorruptJournal?: (file: string, error: unknown) => void;
+}
+
 /**
  * Atomic per-execution journal.
  *
@@ -70,18 +79,49 @@ const STATUS_VALUES: ExecutionJournalStatus[] = [
  * new complete record, never a half-written JSON document. Non-critical
  * `touch` updates are coalesced; phases, PID identity and terminal status are
  * written immediately.
+ *
+ * Every public mutation has explicit success/failure semantics. Callers that
+ * cannot tolerate a missing journal must not treat a rejected write as a
+ * successful no-op.
  */
 export class ExecutionJournal {
   private readonly records = new Map<string, ExecutionJournalRecord>();
   private readonly queues = new Map<string, Promise<void>>();
   private readonly pending = new Map<string, ExecutionJournalPatch>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
+  private readonly atomicWrite: (target: string, contents: string) => Promise<void>;
+  private backgroundErrorHandler: ((executionId: string, error: unknown) => void) | null;
 
-  constructor(private readonly root: string) {}
+  constructor(
+    private readonly root: string,
+    private readonly options: ExecutionJournalOptions = {},
+  ) {
+    this.atomicWrite = options.atomicWrite ?? defaultAtomicWrite;
+    this.backgroundErrorHandler = options.onBackgroundError ?? null;
+  }
+
+  /**
+   * Registers the process-wide handler for debounced write failures. The
+   * executor uses this to terminate a running CLI when its recovery evidence
+   * can no longer be persisted.
+   */
+  setBackgroundErrorHandler(handler: ((executionId: string, error: unknown) => void) | null): void {
+    this.backgroundErrorHandler = handler;
+  }
 
   async begin(record: ExecutionJournalRecord): Promise<void> {
     this.records.set(record.executionId, { ...record });
-    await this.enqueue(record.executionId, () => this.writeNow(record.executionId));
+    this.pending.delete(record.executionId);
+    try {
+      await this.enqueue(record.executionId, () => this.writeNow(record.executionId));
+    } catch (error) {
+      // Never leave an in-memory record that was never durable. Otherwise a
+      // later update could silently resurrect a journal the runner already
+      // reported as failed.
+      this.records.delete(record.executionId);
+      this.pending.delete(record.executionId);
+      throw error;
+    }
   }
 
   update(
@@ -90,7 +130,11 @@ export class ExecutionJournal {
     options: { immediate?: boolean } = {},
   ): Promise<void> {
     const current = this.records.get(executionId);
-    if (!current) return Promise.resolve();
+    if (!current) {
+      return Promise.reject(
+        new Error(`Execution journal record ${executionId} does not exist; refusing to update it`),
+      );
+    }
     this.pending.set(executionId, { ...(this.pending.get(executionId) ?? {}), ...patch });
     if (options.immediate) {
       return this.flush(executionId);
@@ -98,7 +142,9 @@ export class ExecutionJournal {
     if (!this.timers.has(executionId)) {
       const timer = setTimeout(() => {
         this.timers.delete(executionId);
-        void this.flush(executionId);
+        this.flush(executionId).catch((error: unknown) => {
+          this.reportBackgroundError(executionId, error);
+        });
       }, UPDATE_DEBOUNCE_MS);
       timer.unref?.();
       this.timers.set(executionId, timer);
@@ -111,6 +157,8 @@ export class ExecutionJournal {
     void this.update(executionId, {
       lastSequence,
       ...(phase ? { phase } : {}),
+    }).catch((error: unknown) => {
+      this.reportBackgroundError(executionId, error);
     });
   }
 
@@ -119,10 +167,14 @@ export class ExecutionJournal {
     status: ExecutionJournalStatus,
     phase: ExecutionPhase,
     lastSequence: number,
-  ): Promise<ExecutionJournalRecord | null> {
+  ): Promise<ExecutionJournalRecord> {
     await this.flush(executionId);
     const current = this.records.get(executionId);
-    if (!current) return null;
+    if (!current) {
+      throw new Error(
+        `Execution journal record ${executionId} does not exist; refusing to mark it ${status}`,
+      );
+    }
     const next: ExecutionJournalRecord = {
       ...current,
       status,
@@ -202,7 +254,7 @@ export class ExecutionJournal {
       this.timers.delete(executionId);
     }
     await this.queues.get(executionId);
-    await rm(this.fileFor(executionId), { force: true }).catch(() => undefined);
+    await rm(this.fileFor(executionId), { force: true });
   }
 
   /** Drops terminal journal files older than the retention window. */
@@ -219,8 +271,8 @@ export class ExecutionJournal {
           this.records.delete(record.executionId);
           removed += 1;
         }
-      } catch {
-        // Already gone.
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
     }
     return removed;
@@ -234,41 +286,59 @@ export class ExecutionJournal {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
     }
+    let parsed: Partial<ExecutionJournalRecord>;
     try {
-      const parsed = JSON.parse(raw) as Partial<ExecutionJournalRecord>;
-      if (!isValidRecord(parsed)) {
-        await this.quarantine(file);
-        return null;
-      }
-      return parsed as ExecutionJournalRecord;
-    } catch {
+      parsed = JSON.parse(raw) as Partial<ExecutionJournalRecord>;
+    } catch (error) {
+      this.options.onCorruptJournal?.(file, error);
       await this.quarantine(file);
       return null;
     }
+    if (!isValidRecord(parsed)) {
+      const error = new Error('Execution journal failed validation');
+      this.options.onCorruptJournal?.(file, error);
+      await this.quarantine(file);
+      return null;
+    }
+    return parsed as ExecutionJournalRecord;
   }
 
   private async quarantine(file: string): Promise<void> {
-    await rename(file, `${file}.corrupt-${Date.now()}`).catch(() => undefined);
+    const target = `${file}.corrupt-${Date.now()}`;
+    try {
+      await rename(file, target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
   }
 
   private async writeNow(executionId: string): Promise<void> {
     const record = this.records.get(executionId);
-    if (!record) return;
-    try {
-      await mkdir(this.root, { recursive: true });
-      const target = this.fileFor(executionId);
-      const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
-      await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`, {
-        encoding: 'utf8',
-        mode: 0o600,
-      });
-      await rename(temporary, target);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      // Journal failures must never abort an execution. The log spool and the
-      // server-side execution row remain the source of truth.
-      throw error;
+    if (!record) {
+      throw new Error(`Execution journal record ${executionId} disappeared before its write`);
     }
+    const contents = `${JSON.stringify(record, null, 2)}\n`;
+    const target = this.fileFor(executionId);
+    await mkdir(this.root, { recursive: true });
+    await this.atomicWrite(target, contents);
+  }
+
+  private reportBackgroundError(executionId: string, error: unknown): void {
+    if (this.backgroundErrorHandler) {
+      this.backgroundErrorHandler(executionId, error);
+      return;
+    }
+    // No handler is registered (for example in an isolated journal test). A
+    // background write failure must still be observable, never swallowed.
+    console.error(
+      JSON.stringify({
+        eventType: 'runner.journal_write_failed',
+        message: 'Could not persist a debounced recovery journal update',
+        executionId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
   }
 
   private enqueue(executionId: string, task: () => Promise<void>): Promise<void> {
@@ -276,7 +346,13 @@ export class ExecutionJournal {
     const run = previous.then(task, task);
     // Keep the queue usable after a failed write; callers still see the
     // rejection on `run` and decide whether it is fatal.
-    this.queues.set(executionId, run.then(() => undefined, () => undefined));
+    this.queues.set(
+      executionId,
+      run.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
     return run;
   }
 
@@ -285,18 +361,31 @@ export class ExecutionJournal {
   }
 }
 
+async function defaultAtomicWrite(target: string, contents: string): Promise<void> {
+  const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, contents, { encoding: 'utf8', mode: 0o600 });
+    await rename(temporary, target);
+  } catch (error) {
+    // Cleanup is best-effort; the original journal failure is rethrown and
+    // remains authoritative.
+    await rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
 function isValidRecord(value: Partial<ExecutionJournalRecord>): boolean {
   return Boolean(
     value &&
-      value.version === 1 &&
-      typeof value.executionId === 'string' &&
-      value.executionId.length > 0 &&
-      (value.runtime === 'codex' || value.runtime === 'opencode') &&
-      typeof value.phase === 'string' &&
-      typeof value.status === 'string' &&
-      STATUS_VALUES.includes(value.status as ExecutionJournalStatus) &&
-      typeof value.startedAt === 'string' &&
-      typeof value.lastSequence === 'number',
+    value.version === 1 &&
+    typeof value.executionId === 'string' &&
+    value.executionId.length > 0 &&
+    (value.runtime === 'codex' || value.runtime === 'opencode') &&
+    typeof value.phase === 'string' &&
+    typeof value.status === 'string' &&
+    STATUS_VALUES.includes(value.status as ExecutionJournalStatus) &&
+    typeof value.startedAt === 'string' &&
+    typeof value.lastSequence === 'number',
   );
 }
 

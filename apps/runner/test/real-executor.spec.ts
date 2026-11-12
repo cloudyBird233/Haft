@@ -103,9 +103,7 @@ function createFakeChild(pid = 4321): FakeChild {
   return child;
 }
 
-function repositoryContext(
-  overrides: Partial<RepositoryContext> = {},
-): RepositoryContext {
+function repositoryContext(overrides: Partial<RepositoryContext> = {}): RepositoryContext {
   return {
     contextId: 'context_real_shutdown',
     executionId: 'execution_real_shutdown',
@@ -122,6 +120,20 @@ function repositoryContext(
     lastUsedAt: Date.now(),
     ...overrides,
   };
+}
+
+function createFakeRecovery(): ExecutionRecovery {
+  const journal = {
+    begin: vi.fn().mockResolvedValue(undefined),
+    update: vi.fn().mockResolvedValue(undefined),
+    finish: vi.fn().mockResolvedValue(undefined),
+    flushAll: vi.fn().mockResolvedValue(undefined),
+    setBackgroundErrorHandler: vi.fn(),
+  };
+  return {
+    journal,
+    spool: { flush: vi.fn() },
+  } as unknown as ExecutionRecovery;
 }
 
 function createExecutor(
@@ -183,28 +195,34 @@ function createExecutor(
     assertStillAllowed: vi.fn(async () => undefined),
   } as unknown as RepositoryPathPolicy;
 
-  const executor = new RealExecutor(options.config ?? makeConfig(), callbacks, options.recovery, {
-    resolveExecutable: async () => ({ path: '/virtual/codex', searched: [], error: null }),
-    spawnProcess: () => {
-      resolveSpawned();
-      return child as unknown as ChildProcess;
+  const executor = new RealExecutor(
+    options.config ?? makeConfig(),
+    callbacks,
+    options.recovery ?? createFakeRecovery(),
+    {
+      resolveExecutable: async () => ({ path: '/virtual/codex', searched: [], error: null }),
+      spawnProcess: () => {
+        resolveSpawned();
+        return child as unknown as ChildProcess;
+      },
+      inspectProcess: async () => ({
+        pid: child.pid,
+        parentPid: 1,
+        processGroupId: child.pid,
+        startTime: 'start-test',
+        commandLine: 'codex exec',
+      }),
+      terminateProcess: terminate,
+      waitForProcessExit: async () => true,
+      repositoryPolicy,
+      git: {
+        prepare: gitPrepare,
+        collect: async () => null,
+        cleanup: async () => ({ path: '', removed: false }),
+      },
+      shutdownForceWaitMs: 100,
     },
-    inspectProcess: async () => ({
-      pid: child.pid,
-      parentPid: 1,
-      processGroupId: child.pid,
-      startTime: 'start-test',
-      commandLine: 'codex exec',
-    }),
-    terminateProcess: terminate,
-    repositoryPolicy,
-    git: {
-      prepare: gitPrepare,
-      collect: async () => null,
-      cleanup: async () => ({ path: '', removed: false }),
-    },
-    shutdownForceWaitMs: 100,
-  });
+  );
 
   return { executor, captured, child, terminate, spawned, gitPrepare };
 }

@@ -1,9 +1,6 @@
 import { stat } from 'node:fs/promises';
 import type { RunnerLogEntry } from '@raft-lite/contracts';
-import {
-  ExecutionJournal,
-  type ExecutionJournalRecord,
-} from './execution-journal';
+import { ExecutionJournal, type ExecutionJournalRecord } from './execution-journal';
 import { LogSpool } from './log-spool';
 import { log } from './logger';
 import {
@@ -31,6 +28,8 @@ export interface RecoveredExecution {
   processIdentityUnverified: boolean;
   orphanTerminated: boolean;
   orphanStillAlive: boolean;
+  /** False when the on-disk journal remains active as manual-recovery evidence. */
+  journalFinalized: boolean;
   /** Best-effort check that the recorded worktree is still available for review. */
   worktreeExists: boolean;
   summary: string;
@@ -61,7 +60,17 @@ export class ExecutionRecovery {
       waitForProcessExit,
     },
   ) {
-    this.journal = new ExecutionJournal(root);
+    this.journal = new ExecutionJournal(root, {
+      onCorruptJournal: (file, error) => {
+        log('error', {
+          eventType: 'runner.recovery_journal_corrupt',
+          message: 'A recovery journal could not be read; it was quarantined as evidence',
+          status: 'error',
+          file,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      },
+    });
     this.spool = new LogSpool(`${root}/logs`);
   }
 
@@ -77,9 +86,7 @@ export class ExecutionRecovery {
         identity && (!record.processStartTime || identity.startTime !== record.processStartTime),
       );
       const pidReused = Boolean(
-        identity &&
-          record.processStartTime &&
-          identity.startTime !== record.processStartTime,
+        identity && record.processStartTime && identity.startTime !== record.processStartTime,
       );
       const ownershipMismatch = Boolean(
         identity && !processIdentityUnverified && !isOwnedProcess(identity, record),
@@ -101,7 +108,7 @@ export class ExecutionRecovery {
       }
 
       const worktreeExists = await worktreePresent(record.worktreePath);
-      const summary = buildRecoverySummary({
+      let summary = buildRecoverySummary({
         record,
         processAlive,
         pidReused,
@@ -111,18 +118,49 @@ export class ExecutionRecovery {
         orphanStillAlive,
         worktreeExists,
       });
-      await this.journal.finish(record.executionId, 'interrupted', record.phase, record.lastSequence);
+
+      // A process we positively identified as ours but could not confirm dead
+      // must stay active on disk. Marking it interrupted would hide the orphan
+      // from every later startup scan and would overstate recovery success.
+      let journalFinalized = false;
+      if (!orphanStillAlive) {
+        try {
+          await this.journal.finish(
+            record.executionId,
+            'interrupted',
+            record.phase,
+            record.lastSequence,
+          );
+          journalFinalized = true;
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          summary =
+            `${summary} The recovery journal could not be marked interrupted: ${detail}`.slice(
+              0,
+              2000,
+            );
+          log('error', {
+            eventType: 'runner.recovery_journal_finalize_failed',
+            message: 'Could not persist the interrupted state of a recovered execution',
+            status: 'error',
+            executionId: record.executionId,
+            error: detail,
+          });
+        }
+      }
+
       const logs = await this.spool.read(record.executionId, 200);
 
-      log(orphanStillAlive ? 'warn' : 'info', {
+      log(orphanStillAlive || !journalFinalized ? 'warn' : 'info', {
         eventType: 'runner.recovery_scan',
         message: summary,
-        status: orphanStillAlive ? 'warning' : 'interrupted',
+        status: orphanStillAlive || !journalFinalized ? 'warning' : 'interrupted',
         executionId: record.executionId,
         runtime: record.runtime,
         pid: record.pid,
         orphanTerminated,
         orphanStillAlive,
+        journalFinalized,
         worktreeExists,
       });
 
@@ -135,6 +173,7 @@ export class ExecutionRecovery {
         processIdentityUnverified,
         orphanTerminated,
         orphanStillAlive,
+        journalFinalized,
         worktreeExists,
         summary,
       });
@@ -197,23 +236,17 @@ function buildRecoverySummary(input: {
   orphanStillAlive: boolean;
   worktreeExists: boolean;
 }): string {
-  const parts = [
-    'RUNNER_INTERRUPTED: the runner restarted before this execution finished',
-  ];
+  const parts = ['RUNNER_INTERRUPTED: the runner restarted before this execution finished'];
   if (!input.processAlive) {
     parts.push('no surviving CLI process was found');
   } else if (input.pidReused) {
-    parts.push(
-      `PID ${input.record.pid} now belongs to a different process; it was left untouched`,
-    );
+    parts.push(`PID ${input.record.pid} now belongs to a different process; it was left untouched`);
   } else if (input.processIdentityUnverified) {
     parts.push(
       `the process identity for PID ${input.record.pid} could not be verified; it was left untouched`,
     );
   } else if (input.ownershipMismatch) {
-    parts.push(
-      `PID ${input.record.pid} does not belong to this execution; it was left untouched`,
-    );
+    parts.push(`PID ${input.record.pid} does not belong to this execution; it was left untouched`);
   } else if (input.orphanTerminated) {
     parts.push('the orphaned CLI process tree was terminated');
   } else if (input.orphanStillAlive) {
