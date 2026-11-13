@@ -30,11 +30,7 @@ import {
   terminateProcess,
   type ResolvedExecutable,
 } from './process-utils';
-import {
-  inspectProcess,
-  waitForProcessExit,
-  type ProcessIdentity,
-} from './process-identity';
+import { inspectProcess, waitForProcessExit, type ProcessIdentity } from './process-identity';
 import { guardPathFor, type TreeTerminationResult } from './process-guard';
 import type { ExecutionRecovery } from './recovery';
 import type { ExecutionJournalPatch } from './execution-journal';
@@ -119,12 +115,28 @@ interface RealSession extends RunnerSessionView {
   treeConfirmedGone: boolean;
   /** Last verified termination result, for diagnostics and shutdown. */
   termination: TreeTerminationResult | null;
+  /**
+   * Single-flight terminal decision. It is installed synchronously before the
+   * first await so a concurrent finalize can only join it.
+   */
+  finalizePromise: Promise<void> | null;
+  /** Every outcome requested while the decision is still open. */
+  finalizeRequests: FinalizeRequest[];
+  /** True once the final outcome has been selected; later requests cannot change it. */
+  finalizeCommitted: boolean;
 }
 
 interface FinalizeResult {
   reason?: string;
   exitCode?: number | null;
   summary?: string | null;
+}
+
+type TerminalOutcome = 'completed' | 'failed' | 'cancelled';
+
+interface FinalizeRequest {
+  outcome: TerminalOutcome;
+  result: FinalizeResult;
 }
 
 class RunnerFailure extends Error {
@@ -693,15 +705,63 @@ export class RealExecutor implements RunnerExecutor {
     });
   }
 
-  private async finalize(
+  /**
+   * Claims the single terminal decision for this execution.
+   *
+   * The promise is installed synchronously, before the tree-confirmation
+   * await. Concurrent callers therefore join the same decision instead of
+   * writing a second journal record or emitting a second terminal event. If
+   * the tree cannot be confirmed, the decision remains open and the promise is
+   * cleared so a later retry is still possible.
+   */
+  private finalize(
     session: RealSession,
-    outcome: 'completed' | 'failed' | 'cancelled',
+    outcome: TerminalOutcome,
     result: FinalizeResult,
   ): Promise<void> {
-    if (session.finished) return;
-    if (!(await this.confirmTreeAfterClose(session))) {
+    if (session.finished) return Promise.resolve();
+    if (session.finalizePromise) {
+      if (!session.finalizeCommitted) {
+        session.finalizeRequests.push({ outcome, result });
+      }
+      return session.finalizePromise;
+    }
+
+    session.finalizeRequests = [{ outcome, result }];
+    const tracked = this.runFinalize(session).finally(() => {
+      if (session.finalizePromise === tracked) {
+        session.finalizePromise = null;
+      }
+    });
+    session.finalizePromise = tracked;
+    return tracked;
+  }
+
+  private async runFinalize(session: RealSession): Promise<void> {
+    let treeConfirmed: boolean;
+    try {
+      treeConfirmed = await this.confirmTreeAfterClose(session);
+    } catch (error) {
+      this.markUncertain(
+        session,
+        `PROCESS_TREE_NOT_CONFIRMED: tree verification threw: ${errorMessage(error)}`,
+      );
       return;
     }
+    if (!treeConfirmed) return;
+    // A concurrent confirmation attempt may have latched uncertainty while
+    // this one was in flight. Never finalize behind that evidence.
+    if (session.finished) return;
+
+    const request = this.arbitrateFinalizeRequest(session);
+    const requestedOutcome = request.outcome;
+    let finalOutcome = requestedOutcome;
+    let finalResult = request.result;
+
+    // From this synchronous point on the outcome is committed. No later call
+    // can replace it, even if it arrives while Git collection or the journal
+    // finish is awaiting.
+    session.finalizeCommitted = true;
     session.finished = true;
     session.identityPending = false;
     session.pendingExit = null;
@@ -711,7 +771,7 @@ export class RealExecutor implements RunnerExecutor {
       this.writeParsed(session, line);
     }
 
-    if (outcome === 'completed') {
+    if (finalOutcome === 'completed') {
       this.emitPhase(session, 'finalizing', 'Collecting the Git result');
     }
 
@@ -723,15 +783,13 @@ export class RealExecutor implements RunnerExecutor {
       gitError = errorMessage(error);
     }
 
-    let finalOutcome: 'completed' | 'failed' | 'cancelled' = outcome;
-    let finalResult = result;
     if (gitError) {
       finalOutcome = 'failed';
-      const originalReason = result.reason?.trim() || `original outcome: ${outcome}`;
+      const originalReason = finalResult.reason?.trim() || `original outcome: ${requestedOutcome}`;
       finalResult = {
         reason: `GIT_COLLECT_FAILED: ${gitError}; ${originalReason}`.slice(0, 2000),
-        exitCode: result.exitCode ?? session.exitCode,
-        summary: result.summary ?? session.parser.lastSummary(),
+        exitCode: finalResult.exitCode ?? session.exitCode,
+        summary: finalResult.summary ?? session.parser.lastSummary(),
       };
     }
 
@@ -744,7 +802,7 @@ export class RealExecutor implements RunnerExecutor {
     } catch (error) {
       const journalFinishError = errorMessage(error);
       finalOutcome = 'failed';
-      const originalReason = finalResult.reason?.trim() || `original outcome: ${outcome}`;
+      const originalReason = finalResult.reason?.trim() || `original outcome: ${requestedOutcome}`;
       finalResult = {
         reason: `RECOVERY_JOURNAL_FINISH_FAILED: ${journalFinishError}; ${originalReason}`.slice(
           0,
@@ -817,6 +875,57 @@ export class RealExecutor implements RunnerExecutor {
     await this.cleanupWorktree(session);
   }
 
+  /**
+   * Deterministic arbitration for concurrent terminal requests:
+   * evidence of a failure wins, then cancellation intent, then timeout, then
+   * success. The first request of the winning class supplies the payload.
+   */
+  private arbitrateFinalizeRequest(session: RealSession): FinalizeRequest {
+    const failed = session.finalizeRequests.find((request) => request.outcome === 'failed');
+    if (failed) return failed;
+
+    if (session.cancelled) {
+      return (
+        session.finalizeRequests.find((request) => request.outcome === 'cancelled') ?? {
+          outcome: 'cancelled',
+          result: {
+            reason: session.cancelReason ?? 'Cancelled by operator',
+            exitCode: session.exitCode,
+            summary: session.parser.lastSummary(),
+          },
+        }
+      );
+    }
+
+    if (session.timedOut) {
+      return {
+        outcome: 'failed',
+        result: {
+          reason: `CLI_TIMEOUT: the ${session.runtime} CLI exceeded its execution timeout`,
+          exitCode: session.exitCode,
+          summary: session.parser.lastSummary(),
+        },
+      };
+    }
+
+    const cancelled = session.finalizeRequests.find((request) => request.outcome === 'cancelled');
+    if (cancelled) return cancelled;
+
+    const completed = session.finalizeRequests.find((request) => request.outcome === 'completed');
+    if (completed) return completed;
+
+    return (
+      session.finalizeRequests[0] ?? {
+        outcome: 'failed',
+        result: {
+          reason: 'CLI execution failed without a terminal decision',
+          exitCode: session.exitCode,
+          summary: session.parser.lastSummary(),
+        },
+      }
+    );
+  }
+
   private collectGit(session: RealSession): Promise<GitExecutionResult | null> {
     if (!session.worktree) return Promise.resolve(null);
     return this.git.collect(session.worktree);
@@ -856,11 +965,7 @@ export class RealExecutor implements RunnerExecutor {
       this.fail(session, `CLI_SPAWN_FAILED: ${errorMessage(error)}`);
       return;
     }
-    void this.abortSpawnedProcess(
-      session,
-      child,
-      `CLI_SPAWN_FAILED: ${errorMessage(error)}`,
-    );
+    void this.abortSpawnedProcess(session, child, `CLI_SPAWN_FAILED: ${errorMessage(error)}`);
   }
 
   private handleStdinFailure(session: RealSession, error: unknown): void {
@@ -870,11 +975,7 @@ export class RealExecutor implements RunnerExecutor {
       this.fail(session, `CLI_STDIN_FAILED: ${errorMessage(error)}`);
       return;
     }
-    void this.abortSpawnedProcess(
-      session,
-      child,
-      `CLI_STDIN_FAILED: ${errorMessage(error)}`,
-    );
+    void this.abortSpawnedProcess(session, child, `CLI_STDIN_FAILED: ${errorMessage(error)}`);
   }
 
   private childExited(child: ChildProcess | null): boolean {
@@ -892,12 +993,18 @@ export class RealExecutor implements RunnerExecutor {
       session.treeConfirmedGone = true;
       return true;
     }
-    const verification = await session.managed.verifyTreeGone(5_000);
-    if (!verification.confirmed) {
+    let verification: Awaited<ReturnType<SupervisedProcess['verifyTreeGone']>>;
+    try {
+      verification = await session.managed.verifyTreeGone(5_000);
+    } catch (error) {
       this.markUncertain(
         session,
-        `PROCESS_TREE_NOT_CONFIRMED: ${verification.reason}`,
+        `PROCESS_TREE_NOT_CONFIRMED: tree verification threw: ${errorMessage(error)}`,
       );
+      return false;
+    }
+    if (!verification.confirmed) {
+      this.markUncertain(session, `PROCESS_TREE_NOT_CONFIRMED: ${verification.reason}`);
       return false;
     }
     session.treeConfirmedGone = true;
@@ -1163,6 +1270,9 @@ export class RealExecutor implements RunnerExecutor {
       launchToken: randomUUID(),
       treeConfirmedGone: false,
       termination: null,
+      finalizePromise: null,
+      finalizeRequests: [],
+      finalizeCommitted: false,
     };
   }
 

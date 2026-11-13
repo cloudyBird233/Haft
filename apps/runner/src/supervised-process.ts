@@ -12,11 +12,7 @@ import {
   terminateGuardedTree,
   verifyGuardedTree,
 } from './process-guard';
-import {
-  inspectProcess,
-  terminateProcessTree,
-  waitForProcessExit,
-} from './process-identity';
+import { inspectProcess, terminateProcessTree, waitForProcessExit } from './process-identity';
 
 /**
  * Launches a real CLI behind the per-execution supervisor.
@@ -54,6 +50,10 @@ interface SupervisorRuntime {
   /** Cwd used to resolve the supervisor's own loader (tsx); not the CLI cwd. */
   cwd: string | null;
 }
+
+const SUPERVISOR_READY_TIMEOUT_MS = 20_000;
+/** Bounded cleanup attempt for a supervisor that never produced a usable guard. */
+const UNREADY_SUPERVISOR_KILL_WAIT_MS = 2_000;
 
 let runtimePromise: Promise<SupervisorRuntime> | null = null;
 let parentIdentityPromise: Promise<{ pid: number; startTime: string }> | null = null;
@@ -109,6 +109,11 @@ export async function spawnSupervisedProcess(
     latestGuard = guard;
     return guard;
   });
+  // The executor may not await ready before the supervisor fails (for example
+  // when negotiation is still in progress). Keep the original rejection for
+  // callers, but mark it handled so a fast supervisor failure can never become
+  // an unhandled rejection that takes down the runner.
+  void ready.catch(() => undefined);
 
   const currentGuard = async (): Promise<ProcessGuardRecord | null> => {
     const read = await readProcessGuard(guardPath);
@@ -119,41 +124,73 @@ export async function spawnSupervisedProcess(
     return latestGuard;
   };
 
+  const guardForOperation = async (
+    waitMs = SUPERVISOR_READY_TIMEOUT_MS,
+  ): Promise<{ guard: ProcessGuardRecord } | { guard: null; error: string }> => {
+    const current = await currentGuard();
+    if (current) return { guard: current };
+    try {
+      return { guard: await waitForReadyBounded(ready, waitMs) };
+    } catch (error) {
+      return {
+        guard: null,
+        error: `PROCESS_SUPERVISOR_NOT_READY: ${errorMessage(error)}`,
+      };
+    }
+  };
+
   return {
     child,
     guardPath,
     controlPath,
     ready,
     async terminate(force: boolean, timeoutMs?: number): Promise<TreeTerminationResult> {
-      const guard = (await currentGuard()) ?? (await ready);
-      return terminateGuardedTree(
-        guard,
-        controlPath,
-        {
-          inspectProcess,
-          terminateProcessTree: async (pid: number) => {
-            const result = await terminateProcessTree(pid);
-            if (!result.confirmed) {
-              throw new Error(result.error ?? `Could not confirm PID ${pid} exited`);
-            }
+      const selected = await guardForOperation(timeoutMs ?? SUPERVISOR_READY_TIMEOUT_MS);
+      if (!selected.guard) {
+        // The supervisor never produced a readable guard. A verified tree kill
+        // is impossible, so report unconfirmed and keep the journal active.
+        // Still make one bounded, handle-based cleanup attempt so a stuck
+        // supervisor cannot be left behind indefinitely.
+        const killIssued = await killUnreadySupervisor(child);
+        return unconfirmedTermination(selected.error, killIssued);
+      }
+      try {
+        return await terminateGuardedTree(
+          selected.guard,
+          controlPath,
+          {
+            inspectProcess,
+            terminateProcessTree: async (pid: number) => {
+              const result = await terminateProcessTree(pid);
+              if (!result.confirmed) {
+                throw new Error(result.error ?? `Could not confirm PID ${pid} exited`);
+              }
+            },
+            waitForProcessExit,
           },
-          waitForProcessExit,
-        },
-        {
-          force,
-          supervisorConfirmMs: timeoutMs,
-          verifyTimeoutMs: timeoutMs,
-          readGuard: currentGuard,
-        },
-      );
+          {
+            force,
+            supervisorConfirmMs: timeoutMs,
+            verifyTimeoutMs: timeoutMs,
+            readGuard: currentGuard,
+          },
+        );
+      } catch (error) {
+        return unconfirmedTermination(
+          `PROCESS_TREE_NOT_CONFIRMED: termination threw: ${errorMessage(error)}`,
+        );
+      }
     },
     async verifyTreeGone(timeoutMs = 5_000): Promise<TreeVerification> {
-      const guard = (await currentGuard()) ?? (await ready);
+      const selected = await guardForOperation(timeoutMs);
+      if (!selected.guard) {
+        return unconfirmedVerification(selected.error);
+      }
       const deadline = Date.now() + Math.max(0, timeoutMs);
-      let result = await verifyGuardedTree(guard, { inspectProcess });
+      let result = await verifyGuardedTree(selected.guard, { inspectProcess });
       while (!result.confirmed && !result.identityMismatch && Date.now() < deadline) {
         await delay(50);
-        const refreshed = (await currentGuard()) ?? guard;
+        const refreshed = (await currentGuard()) ?? selected.guard;
         result = await verifyGuardedTree(refreshed, { inspectProcess });
       }
       return result;
@@ -186,12 +223,75 @@ async function currentParentIdentity(): Promise<{ pid: number; startTime: string
   return parentIdentityPromise;
 }
 
-async function waitForGuardReady(
+function unconfirmedVerification(reason: string): TreeVerification {
+  return {
+    confirmed: false,
+    reason,
+    identityMismatch: false,
+    supervisor: null,
+    cli: null,
+    groupMemberCount: 0,
+    cgroupMemberCount: 0,
+  };
+}
+
+function unconfirmedTermination(reason: string, killIssued = false): TreeTerminationResult {
+  return {
+    ...unconfirmedVerification(reason),
+    requested: true,
+    killIssued,
+  };
+}
+
+/**
+ * Bounded, handle-based cleanup for a supervisor that never produced a usable
+ * guard. Killing the direct child is safe because Node owns that handle; the
+ * result is deliberately still unconfirmed because the protected tree could not
+ * be verified.
+ */
+async function killUnreadySupervisor(child: ChildProcess): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return false;
+  let cleanup = (): void => undefined;
+  const exited = new Promise<void>((resolvePromise) => {
+    const done = (): void => {
+      cleanup();
+      resolvePromise();
+    };
+    cleanup = (): void => {
+      child.off('exit', done);
+      child.off('close', done);
+    };
+    child.once('exit', done);
+    child.once('close', done);
+  });
+  let killed: boolean;
+  try {
+    killed = child.kill('SIGKILL');
+  } catch {
+    cleanup();
+    return false;
+  }
+  if (!killed) {
+    cleanup();
+    return false;
+  }
+  await Promise.race([exited, delay(UNREADY_SUPERVISOR_KILL_WAIT_MS)]);
+  cleanup();
+  return true;
+}
+
+/**
+ * Exported for the supervisor-safety tests, which use a fake child and real
+ * guard files to prove the ready contract without inventing a second
+ * implementation.
+ */
+export async function waitForGuardReady(
   child: ChildProcess,
   guardPath: string,
   spec: SupervisorLaunchSpec,
+  timeoutMs = SUPERVISOR_READY_TIMEOUT_MS,
 ): Promise<ProcessGuardRecord> {
-  const deadline = Date.now() + 20_000;
+  const deadline = Date.now() + Math.max(0, timeoutMs);
   let lastError = 'guard was not written';
   let exited = false;
   child.once('exit', () => {
@@ -305,9 +405,7 @@ function supervisorScriptCandidates(): string[] {
     candidates.push(join(moduleDirectory, 'process-supervisor-child.ts'));
   }
   candidates.push(join(process.cwd(), 'src', 'process-supervisor-child.ts'));
-  candidates.push(
-    join(process.cwd(), 'apps', 'runner', 'src', 'process-supervisor-child.ts'),
-  );
+  candidates.push(join(process.cwd(), 'apps', 'runner', 'src', 'process-supervisor-child.ts'));
   return [...new Set(candidates)];
 }
 
@@ -373,13 +471,7 @@ function windowsSupervisorSource(): string {
       ? [join(moduleDirectory, '..', 'native', 'windows-process-supervisor.cs')]
       : []),
     join(process.cwd(), 'native', 'windows-process-supervisor.cs'),
-    join(
-      process.cwd(),
-      'apps',
-      'runner',
-      'native',
-      'windows-process-supervisor.cs',
-    ),
+    join(process.cwd(), 'apps', 'runner', 'native', 'windows-process-supervisor.cs'),
   ];
   const source = candidates.find((candidate) => existsSync(candidate));
   if (!source) {
@@ -409,6 +501,32 @@ async function findCsc(): Promise<string> {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+/**
+ * Bounds how long cleanup may wait for a supervisor to publish its guard.
+ * `ready` is shared with all callers and is never cancelled; this only bounds
+ * the local operation so shutdown cannot hang on a supervisor that is stuck
+ * before writing its guard.
+ */
+async function waitForReadyBounded(
+  ready: Promise<ProcessGuardRecord>,
+  timeoutMs: number,
+): Promise<ProcessGuardRecord> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      ready,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`the supervisor guard was not readable within ${timeoutMs} ms`)),
+          Math.max(0, timeoutMs),
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function errorMessage(error: unknown): string {

@@ -67,10 +67,26 @@ internal static class Program
 
             OpenParent();
             CreateJob();
-            WriteGuard("starting", false, null, "job object installed; CLI not created yet");
+
+            // The starting guard is the durable evidence that a protected tree
+            // may exist. It must be written and read back before any CLI is
+            // created; otherwise a runner restart could not find this
+            // supervisor and the Job Object would be the only remaining
+            // protection.
+            if (!WriteGuard("starting", false, null, "job object installed; CLI not created yet"))
+            {
+                throw new InvalidOperationException("the starting guard could not be written");
+            }
+            if (!VerifyGuard())
+            {
+                throw new InvalidOperationException("the starting guard could not be verified");
+            }
 
             SpawnCli();
-            WriteGuard("running", false, null, null);
+            if (!WriteGuard("running", false, null, null))
+            {
+                throw new InvalidOperationException("the running guard could not be written");
+            }
             return WaitForTermination();
         }
         catch (Exception error)
@@ -318,18 +334,25 @@ internal static class Program
         }
     }
 
-    private static void WriteGuard(string state, bool treeConfirmedGone, int? exitCode, string detail)
+    /**
+     * Returns true only when the guard file was durably written. Callers that
+     * are about to create a process must treat false as fatal; later updates
+     * may continue after a failure because the supervisor already owns the
+     * protected tree, but the initial guard must exist before any CLI does.
+     */
+    private static bool WriteGuard(string state, bool treeConfirmedGone, int? exitCode, string detail)
     {
-        if (guard == null) return;
+        if (guard == null) return false;
         guard.state = state;
         guard.treeConfirmedGone = treeConfirmedGone;
         if (exitCode.HasValue) guard.exitCode = exitCode.Value;
         guard.detail = detail;
         guard.updatedAt = DateTime.UtcNow.ToString("o");
+        string temporary = null;
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(config.guardPath));
-            var temporary = config.guardPath + "." + Process.GetCurrentProcess().Id + ".tmp";
+            temporary = config.guardPath + "." + Process.GetCurrentProcess().Id + ".tmp";
             File.WriteAllText(temporary, guard.ToJson() + "\n", new UTF8Encoding(false));
             if (File.Exists(config.guardPath))
             {
@@ -339,11 +362,40 @@ internal static class Program
             {
                 File.Move(temporary, config.guardPath);
             }
+            return true;
         }
         catch
         {
             // The guard is recovery evidence; failure to update it must not
-            // cause the supervisor to abandon the protected tree.
+            // cause the supervisor to abandon an already protected tree.
+            if (temporary != null)
+            {
+                try
+                {
+                    File.Delete(temporary);
+                }
+                catch
+                {
+                    // Diagnostic cleanup only.
+                }
+            }
+            return false;
+        }
+    }
+
+    /** Proves the just-written starting guard is exactly readable on disk. */
+    private static bool VerifyGuard()
+    {
+        if (guard == null) return false;
+        try
+        {
+            var expected = guard.ToJson() + "\n";
+            var actual = File.ReadAllText(config.guardPath);
+            return string.Equals(actual, expected, StringComparison.Ordinal);
+        }
+        catch
+        {
+            return false;
         }
     }
 

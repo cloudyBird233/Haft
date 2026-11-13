@@ -1,5 +1,5 @@
-import { mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { lstat, mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { RunnerLogEntry } from '@raft-lite/contracts';
 import {
   ExecutionJournal,
@@ -104,7 +104,9 @@ export class ExecutionRecovery {
   readonly spool: LogSpool;
   private readonly rootPath: string;
   private lastBlocked: RecoveryBlockedEntry[] = [];
-  private readonly dependencies: Required<Pick<RecoveryDependencies, 'inspectProcess' | 'terminateProcessTree' | 'waitForProcessExit'>> &
+  private readonly dependencies: Required<
+    Pick<RecoveryDependencies, 'inspectProcess' | 'terminateProcessTree' | 'waitForProcessExit'>
+  > &
     Pick<RecoveryDependencies, 'readGuard'>;
 
   constructor(
@@ -225,11 +227,11 @@ export class ExecutionRecovery {
     if (record.status !== 'active') {
       return { resolved: false, reason: `Execution ${executionId} is already ${record.status}` };
     }
-    const verification = await this.verifyRecord(record);
-    if (verification?.processAlive) {
+    const verification = await this.verifyRecordTree(record);
+    if (!verification.confirmed) {
       return {
         resolved: false,
-        reason: `A live process still matches execution ${executionId}; terminate it before resolving`,
+        reason: `Process tree is not proven gone for execution ${executionId}: ${verification.reason}`,
       };
     }
     await this.journal.finish(record.executionId, 'interrupted', record.phase, record.lastSequence);
@@ -243,9 +245,7 @@ export class ExecutionRecovery {
       { immediate: true },
     );
     await this.writeResolution(executionId, note);
-    this.lastBlocked = this.lastBlocked.filter(
-      (entry) => entry.executionId !== executionId,
-    );
+    this.lastBlocked = this.lastBlocked.filter((entry) => entry.executionId !== executionId);
     await this.persistBlockedState(this.blockedStatePath(), this.lastBlocked);
     return { resolved: true, reason: 'Journal marked interrupted by operator resolution' };
   }
@@ -256,18 +256,48 @@ export class ExecutionRecovery {
   ): Promise<{ resolved: boolean; reason: string }> {
     const target = resolve(file);
     const root = resolve(this.root());
-    if (!target.startsWith(`${root}${separatorForPlatform()}`) && target !== root) {
+    const targetRelative = relative(root, target);
+    if (
+      !targetRelative ||
+      targetRelative === '..' ||
+      targetRelative.startsWith(`..${sep}`) ||
+      isAbsolute(targetRelative)
+    ) {
       return { resolved: false, reason: 'The journal file is outside the recovery root' };
     }
+    if (relative(root, dirname(target)) !== '') {
+      return {
+        resolved: false,
+        reason: 'The target is not a quarantined corrupt journal in the recovery root',
+      };
+    }
+    if (!/\.corrupt-\d+$/.test(basename(target))) {
+      return {
+        resolved: false,
+        reason: 'The target is not a quarantined corrupt journal',
+      };
+    }
+    let info;
     try {
-      await stat(target);
+      info = await lstat(target);
     } catch {
       return { resolved: false, reason: `${target} does not exist` };
+    }
+    if (info.isSymbolicLink() || !info.isFile()) {
+      return {
+        resolved: false,
+        reason: 'The target is not a regular quarantined corrupt journal file',
+      };
     }
     await writeFile(
       `${target}.resolution.json`,
       `${JSON.stringify(
-        { version: 1, resolution: 'operator-confirmed-process-gone', note, resolvedAt: new Date().toISOString() },
+        {
+          version: 1,
+          resolution: 'operator-confirmed-process-gone',
+          note,
+          resolvedAt: new Date().toISOString(),
+        },
         null,
         2,
       )}\n`,
@@ -347,12 +377,11 @@ export class ExecutionRecovery {
     }
 
     if (verification.identityMismatch) {
-      return this.blockRecord(
-        record,
-        blocked,
-        `PID_IDENTITY_UNVERIFIED: ${verification.reason}`,
-        { worktreeExists, treeConfirmedGone: false, guard },
-      );
+      return this.blockRecord(record, blocked, `PID_IDENTITY_UNVERIFIED: ${verification.reason}`, {
+        worktreeExists,
+        treeConfirmedGone: false,
+        guard,
+      });
     }
 
     if (!verification.confirmed) {
@@ -414,13 +443,12 @@ export class ExecutionRecovery {
     const processAlive = Boolean(identity);
     const processIdentityUnverified = Boolean(
       identity &&
-        (!record.processStartTime ||
-          !sameStartTime(record.processStartTime, identity.startTime)),
+      (!record.processStartTime || !sameStartTime(record.processStartTime, identity.startTime)),
     );
     const pidReused = Boolean(
       identity &&
-        record.processStartTime &&
-        !sameStartTime(record.processStartTime, identity.startTime),
+      record.processStartTime &&
+      !sameStartTime(record.processStartTime, identity.startTime),
     );
     const ownershipMismatch = Boolean(
       identity && !processIdentityUnverified && !isOwnedProcess(identity, record),
@@ -668,7 +696,8 @@ export class ExecutionRecovery {
     }
     const read = await (this.dependencies.readGuard ?? readProcessGuard)(record.guardPath);
     if (read.kind === 'missing') return { kind: 'missing' };
-    if (read.kind === 'invalid') return { kind: 'invalid', error: `SUPERVISOR_GUARD_CORRUPT: ${read.error}` };
+    if (read.kind === 'invalid')
+      return { kind: 'invalid', error: `SUPERVISOR_GUARD_CORRUPT: ${read.error}` };
     if (
       read.guard.executionId !== record.executionId ||
       (record.launchToken && read.guard.launchToken !== record.launchToken)
@@ -681,27 +710,120 @@ export class ExecutionRecovery {
     return { kind: 'ok', guard: { ...read.guard, path: read.path } };
   }
 
-  private async verifyRecord(
+  /**
+   * Operator resolution is only safe after the *whole* protected tree is
+   * proven gone. Checking the root PID alone would allow resolving a journal
+   * while a descendant, cgroup member or reused/replaced identity is still
+   * present.
+   */
+  private async verifyRecordTree(
     record: ExecutionJournalRecord,
-  ): Promise<{ processAlive: boolean } | null> {
+  ): Promise<{ confirmed: boolean; reason: string }> {
     const guardResult = await this.loadGuard(record);
+    if (guardResult.kind === 'invalid' || guardResult.kind === 'mismatch') {
+      return { confirmed: false, reason: guardResult.error };
+    }
     if (guardResult.kind === 'ok') {
-      const verification = await verifyGuardedTree(guardResult.guard, {
-        inspectProcess: this.dependencies.inspectProcess,
-      });
+      let verification;
+      try {
+        verification = await verifyGuardedTree(guardResult.guard, {
+          inspectProcess: this.dependencies.inspectProcess,
+        });
+      } catch (error) {
+        return {
+          confirmed: false,
+          reason: `PROCESS_TREE_UNVERIFIED: tree verification threw: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        };
+      }
+      if (verification.identityMismatch) {
+        return {
+          confirmed: false,
+          reason: `PID identity is not verified: ${verification.reason}`,
+        };
+      }
+      if (!verification.confirmed) {
+        return {
+          confirmed: false,
+          reason: `PROCESS_TREE_NOT_CONFIRMED: ${verification.reason}`,
+        };
+      }
+      return { confirmed: true, reason: verification.reason };
+    }
+
+    if (
+      record.processKind === 'supervisor' ||
+      typeof record.guardPath === 'string' ||
+      typeof record.supervisorPid === 'number'
+    ) {
       return {
-        processAlive:
-          verification.supervisor?.status === 'live-matching' ||
-          verification.cli?.status === 'live-matching',
+        confirmed: false,
+        reason:
+          'SUPERVISOR_GUARD_MISSING: the journal records a supervisor but no guard is readable',
       };
     }
-    if (record.pid === null) return { processAlive: false };
-    const identity = await this.dependencies.inspectProcess(record.pid);
-    if (!identity) return { processAlive: isProcessAlive(record.pid) };
-    if (!record.processStartTime || !sameStartTime(record.processStartTime, identity.startTime)) {
-      return { processAlive: false };
+
+    if (record.pid !== null) {
+      let identity: ProcessIdentity | null;
+      try {
+        identity = await this.dependencies.inspectProcess(record.pid);
+      } catch (error) {
+        return {
+          confirmed: false,
+          reason: `PID_IDENTITY_UNVERIFIED: PID ${record.pid} could not be inspected: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        };
+      }
+      if (identity) {
+        if (
+          !record.processStartTime ||
+          !sameStartTime(record.processStartTime, identity.startTime)
+        ) {
+          return {
+            confirmed: false,
+            reason: `PID_IDENTITY_UNVERIFIED: PID ${record.pid} does not match the recorded start marker`,
+          };
+        }
+        return {
+          confirmed: false,
+          reason: `PID_STILL_ALIVE: PID ${record.pid} still matches this execution`,
+        };
+      }
+      if (isProcessAlive(record.pid)) {
+        return {
+          confirmed: false,
+          reason: `PID_IDENTITY_UNVERIFIED: PID ${record.pid} is alive but its identity could not be inspected`,
+        };
+      }
     }
-    return { processAlive: true };
+
+    if (process.platform !== 'win32' && record.processGroupId) {
+      const scan = await scanProcessGroupMembers(record.processGroupId);
+      if (!scan.ok) {
+        return {
+          confirmed: false,
+          reason: `PROCESS_GROUP_NOT_VERIFIED: ${
+            scan.error ?? `could not enumerate process group ${record.processGroupId}`
+          }`,
+        };
+      }
+      if (scan.members.length > 0) {
+        return {
+          confirmed: false,
+          reason: `PROCESS_GROUP_NOT_EMPTY: process group ${record.processGroupId} still has members`,
+        };
+      }
+    }
+
+    return {
+      confirmed: true,
+      reason:
+        record.pid === null
+          ? 'No process identity or protected group is recorded; operator attestation is the only evidence'
+          : 'No matching process or protected group member remains',
+    };
   }
 
   private async markJournalBlocked(executionId: string, reason: string): Promise<void> {
@@ -789,7 +911,8 @@ export class ExecutionRecovery {
           kind: 'orphan-guard',
           executionId: read.guard.executionId,
           file,
-          reason: 'ORPHAN_GUARD: a guard is not linked to a readable active journal and its tree is not confirmed gone',
+          reason:
+            'ORPHAN_GUARD: a guard is not linked to a readable active journal and its tree is not confirmed gone',
           pid: read.guard.supervisorPid,
           processStartTime: read.guard.supervisorStartTime,
           cliPid: read.guard.cliPid,
@@ -809,10 +932,7 @@ export class ExecutionRecovery {
     );
   }
 
-  private async persistBlockedState(
-    path: string,
-    entries: RecoveryBlockedEntry[],
-  ): Promise<void> {
+  private async persistBlockedState(path: string, entries: RecoveryBlockedEntry[]): Promise<void> {
     try {
       await mkdir(dirname(path), { recursive: true });
       const temporary = `${path}.${process.pid}.tmp`;
@@ -982,10 +1102,6 @@ function buildRecoverySummary(input: {
 
 function sanitize(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 120) || 'execution';
-}
-
-function separatorForPlatform(): string {
-  return process.platform === 'win32' ? '\\' : '/';
 }
 
 function delay(ms: number): Promise<void> {
