@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ExecutionPhase, RunnerRuntimeType } from '@raft-lite/contracts';
+import { defaultEvidenceIo, writeCorruptProvenance, type EvidenceIo } from './recovery-evidence';
 
 export type ExecutionJournalStatus =
   'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
@@ -81,6 +82,9 @@ export interface CorruptJournalEntry {
   quarantinedPath: string | null;
   error: string;
   detectedAt: string;
+  /** Provenance written by the real quarantine path, when it could be created. */
+  provenancePath?: string | null;
+  provenanceError?: string | null;
 }
 
 export interface ExecutionJournalListResult {
@@ -108,6 +112,8 @@ export interface ExecutionJournalOptions {
   onBackgroundError?: (executionId: string, error: unknown) => void;
   /** Reports a journal file that could not be parsed or validated. */
   onCorruptJournal?: (file: string, error: unknown) => void;
+  /** Test seam for the corrupt-isolation provenance write. */
+  provenanceIo?: EvidenceIo;
 }
 
 /**
@@ -129,6 +135,7 @@ export class ExecutionJournal {
   private readonly pending = new Map<string, ExecutionJournalPatch>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
   private readonly atomicWrite: (target: string, contents: string) => Promise<void>;
+  private readonly provenanceIo: EvidenceIo;
   private backgroundErrorHandler: ((executionId: string, error: unknown) => void) | null;
 
   constructor(
@@ -136,6 +143,7 @@ export class ExecutionJournal {
     private readonly options: ExecutionJournalOptions = {},
   ) {
     this.atomicWrite = options.atomicWrite ?? defaultAtomicWrite;
+    this.provenanceIo = options.provenanceIo ?? defaultEvidenceIo;
     this.backgroundErrorHandler = options.onBackgroundError ?? null;
   }
 
@@ -308,8 +316,10 @@ export class ExecutionJournal {
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
       // Operator resolution sidecars live next to quarantined evidence; they
-      // are not execution journals and must not be re-quarantined.
+      // are not execution journals and must not be re-quarantined. The same is
+      // true for the provenance written by the quarantine path.
       if (entry.name.endsWith('.resolution.json')) continue;
+      if (entry.name.endsWith('.provenance.json')) continue;
       const result = await this.readFileDetailed(join(this.root, entry.name));
       if (result.kind === 'ok') {
         // Keep the loaded record addressable by finish()/update(); a startup
@@ -384,7 +394,7 @@ export class ExecutionJournal {
     } catch (error) {
       return {
         kind: 'corrupt',
-        entry: await this.recordCorruption(file, error),
+        entry: await this.recordCorruption(file, error, bestEffortExecutionId(raw)),
       };
     }
     if (!isValidRecord(parsed)) {
@@ -393,6 +403,7 @@ export class ExecutionJournal {
         entry: await this.recordCorruption(
           file,
           new Error('Execution journal failed validation'),
+          bestEffortExecutionId(raw),
         ),
       };
     }
@@ -402,14 +413,35 @@ export class ExecutionJournal {
   private async recordCorruption(
     file: string,
     error: unknown,
+    executionId: string | null,
   ): Promise<CorruptJournalEntry> {
     this.options.onCorruptJournal?.(file, error);
     const quarantinedPath = await this.quarantine(file);
+    let provenancePath: string | null = null;
+    let provenanceError: string | null = null;
+    if (quarantinedPath) {
+      try {
+        const provenance = await writeCorruptProvenance(
+          quarantinedPath,
+          this.root,
+          executionId,
+          this.provenanceIo,
+        );
+        provenancePath = provenance.path;
+      } catch (writeError) {
+        // The quarantined file stays evidence and remains blocked; a missing
+        // provenance can never be resolved by an operator.
+        provenanceError = writeError instanceof Error ? writeError.message : String(writeError);
+        this.options.onCorruptJournal?.(quarantinedPath, writeError);
+      }
+    }
     return {
       path: file,
       quarantinedPath,
       error: error instanceof Error ? error.message : String(error),
       detectedAt: new Date().toISOString(),
+      provenancePath,
+      provenanceError,
     };
   }
 
@@ -487,44 +519,147 @@ async function defaultAtomicWrite(target: string, contents: string): Promise<voi
 }
 
 function isValidRecord(value: Partial<ExecutionJournalRecord>): boolean {
-  return Boolean(
-    value &&
-    value.version === 1 &&
-    typeof value.executionId === 'string' &&
-    value.executionId.length > 0 &&
-    (value.runtime === 'codex' || value.runtime === 'opencode') &&
-    typeof value.phase === 'string' &&
-    typeof value.status === 'string' &&
-    STATUS_VALUES.includes(value.status as ExecutionJournalStatus) &&
-    typeof value.startedAt === 'string' &&
-    typeof value.lastSequence === 'number' &&
-    optionalString(value.launchToken) &&
-    optionalString(value.guardPath) &&
-    optionalString(value.supervisorStartTime) &&
-    optionalString(value.cliStartTime) &&
-    optionalString(value.recoveryBlockedReason) &&
-    optionalString(value.recoveryBlockedAt) &&
-    optionalString(value.recoveryNote) &&
-    optionalNumber(value.supervisorPid) &&
-    optionalNumber(value.cliPid) &&
-    (value.processKind === undefined ||
-      value.processKind === null ||
-      value.processKind === 'supervisor' ||
-      value.processKind === 'direct') &&
-    (value.spawnState === undefined ||
-      value.spawnState === null ||
-      value.spawnState === 'intent' ||
-      value.spawnState === 'supervisor-ready' ||
-      value.spawnState === 'running'),
-  );
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Partial<ExecutionJournalRecord>;
+  if (!(
+    record.version === 1 &&
+    nonEmptyString(record.executionId) &&
+    (record.runtime === 'codex' || record.runtime === 'opencode') &&
+    typeof record.phase === 'string' &&
+    typeof record.status === 'string' &&
+    STATUS_VALUES.includes(record.status as ExecutionJournalStatus) &&
+    nonEmptyString(record.startedAt) &&
+    nonEmptyString(record.updatedAt) &&
+    (record.finishedAt === null || nonEmptyString(record.finishedAt)) &&
+    typeof record.lastSequence === 'number' &&
+    Number.isSafeInteger(record.lastSequence) &&
+    record.lastSequence >= 0 &&
+    optionalString(record.projectId) &&
+    optionalString(record.worktreePath) &&
+    optionalString(record.branchName) &&
+    optionalString(record.baseCommit) &&
+    optionalString(record.launchToken) &&
+    optionalString(record.guardPath) &&
+    optionalString(record.recoveryBlockedReason) &&
+    optionalString(record.recoveryBlockedAt) &&
+    optionalString(record.recoveryNote) &&
+    optionalPid(record.supervisorPid) &&
+    optionalPid(record.cliPid) &&
+    optionalStartTime(record.supervisorStartTime) &&
+    optionalStartTime(record.cliStartTime) &&
+    validProcessKind(record.processKind) &&
+    validSpawnState(record.spawnState)
+  )) {
+    return false;
+  }
+
+  // PID and process-identity fields are evidence, not hints. Missing values,
+  // numeric strings, zero, negatives, fractions and unsafe integers must be
+  // quarantined instead of being silently treated as "no process".
+  if (!pidOrNull(record.pid)) return false;
+  if (!(record.processStartTime === null || nonEmptyString(record.processStartTime))) return false;
+  if (!(record.processGroupId === null || positiveSafeInteger(record.processGroupId))) return false;
+  return validPidRelationships(record);
+}
+
+function validPidRelationships(record: Partial<ExecutionJournalRecord>): boolean {
+  const processKind = record.processKind ?? null;
+  const spawnState = record.spawnState ?? null;
+
+  if (record.cliPid !== undefined && record.cliPid !== null) {
+    if (record.pid !== undefined && record.pid !== null && record.cliPid === record.pid) {
+      return false;
+    }
+  }
+
+  if (spawnState === 'supervisor-ready') {
+    if (processKind !== 'supervisor') return false;
+    if (!positiveSafeInteger(record.pid)) return false;
+    if (!positiveSafeInteger(record.supervisorPid)) return false;
+    if (record.supervisorPid !== record.pid) return false;
+    if (!nonEmptyString(record.supervisorStartTime)) return false;
+  }
+  if (spawnState === 'running' && !positiveSafeInteger(record.pid)) return false;
+
+  if (processKind === 'direct') {
+    // A directly spawned CLI has no supervisor identity and no supervisor guard
+    // child identity. Keeping these fields empty is part of the schema.
+    if (record.supervisorPid !== undefined && record.supervisorPid !== null) return false;
+    if (record.cliPid !== undefined && record.cliPid !== null) return false;
+    if (record.cliStartTime !== undefined && record.cliStartTime !== null) return false;
+    if (spawnState === 'supervisor-ready') return false;
+  }
+
+  if (processKind === 'supervisor') {
+    if (
+      record.supervisorPid !== undefined &&
+      record.supervisorPid !== null &&
+      record.pid !== undefined &&
+      record.pid !== null &&
+      record.supervisorPid !== record.pid
+    ) {
+      return false;
+    }
+    if (spawnState === 'supervisor-ready' || spawnState === 'running') {
+      // Once the supervisor is recorded as ready/running, both the protected
+      // root PID and the supervisor PID are mandatory and must be identical.
+      if (!positiveSafeInteger(record.pid)) return false;
+      if (!positiveSafeInteger(record.supervisorPid)) return false;
+      if (record.supervisorPid !== record.pid) return false;
+      if (!nonEmptyString(record.supervisorStartTime)) return false;
+    }
+  }
+
+  return true;
+}
+
+function bestEffortExecutionId(raw: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const executionId = (parsed as { executionId?: unknown }).executionId;
+    return typeof executionId === 'string' ? executionId : null;
+  } catch {
+    return null;
+  }
 }
 
 function optionalString(value: unknown): boolean {
   return value === undefined || value === null || typeof value === 'string';
 }
 
-function optionalNumber(value: unknown): boolean {
-  return value === undefined || value === null || (typeof value === 'number' && value > 0);
+function optionalStartTime(value: unknown): boolean {
+  return value === undefined || value === null || nonEmptyString(value);
+}
+
+function pidOrNull(value: unknown): boolean {
+  return value === null || positiveSafeInteger(value);
+}
+
+function optionalPid(value: unknown): boolean {
+  return value === undefined || value === null || positiveSafeInteger(value);
+}
+
+function positiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
+}
+
+function validProcessKind(value: unknown): boolean {
+  return value === undefined || value === null || value === 'supervisor' || value === 'direct';
+}
+
+function validSpawnState(value: unknown): boolean {
+  return (
+    value === undefined ||
+    value === null ||
+    value === 'intent' ||
+    value === 'supervisor-ready' ||
+    value === 'running'
+  );
 }
 
 function sanitize(value: string): string {

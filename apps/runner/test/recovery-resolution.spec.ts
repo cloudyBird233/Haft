@@ -143,16 +143,22 @@ describe('Recovery operator resolution hardening (R13-R19)', () => {
     expect(existsSync(`${nested}.resolution.json`)).toBe(false);
   });
 
-  it('R14: resolve-corrupt accepts a quarantined regular file and writes the sidecar', async () => {
+  it('R14: resolve-corrupt accepts a real quarantined file and writes the sidecar', async () => {
     const root = await makeRoot();
     const recovery = new ExecutionRecovery(root, dependencies());
-    const quarantined = join(root, 'broken.json.corrupt-456');
-    await writeFile(quarantined, '{not-json', 'utf8');
+    await writeFile(join(root, 'broken.json'), '{not-json', 'utf8');
+    const scan = await recovery.scan();
+    const quarantined = scan.corrupted[0]?.quarantinedPath;
+    expect(quarantined).toBeTruthy();
 
-    const result = await recovery.resolveCorruptJournal(quarantined, 'operator inspected the file');
+    const result = await recovery.resolveCorruptJournal(
+      quarantined as string,
+      'operator inspected the file',
+    );
 
     expect(result.resolved).toBe(true);
     expect(existsSync(`${quarantined}.resolution.json`)).toBe(true);
+    expect(existsSync(`${quarantined}.provenance.json`)).toBe(true);
   });
 
   it('R15: resolve refuses when the guard cannot prove the whole tree gone', async () => {

@@ -17,10 +17,14 @@
  *   except itself is gone (or it records an explicit `unconfirmed` state).
  */
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   appendFileSync,
+  closeSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -30,6 +34,7 @@ import {
 } from 'node:fs';
 import { dirname } from 'node:path';
 import type { ProcessGuardIsolation, ProcessGuardRecord, ProcessGuardState } from './process-guard';
+import { assertGuardPathAvailable, readValidatedStartingGuard } from './process-supervisor-guard';
 
 interface SupervisorConfig {
   guardPath: string;
@@ -104,10 +109,16 @@ async function main(): Promise<void> {
     throw new Error('runner parent is not alive or its identity does not match');
   }
 
-  // The guard is durable before any CLI is allowed to exist.
-  updateGuard({ state: 'starting' });
-  if (!existsSync(config.guardPath)) {
-    throw new Error('process guard was not written');
+  // The guard is durable before any CLI is allowed to exist. A pre-existing
+  // path is stale or hostile and is never replaced: directories, symlinks,
+  // FIFOs and stale files must all block the launch.
+  assertGuardPathAvailable(config.guardPath);
+  if (!updateGuard({ state: 'starting' })) {
+    throw new Error('process guard could not be persisted');
+  }
+  const validated = readValidatedStartingGuard(config.guardPath, guard);
+  if (!validated.ok) {
+    throw new Error(`process guard validation failed: ${validated.error}`);
   }
 
   // Close the crash window between the guard write and spawn: if the runner
@@ -165,12 +176,18 @@ async function main(): Promise<void> {
   closeSupervisorStdio();
 
   const cliStartTime = waitForProcessStartTimeSync(child.pid, 2000);
-  updateGuard({
+  const runningGuardPersisted = updateGuard({
     state: 'running',
     cliPid: child.pid,
     cliStartTime,
     detail: null,
   });
+  if (!runningGuardPersisted) {
+    // A CLI without durable recovery evidence must not be left running as if
+    // the launch had succeeded. The tree cleanup below remains authoritative.
+    await terminateTree('guard-write-failed', null, null, true);
+    return;
+  }
   appendLog(
     `CLI ${child.pid} started (isolation=${guard.isolation}, pgid=${guard.processGroupId ?? 'n/a'})`,
   );
@@ -471,15 +488,34 @@ function consumeControl(): 'force' | 'graceful' | null {
   }
 }
 
-function updateGuard(patch: Partial<ProcessGuardRecord>): void {
+function updateGuard(patch: Partial<ProcessGuardRecord>): boolean {
   Object.assign(guard, patch, { updatedAt: new Date().toISOString() });
+  const temporary = `${config.guardPath}.${process.pid}.${randomUUID()}.tmp`;
+  let descriptor: number | null = null;
   try {
-    const temporary = `${config.guardPath}.${process.pid}.tmp`;
     mkdirSync(dirname(config.guardPath), { recursive: true });
-    writeFileSync(temporary, `${JSON.stringify(guard, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    descriptor = openSync(temporary, 'wx', 0o600);
+    writeFileSync(descriptor, `${JSON.stringify(guard, null, 2)}\n`, 'utf8');
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = null;
     renameSync(temporary, config.guardPath);
+    return true;
   } catch (error) {
+    if (descriptor !== null) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // The original persistence error remains authoritative.
+      }
+    }
+    try {
+      rmSync(temporary, { force: true });
+    } catch {
+      // Cleanup is best effort.
+    }
     appendLog(`could not persist guard: ${errorMessage(error)}`);
+    return false;
   }
 }
 

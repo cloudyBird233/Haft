@@ -254,7 +254,10 @@ async function waitFor(
   throw new Error(`Timed out waiting for ${label}`);
 }
 
-async function waitForIdentity(pid: number | undefined, timeoutMs = 10_000): Promise<ProcessIdentity> {
+async function waitForIdentity(
+  pid: number | undefined,
+  timeoutMs = 10_000,
+): Promise<ProcessIdentity> {
   if (!pid) throw new Error('process has no PID');
   let identity: ProcessIdentity | null = null;
   await waitFor(
@@ -301,11 +304,10 @@ async function startUnrelatedProcess(marker: string): Promise<{
   child: ChildProcess;
   identity: ProcessIdentity;
 }> {
-  const child = spawn(
-    process.execPath,
-    ['-e', 'setInterval(() => {}, 1000)', marker],
-    { stdio: 'ignore', windowsHide: true },
-  );
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', marker], {
+    stdio: 'ignore',
+    windowsHide: true,
+  });
   spawnedProcesses.push(child);
   if (child.pid) trackedPids.add(child.pid);
   const identity = await waitForIdentity(child.pid);
@@ -333,13 +335,7 @@ async function startSupervisedTree(
   await prepareProcessSupervisor();
   const managed = await spawnSupervisedProcess({
     command: process.execPath,
-    args: [
-      cliFixture,
-      marker,
-      cliOut,
-      options.withGrandchild === false ? '0' : '1',
-      guardPath,
-    ],
+    args: [cliFixture, marker, cliOut, options.withGrandchild === false ? '0' : '1', guardPath],
     cwd: process.cwd(),
     env: { ...process.env, HAFT_TEST_MARKER: marker },
     executionId,
@@ -437,226 +433,221 @@ afterEach(async () => {
 }, 30_000);
 
 describe('Recovery hardening real OS evidence (R01-R12)', () => {
-  it(
-    'R01: an active journal without a PID stays active and blocks recovery',
-    async () => {
-      const root = await makeRoot();
-      const executionId = unique('execution');
-      await writeActiveJournal(root, journalRecord({ executionId, pid: null }));
-      const journalPath = join(root, `${executionId}.json`);
+  it('R01: an active journal without a PID stays active and blocks recovery', async () => {
+    const root = await makeRoot();
+    const executionId = unique('execution');
+    await writeActiveJournal(root, journalRecord({ executionId, pid: null }));
+    const journalPath = join(root, `${executionId}.json`);
 
-      const recovery = new ExecutionRecovery(root, recoveryDependencies());
-      const scan = await recovery.scan();
-      const execution = scan.executions[0];
+    const recovery = new ExecutionRecovery(root, recoveryDependencies());
+    const scan = await recovery.scan();
+    const execution = scan.executions[0];
 
-      expect(scan.blocked.some((entry) => entry.reason.includes('PID_NOT_RECORDED'))).toBe(true);
-      expect(scan.clean).toBe(false);
-      expect(execution?.recoveryBlocked).toBe(true);
-      expect(execution?.processStateUnknown).toBe(true);
-      expect(execution?.journalFinalized).toBe(false);
-      expect(execution?.treeConfirmedGone).toBe(false);
-      expect(existsSync(journalPath)).toBe(true);
-      expect(JSON.parse(await readFile(journalPath, 'utf8')).status).toBe('active');
-      expect(JSON.parse(await readFile(join(root, 'state', 'blocked.json'), 'utf8')).entries).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ executionId, reason: expect.stringContaining('PID_NOT_RECORDED') }),
-        ]),
-      );
-
-      // The explicit operator entry point resolves blocked evidence only after
-      // out-of-band verification; it never deletes the journal.
-      expect(
-        (await recovery.resolveBlockedExecution(executionId, 'operator confirmed no matching process'))
-          .resolved,
-      ).toBe(true);
-      const rescan = await new ExecutionRecovery(root, recoveryDependencies()).scan();
-      expect(rescan.clean).toBe(true);
-      expect(JSON.parse(await readFile(journalPath, 'utf8')).status).toBe('interrupted');
-      expect(existsSync(join(root, 'state', 'resolutions', `${executionId}.json`))).toBe(true);
-    },
-    30_000,
-  );
-
-  it(
-    'R02: a crash before identity is durable leaves a guard; recovery proves the tree gone from it',
-    async () => {
-      const root = await makeRoot();
-      const executionId = unique('execution');
-      const launchToken = unique('token');
-      const marker = unique('marker');
-      const artifacts = join(root, 'artifacts');
-      await mkdir(artifacts, { recursive: true });
-      const cliOut = join(artifacts, `cli-${marker}.json`);
-      const runnerOut = join(artifacts, `runner-${marker}.json`);
-      const journalPath = join(root, `${executionId}.json`);
-      const runner = spawn(process.execPath, ['--import', 'tsx', runnerFixture], {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          HAFT_TEST_RECOVERY_ROOT: root,
-          HAFT_TEST_EXECUTION_ID: executionId,
-          HAFT_TEST_LAUNCH_TOKEN: launchToken,
-          HAFT_TEST_MARKER: marker,
-          HAFT_TEST_CLI_OUT: cliOut,
-          HAFT_TEST_RUNNER_OUT: runnerOut,
-          HAFT_TEST_SKIP_IDENTITY: '1',
-        },
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-      });
-      spawnedProcesses.push(runner);
-      try {
-        const runnerInfo = await waitForJson<{
-          runnerPid: number;
-          supervisorPid: number;
-          cliPid: number;
-          guardPath: string;
-        }>(runnerOut, 30_000);
-        const cli = await waitForCliMarker(cliOut, true, 10_000);
-        trackedPids.add(runnerInfo.runnerPid);
-        trackedPids.add(runnerInfo.supervisorPid);
-        trackedPids.add(runnerInfo.cliPid);
-        if (cli.grandchildPid) trackedPids.add(cli.grandchildPid);
-
-        // The CLI was created only after the guard existed.
-        expect(cli.guardPresent).toBe(true);
-        // The journal is still the launch intent: no PID and no identity.
-        const intent = JSON.parse(await readFile(journalPath, 'utf8'));
-        expect(intent.status).toBe('active');
-        expect(intent.pid).toBeNull();
-        expect(intent.processKind).toBe('supervisor');
-        expect(intent.guardPath).toBe(runnerInfo.guardPath);
-
-        // Kill the "previous runner" abruptly. No recovery code runs first.
-        runner.kill('SIGKILL');
-        await waitFor(
-          () => !isProcessAlive(runnerInfo.cliPid) && (!cli.grandchildPid || !isProcessAlive(cli.grandchildPid)),
-          20_000,
-          'supervisor parent-death cleanup',
-        );
-
-        const scan = await new ExecutionRecovery(root, recoveryDependencies()).scan();
-        expect(scan.blocked).toEqual([]);
-        expect(scan.executions).toHaveLength(1);
-        expect(scan.executions[0]?.treeConfirmedGone).toBe(true);
-        expect(scan.executions[0]?.journalFinalized).toBe(true);
-        expect(scan.executions[0]?.recoveryBlocked).toBe(false);
-
-        const finalized = JSON.parse(await readFile(journalPath, 'utf8'));
-        expect(finalized.status).toBe('interrupted');
-        expect(await waitForProcessExit(cli.pid, 1_000)).toBe(true);
-        if (cli.grandchildPid) {
-          expect(await waitForProcessExit(cli.grandchildPid, 1_000)).toBe(true);
-        }
-      } finally {
-        if (runner.exitCode === null && runner.signalCode === null) runner.kill('SIGKILL');
-      }
-    },
-    90_000,
-  );
-
-  it(
-    'R03: recovery terminates a live guarded tree through the supervisor and verifies every member',
-    async () => {
-      const root = await makeRoot();
-      const tree = await startSupervisedTree(root);
-      expect(tree.guard.cliPid).toBe(tree.marker.pid);
-      expect(tree.marker.grandchildPid).not.toBeNull();
-
-      if (process.platform === 'linux' && tree.guard.isolation === 'linux-cgroup') {
-        const members = await readCgroupMembers(tree.guard.cgroupPath as string);
-        expect(members.pids).toEqual(
-          expect.arrayContaining([tree.guard.cliPid, tree.marker.grandchildPid]),
-        );
-      }
-
-      await writeActiveJournal(root, {
-        ...journalRecord({
-          executionId: tree.executionId,
-          pid: tree.guard.supervisorPid,
-          processStartTime: tree.guard.supervisorStartTime,
-          processGroupId: tree.guard.processGroupId,
-          cliPid: tree.guard.cliPid,
-          cliStartTime: tree.guard.cliStartTime,
-          processKind: 'supervisor',
-          spawnState: 'running',
-          phase: 'running',
+    expect(scan.blocked.some((entry) => entry.reason.includes('PID_NOT_RECORDED'))).toBe(true);
+    expect(scan.clean).toBe(false);
+    expect(execution?.recoveryBlocked).toBe(true);
+    expect(execution?.processStateUnknown).toBe(true);
+    expect(execution?.journalFinalized).toBe(false);
+    expect(execution?.treeConfirmedGone).toBe(false);
+    expect(existsSync(journalPath)).toBe(true);
+    expect(JSON.parse(await readFile(journalPath, 'utf8')).status).toBe('active');
+    expect(JSON.parse(await readFile(join(root, 'state', 'blocked.json'), 'utf8')).entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          executionId,
+          reason: expect.stringContaining('PID_NOT_RECORDED'),
         }),
-        launchToken: tree.launchToken,
-        guardPath: tree.guardPath,
-      });
+      ]),
+    );
+
+    // The explicit operator entry point resolves blocked evidence only after
+    // out-of-band verification; it never deletes the journal.
+    expect(
+      (
+        await recovery.resolveBlockedExecution(
+          executionId,
+          'operator confirmed no matching process',
+        )
+      ).resolved,
+    ).toBe(true);
+    const rescan = await new ExecutionRecovery(root, recoveryDependencies()).scan();
+    expect(rescan.clean).toBe(true);
+    expect(JSON.parse(await readFile(journalPath, 'utf8')).status).toBe('interrupted');
+    expect(existsSync(join(root, 'state', 'resolutions', `${executionId}.json`))).toBe(true);
+  }, 30_000);
+
+  it('R02: a crash before identity is durable leaves a guard; recovery proves the tree gone from it', async () => {
+    const root = await makeRoot();
+    const executionId = unique('execution');
+    const launchToken = unique('token');
+    const marker = unique('marker');
+    const artifacts = join(root, 'artifacts');
+    await mkdir(artifacts, { recursive: true });
+    const cliOut = join(artifacts, `cli-${marker}.json`);
+    const runnerOut = join(artifacts, `runner-${marker}.json`);
+    const journalPath = join(root, `${executionId}.json`);
+    const runner = spawn(process.execPath, ['--import', 'tsx', runnerFixture], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        HAFT_TEST_RECOVERY_ROOT: root,
+        HAFT_TEST_EXECUTION_ID: executionId,
+        HAFT_TEST_LAUNCH_TOKEN: launchToken,
+        HAFT_TEST_MARKER: marker,
+        HAFT_TEST_CLI_OUT: cliOut,
+        HAFT_TEST_RUNNER_OUT: runnerOut,
+        HAFT_TEST_SKIP_IDENTITY: '1',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    spawnedProcesses.push(runner);
+    try {
+      const runnerInfo = await waitForJson<{
+        runnerPid: number;
+        supervisorPid: number;
+        cliPid: number;
+        guardPath: string;
+      }>(runnerOut, 30_000);
+      const cli = await waitForCliMarker(cliOut, true, 10_000);
+      trackedPids.add(runnerInfo.runnerPid);
+      trackedPids.add(runnerInfo.supervisorPid);
+      trackedPids.add(runnerInfo.cliPid);
+      if (cli.grandchildPid) trackedPids.add(cli.grandchildPid);
+
+      // The CLI was created only after the guard existed.
+      expect(cli.guardPresent).toBe(true);
+      // The journal is still the launch intent: no PID and no identity.
+      const intent = JSON.parse(await readFile(journalPath, 'utf8'));
+      expect(intent.status).toBe('active');
+      expect(intent.pid).toBeNull();
+      expect(intent.processKind).toBe('supervisor');
+      expect(intent.guardPath).toBe(runnerInfo.guardPath);
+
+      // Kill the "previous runner" abruptly. No recovery code runs first.
+      runner.kill('SIGKILL');
+      await waitFor(
+        () =>
+          !isProcessAlive(runnerInfo.cliPid) &&
+          (!cli.grandchildPid || !isProcessAlive(cli.grandchildPid)),
+        20_000,
+        'supervisor parent-death cleanup',
+      );
 
       const scan = await new ExecutionRecovery(root, recoveryDependencies()).scan();
-      const execution = scan.executions[0];
       expect(scan.blocked).toEqual([]);
-      expect(execution?.orphanTerminated).toBe(true);
-      expect(execution?.treeConfirmedGone).toBe(true);
-      expect(execution?.journalFinalized).toBe(true);
+      expect(scan.executions).toHaveLength(1);
+      expect(scan.executions[0]?.treeConfirmedGone).toBe(true);
+      expect(scan.executions[0]?.journalFinalized).toBe(true);
+      expect(scan.executions[0]?.recoveryBlocked).toBe(false);
 
-      expect(await waitForProcessExit(tree.marker.pid, 5_000)).toBe(true);
-      if (tree.marker.grandchildPid) {
-        expect(await waitForProcessExit(tree.marker.grandchildPid, 5_000)).toBe(true);
+      const finalized = JSON.parse(await readFile(journalPath, 'utf8'));
+      expect(finalized.status).toBe('interrupted');
+      expect(await waitForProcessExit(cli.pid, 1_000)).toBe(true);
+      if (cli.grandchildPid) {
+        expect(await waitForProcessExit(cli.grandchildPid, 1_000)).toBe(true);
       }
-      expect(await waitForProcessExit(tree.guard.supervisorPid, 5_000)).toBe(true);
-      const onDisk = JSON.parse(await readFile(join(root, `${tree.executionId}.json`), 'utf8'));
-      expect(onDisk.status).toBe('interrupted');
-    },
-    90_000,
-  );
+    } finally {
+      if (runner.exitCode === null && runner.signalCode === null) runner.kill('SIGKILL');
+    }
+  }, 90_000);
 
-  it(
-    'R04: termination never kills a PID whose recorded identity no longer matches',
-    async () => {
-      const root = await makeRoot();
-      const unrelated = await startUnrelatedProcess(unique('unrelated'));
-      const executionId = unique('execution');
-      const guard: ProcessGuardRecord = {
-        version: 1,
-        executionId,
-        launchToken: unique('token'),
-        parentPid: process.pid,
-        supervisorPid: unrelated.identity.pid,
-        supervisorStartTime: differentStartTime(unrelated.identity.startTime),
-        processGroupId: null,
-        cgroupPath: null,
-        cliPid: null,
-        cliStartTime: null,
-        isolation:
-          process.platform === 'win32'
-            ? 'windows-job'
-            : process.platform === 'linux'
-              ? 'linux-cgroup'
-              : 'posix-group',
-        state: 'running',
-        jobCreated: true,
-        treeConfirmedGone: false,
-        exitCode: null,
-        signal: null,
-        detail: null,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      const terminate = vi.fn(async () => undefined);
-      const result = await terminateGuardedTree(
-        guard,
-        null,
-        {
-          inspectProcess,
-          terminateProcessTree: terminate,
-          waitForProcessExit,
-        },
-        { supervisorConfirmMs: 100, verifyTimeoutMs: 100 },
+  it('R03: recovery terminates a live guarded tree through the supervisor and verifies every member', async () => {
+    const root = await makeRoot();
+    const tree = await startSupervisedTree(root);
+    expect(tree.guard.cliPid).toBe(tree.marker.pid);
+    expect(tree.marker.grandchildPid).not.toBeNull();
+
+    if (process.platform === 'linux' && tree.guard.isolation === 'linux-cgroup') {
+      const members = await readCgroupMembers(tree.guard.cgroupPath as string);
+      expect(members.pids).toEqual(
+        expect.arrayContaining([tree.guard.cliPid, tree.marker.grandchildPid]),
       );
+    }
 
-      expect(result.identityMismatch).toBe(true);
-      expect(result.confirmed).toBe(false);
-      expect(result.killIssued).toBe(false);
-      expect(terminate).not.toHaveBeenCalled();
-      expect(isProcessAlive(unrelated.identity.pid)).toBe(true);
-      expect(root.length).toBeGreaterThan(0);
-    },
-    30_000,
-  );
+    await writeActiveJournal(root, {
+      ...journalRecord({
+        executionId: tree.executionId,
+        pid: tree.guard.supervisorPid,
+        processStartTime: tree.guard.supervisorStartTime,
+        processGroupId: tree.guard.processGroupId,
+        supervisorPid: tree.guard.supervisorPid,
+        supervisorStartTime: tree.guard.supervisorStartTime,
+        cliPid: tree.guard.cliPid,
+        cliStartTime: tree.guard.cliStartTime,
+        processKind: 'supervisor',
+        spawnState: 'running',
+        phase: 'running',
+      }),
+      launchToken: tree.launchToken,
+      guardPath: tree.guardPath,
+    });
+
+    const scan = await new ExecutionRecovery(root, recoveryDependencies()).scan();
+    const execution = scan.executions[0];
+    expect(scan.blocked).toEqual([]);
+    expect(execution?.orphanTerminated).toBe(true);
+    expect(execution?.treeConfirmedGone).toBe(true);
+    expect(execution?.journalFinalized).toBe(true);
+
+    expect(await waitForProcessExit(tree.marker.pid, 5_000)).toBe(true);
+    if (tree.marker.grandchildPid) {
+      expect(await waitForProcessExit(tree.marker.grandchildPid, 5_000)).toBe(true);
+    }
+    expect(await waitForProcessExit(tree.guard.supervisorPid, 5_000)).toBe(true);
+    const onDisk = JSON.parse(await readFile(join(root, `${tree.executionId}.json`), 'utf8'));
+    expect(onDisk.status).toBe('interrupted');
+  }, 90_000);
+
+  it('R04: termination never kills a PID whose recorded identity no longer matches', async () => {
+    const root = await makeRoot();
+    const unrelated = await startUnrelatedProcess(unique('unrelated'));
+    const executionId = unique('execution');
+    const guard: ProcessGuardRecord = {
+      version: 1,
+      executionId,
+      launchToken: unique('token'),
+      parentPid: process.pid,
+      supervisorPid: unrelated.identity.pid,
+      supervisorStartTime: differentStartTime(unrelated.identity.startTime),
+      processGroupId: null,
+      cgroupPath: null,
+      cliPid: null,
+      cliStartTime: null,
+      isolation:
+        process.platform === 'win32'
+          ? 'windows-job'
+          : process.platform === 'linux'
+            ? 'linux-cgroup'
+            : 'posix-group',
+      state: 'running',
+      jobCreated: true,
+      treeConfirmedGone: false,
+      exitCode: null,
+      signal: null,
+      detail: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    const terminate = vi.fn(async () => undefined);
+    const result = await terminateGuardedTree(
+      guard,
+      null,
+      {
+        inspectProcess,
+        terminateProcessTree: terminate,
+        waitForProcessExit,
+      },
+      { supervisorConfirmMs: 100, verifyTimeoutMs: 100 },
+    );
+
+    expect(result.identityMismatch).toBe(true);
+    expect(result.confirmed).toBe(false);
+    expect(result.killIssued).toBe(false);
+    expect(terminate).not.toHaveBeenCalled();
+    expect(isProcessAlive(unrelated.identity.pid)).toBe(true);
+    expect(root.length).toBeGreaterThan(0);
+  }, 30_000);
 
   it.skipIf(process.platform !== 'win32')(
     'R04b: a failed taskkill is reported as unconfirmed and the target stays alive',
@@ -688,534 +679,496 @@ describe('Recovery hardening real OS evidence (R01-R12)', () => {
     60_000,
   );
 
-  it(
-    'R05: a post-spawn identity failure terminates the real tree before the failed journal is final',
-    async () => {
-      const root = await makeRoot();
-      const worktreePath = join(root, 'worktree');
-      await mkdir(worktreePath, { recursive: true });
-      const executionId = unique('execution');
-      const marker = unique('marker');
-      const artifacts = join(root, 'artifacts');
-      await mkdir(artifacts, { recursive: true });
-      const cliOut = join(artifacts, `cli-${marker}.json`);
-      const recovery = new ExecutionRecovery(root, recoveryDependencies());
-      const { captured, callbacks } = capturedCallbacks();
+  it('R05: a post-spawn identity failure terminates the real tree before the failed journal is final', async () => {
+    const root = await makeRoot();
+    const worktreePath = join(root, 'worktree');
+    await mkdir(worktreePath, { recursive: true });
+    const executionId = unique('execution');
+    const marker = unique('marker');
+    const artifacts = join(root, 'artifacts');
+    await mkdir(artifacts, { recursive: true });
+    const cliOut = join(artifacts, `cli-${marker}.json`);
+    const recovery = new ExecutionRecovery(root, recoveryDependencies());
+    const { captured, callbacks } = capturedCallbacks();
 
-      const originalUpdate = recovery.journal.update.bind(recovery.journal);
-      vi.spyOn(recovery.journal, 'update').mockImplementation(async (id, patch, options) => {
-        if (patch.pid && patch.processKind === 'supervisor') {
-          throw new Error('injected identity write failure');
+    const originalUpdate = recovery.journal.update.bind(recovery.journal);
+    vi.spyOn(recovery.journal, 'update').mockImplementation(async (id, patch, options) => {
+      if (patch.pid && patch.processKind === 'supervisor') {
+        throw new Error('injected identity write failure');
+      }
+      return originalUpdate(id, patch, options);
+    });
+    let pidsAtFinish: number[] = [];
+    const originalFinish = recovery.journal.finish.bind(recovery.journal);
+    vi.spyOn(recovery.journal, 'finish').mockImplementation(async (...args) => {
+      pidsAtFinish = [markerState?.pid, markerState?.grandchildPid]
+        .filter((value): value is number => typeof value === 'number')
+        .map((pid) => (isProcessAlive(pid) ? pid : 0))
+        .filter((pid) => pid !== 0);
+      return originalFinish(...args);
+    });
+    let markerState: CliMarker | null = null;
+
+    const executor = new RealExecutor(makeConfig(root), callbacks, recovery, {
+      resolveExecutable: async () => ({ path: process.execPath, searched: [], error: null }),
+      probeAuthentication: async () => ({ authenticated: true, message: null }),
+      buildArgs: () => [cliFixture, marker, cliOut, '1'],
+      inspectProcess: async (pid: number) => {
+        const identity = await inspectProcess(pid);
+        if (
+          identity?.commandLine &&
+          /process-supervisor|haft-process-supervisor/i.test(identity.commandLine)
+        ) {
+          // Give the CLI fixture time to write its marker; the identity
+          // failure itself happens immediately after `managed.ready`.
+          await delay(400);
+          return null;
         }
-        return originalUpdate(id, patch, options);
-      });
-      let pidsAtFinish: number[] = [];
-      const originalFinish = recovery.journal.finish.bind(recovery.journal);
-      vi.spyOn(recovery.journal, 'finish').mockImplementation(async (...args) => {
-        pidsAtFinish = [markerState?.pid, markerState?.grandchildPid]
-          .filter((value): value is number => typeof value === 'number')
-          .map((pid) => (isProcessAlive(pid) ? pid : 0))
-          .filter((pid) => pid !== 0);
-        return originalFinish(...args);
-      });
-      let markerState: CliMarker | null = null;
+        return identity;
+      },
+      repositoryPolicy: fakeRepositoryPolicy(),
+      git: {
+        prepare: async () => ({
+          path: worktreePath,
+          branchName: `haft/${executionId}`,
+          baseCommit: 'a'.repeat(40),
+        }),
+        collect: async () => null,
+        cleanup: async () => ({ path: worktreePath, removed: false }),
+      },
+      shutdownForceWaitMs: 500,
+    });
 
-      const executor = new RealExecutor(makeConfig(root), callbacks, recovery, {
-        resolveExecutable: async () => ({ path: process.execPath, searched: [], error: null }),
-        probeAuthentication: async () => ({ authenticated: true, message: null }),
-        buildArgs: () => [cliFixture, marker, cliOut, '1'],
-        inspectProcess: async (pid: number) => {
-          const identity = await inspectProcess(pid);
-          if (
-            identity?.commandLine &&
-            /process-supervisor|haft-process-supervisor/i.test(identity.commandLine)
-          ) {
-            // Give the CLI fixture time to write its marker; the identity
-            // failure itself happens immediately after `managed.ready`.
-            await delay(400);
-            return null;
-          }
-          return identity;
-        },
-        repositoryPolicy: fakeRepositoryPolicy(),
-        git: {
-          prepare: async () => ({
-            path: worktreePath,
-            branchName: `haft/${executionId}`,
-            baseCommit: 'a'.repeat(40),
-          }),
-          collect: async () => null,
-          cleanup: async () => ({ path: worktreePath, removed: false }),
-        },
-        shutdownForceWaitMs: 500,
-      });
+    const payload = startPayload(executionId);
+    const context = repositoryContext(executionId, worktreePath);
+    expect(await executor.canAdmit(payload, context)).toEqual({ ok: true });
+    executor.start(payload, context);
 
-      const payload = startPayload(executionId);
-      const context = repositoryContext(executionId, worktreePath);
-      expect(await executor.canAdmit(payload, context)).toEqual({ ok: true });
-      executor.start(payload, context);
-
-      markerState = await waitForJson<CliMarker>(cliOut, 30_000);
-      if (!markerState.grandchildPid) {
-        await waitFor(
-          async () => {
-            markerState = await waitForJson<CliMarker>(cliOut, 2_000);
-            return markerState.grandchildPid !== null;
-          },
-          10_000,
-          'grandchild PID',
-        );
-      }
-      trackedPids.add(markerState.pid);
-      if (markerState.grandchildPid) trackedPids.add(markerState.grandchildPid);
-      await waitFor(() => captured.failed.length === 1, 30_000, 'post-spawn failure report');
-
-      expect(captured.completed).toEqual([]);
-      expect(captured.cancelled).toEqual([]);
-      expect(captured.failed[0]?.payload.reason).toContain('RECOVERY_JOURNAL_PID_IDENTITY_FAILED');
-      expect(pidsAtFinish).toEqual([]);
-      expect(await waitForProcessExit(markerState.pid, 5_000)).toBe(true);
-      if (markerState.grandchildPid) {
-        expect(await waitForProcessExit(markerState.grandchildPid, 5_000)).toBe(true);
-      }
-      expect(JSON.parse(await readFile(join(root, `${executionId}.json`), 'utf8')).status).toBe(
-        'failed',
-      );
-      const scan = await new ExecutionRecovery(root, recoveryDependencies()).scan();
-      expect(scan.blocked).toEqual([]);
-      expect(scan.executions).toEqual([]);
-    },
-    90_000,
-  );
-
-  it(
-    'R06: the 15s terminal fallback re-checks the tree and keeps the journal active on the fake clock',
-    async () => {
-      vi.useFakeTimers();
-      try {
-        const root = await makeRoot();
-        const executionId = unique('execution');
-        const journal = {
-          begin: vi.fn().mockResolvedValue(undefined),
-          update: vi.fn().mockResolvedValue(undefined),
-          finish: vi.fn().mockResolvedValue(undefined),
-          flushAll: vi.fn().mockResolvedValue(undefined),
-          setBackgroundErrorHandler: vi.fn(),
-        };
-        const recovery = {
-          journal,
-          spool: { flush: vi.fn() },
-          isWorktreeBlocked: () => false,
-        } as unknown as ExecutionRecovery;
-        const { captured, callbacks } = capturedCallbacks();
-        const child = createFakeChild();
-        const terminateProcess = vi.fn(async () => {
-          throw new Error('injected termination failure');
-        });
-        const executor = new RealExecutor(makeConfig(root), callbacks, recovery, {
-          resolveExecutable: async () => ({ path: '/virtual/codex', searched: [], error: null }),
-          probeAuthentication: async () => ({ authenticated: true, message: null }),
-          spawnProcess: () => child as unknown as ChildProcess,
-          buildArgs: () => [],
-          inspectProcess: async (pid: number) => ({
-            pid,
-            parentPid: 1,
-            processGroupId: pid,
-            startTime: 'start-test',
-            commandLine: 'codex exec',
-          }),
-          terminateProcess,
-          waitForProcessExit: async () => false,
-          repositoryPolicy: fakeRepositoryPolicy(),
-          git: {
-            prepare: async () => ({
-              path: join(root, 'worktree'),
-              branchName: `haft/${executionId}`,
-              baseCommit: 'a'.repeat(40),
-            }),
-            collect: async () => null,
-            cleanup: async () => ({ path: '', removed: false }),
-          },
-          shutdownForceWaitMs: 100,
-        });
-
-        const payload = startPayload(executionId);
-        executor.start(payload, repositoryContext(executionId, join(root, 'worktree')));
-        for (let attempt = 0; attempt < 200; attempt += 1) {
-          if (captured.phases.some((phase) => phase.phase === 'running')) break;
-          await vi.advanceTimersByTimeAsync(1);
-        }
-        expect(captured.phases.some((phase) => phase.phase === 'running')).toBe(true);
-
-        executor.cancel(executionId, 'R06 cancel');
-        await vi.advanceTimersByTimeAsync(15_000);
-        await vi.advanceTimersByTimeAsync(1_000);
-
-        expect(journal.finish).not.toHaveBeenCalled();
-        expect(captured.completed).toEqual([]);
-        expect(captured.failed).toEqual([]);
-        expect(captured.cancelled).toEqual([]);
-        expect(executor.snapshot().map((session) => session.executionId)).toContain(executionId);
-        expect(
-          captured.logs.some((entry) =>
-            entry.entry.message.includes('recovery journal was left active'),
-          ),
-        ).toBe(true);
-      } finally {
-        vi.useRealTimers();
-      }
-    },
-    30_000,
-  );
-
-  it(
-    'R07: a corrupt journal is quarantined as evidence while other records still recover',
-    async () => {
-      const root = await makeRoot();
-      const corruptPath = join(root, 'broken.json');
-      const original = '{"version":1,"executionId":';
-      await writeFile(corruptPath, original, 'utf8');
-      const validExecutionId = unique('execution');
-      await writeActiveJournal(
-        root,
-        journalRecord({ executionId: validExecutionId, pid: null }),
-      );
-
-      const recovery = new ExecutionRecovery(root, recoveryDependencies());
-      const scan = await recovery.scan();
-      expect(scan.clean).toBe(false);
-      expect(scan.corrupted).toHaveLength(1);
-      expect(scan.blocked.some((entry) => entry.kind === 'corrupt-journal')).toBe(true);
-      // A damaged record must not stop the remaining records from being scanned.
-      expect(scan.executions.map((entry) => entry.record.executionId)).toContain(validExecutionId);
-      expect(
-        scan.blocked.some(
-          (entry) =>
-            entry.executionId === validExecutionId &&
-            entry.reason.includes('PID_NOT_RECORDED'),
-        ),
-      ).toBe(true);
-      const quarantined = scan.corrupted[0]?.quarantinedPath;
-      expect(quarantined).toBeTruthy();
-      expect(existsSync(quarantined as string)).toBe(true);
-      expect(await readFile(quarantined as string, 'utf8')).toBe(original);
-      expect(existsSync(corruptPath)).toBe(false);
-
-      expect(
-        (await recovery.resolveCorruptJournal(quarantined as string, 'operator inspected the file'))
-          .resolved,
-      ).toBe(true);
-      expect(
-        (await recovery.resolveBlockedExecution(validExecutionId, 'no matching process remains'))
-          .resolved,
-      ).toBe(true);
-      const cleanScan = await new ExecutionRecovery(root, recoveryDependencies()).scan();
-      expect(cleanScan.clean).toBe(true);
-      expect(cleanScan.corrupted).toEqual([]);
-      expect(
-        JSON.parse(await readFile(join(root, `${validExecutionId}.json`), 'utf8')).status,
-      ).toBe('interrupted');
-    },
-    30_000,
-  );
-
-  it(
-    'R08: a blocked scan rejects new work and advertises degraded readiness',
-    async () => {
-      const root = await makeRoot();
-      await writeFile(join(root, 'broken.json'), 'not-json', 'utf8');
-      const scan = await new ExecutionRecovery(root, recoveryDependencies()).scan();
-      const config = makeConfig(root, {
-        mode: 'fake',
-        fakeRuntimes: ['codex'],
-        realRuntimes: [],
-      });
-      const client = new RunnerClient({
-        config,
-        repositoryPolicy: fakeRepositoryPolicy(),
-        recovery: new ExecutionRecovery(root, recoveryDependencies()),
-      });
-      const envelopes: RunnerEnvelope[] = [];
-      const fakeSocket = {
-        connected: true,
-        emit: (_event: string, envelope: RunnerEnvelope) => {
-          envelopes.push(envelope);
-        },
-        removeAllListeners: () => undefined,
-        disconnect: () => undefined,
-      };
-      (client as unknown as { socket: unknown }).socket = fakeSocket;
-
-      client.applyRecoveryScan(scan);
-      expect(client.isRecoveryBlocked()).toBe(true);
-      expect(client.recoveryBlockedReason()).toContain('CORRUPT');
-
-      const executionId = unique('execution');
-      await (
-        client as unknown as { runAdmission(payload: ExecutionStartMessage['payload']): Promise<void> }
-      ).runAdmission(startPayload(executionId));
-      const rejected = envelopes.find(
-        (envelope) =>
-          envelope.type === 'execution.start.rejected' &&
-          (envelope.payload as { executionId?: string }).executionId === executionId,
-      );
-      expect(rejected).toBeDefined();
-      expect((rejected?.payload as { code?: string }).code).toBe(
-        ERROR_CODES.RUNNER_START_UNCONFIRMED,
-      );
-      expect((rejected?.payload as { message?: string }).message).toContain(
-        'RUNNER_RECOVERY_BLOCKED',
-      );
-
-      (
-        client as unknown as { startHeartbeat(): void; stopHeartbeat(): void }
-      ).startHeartbeat();
-      const heartbeat = envelopes.find((envelope) => envelope.type === 'runner.heartbeat');
-      expect((heartbeat?.payload as { status?: string }).status).toBe('degraded');
-      (client as unknown as { stopHeartbeat(): void }).stopHeartbeat();
-
-      const port = await freePort();
-      const server = startHealthServer(port, config.runnerId, client);
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}/ready`);
-        expect(response.status).toBe(503);
-        const body = (await response.json()) as { status?: string; recoveryBlocked?: boolean };
-        expect(body.status).toBe('degraded');
-        expect(body.recoveryBlocked).toBe(true);
-      } finally {
-        await new Promise<void>((resolve) => server?.close(() => resolve()) ?? resolve());
-      }
-    },
-    60_000,
-  );
-
-  it(
-    'R09: a journal finalization failure sends no terminal event and keeps the active record',
-    async () => {
-      const root = await makeRoot();
-      const worktreePath = join(root, 'worktree');
-      await mkdir(worktreePath, { recursive: true });
-      const executionId = unique('execution');
-      const marker = unique('marker');
-      const artifacts = join(root, 'artifacts');
-      await mkdir(artifacts, { recursive: true });
-      const cliOut = join(artifacts, `cli-${marker}.json`);
-      const recovery = new ExecutionRecovery(root, recoveryDependencies());
-      vi.spyOn(recovery.journal, 'finish').mockRejectedValue(new Error('injected journal disk failure'));
-      const { captured, callbacks } = capturedCallbacks();
-
-      const executor = new RealExecutor(makeConfig(root), callbacks, recovery, {
-        resolveExecutable: async () => ({ path: process.execPath, searched: [], error: null }),
-        probeAuthentication: async () => ({ authenticated: true, message: null }),
-        buildArgs: () => [cliFixture, marker, cliOut, '1', 'none', '250'],
-        repositoryPolicy: fakeRepositoryPolicy(),
-        git: {
-          prepare: async () => ({
-            path: worktreePath,
-            branchName: `haft/${executionId}`,
-            baseCommit: 'a'.repeat(40),
-          }),
-          collect: async () => null,
-          cleanup: async () => ({ path: worktreePath, removed: false }),
-        },
-        shutdownForceWaitMs: 500,
-      });
-
-      const payload = startPayload(executionId);
-      const context = repositoryContext(executionId, worktreePath);
-      expect(await executor.canAdmit(payload, context)).toEqual({ ok: true });
-      executor.start(payload, context);
-      const cli = await waitForCliMarker(cliOut, true, 30_000);
-      trackedPids.add(cli.pid);
-      if (cli.grandchildPid) trackedPids.add(cli.grandchildPid);
-
+    markerState = await waitForJson<CliMarker>(cliOut, 30_000);
+    if (!markerState.grandchildPid) {
       await waitFor(
-        () =>
-          captured.logs.some((entry) =>
-            entry.entry.message.includes('no terminal event will be sent'),
-          ),
-        30_000,
-        'journal uncertainty latch',
+        async () => {
+          markerState = await waitForJson<CliMarker>(cliOut, 2_000);
+          return markerState.grandchildPid !== null;
+        },
+        10_000,
+        'grandchild PID',
       );
+    }
+    trackedPids.add(markerState.pid);
+    if (markerState.grandchildPid) trackedPids.add(markerState.grandchildPid);
+    await waitFor(() => captured.failed.length === 1, 30_000, 'post-spawn failure report');
 
-      expect(captured.completed).toEqual([]);
-      expect(captured.failed).toEqual([]);
-      expect(captured.cancelled).toEqual([]);
-      expect(executor.snapshot().map((session) => session.executionId)).toContain(executionId);
-      expect(JSON.parse(await readFile(join(root, `${executionId}.json`), 'utf8')).status).toBe(
-        'active',
-      );
-      expect(await waitForProcessExit(cli.pid, 5_000)).toBe(true);
-      if (cli.grandchildPid) {
-        expect(await waitForProcessExit(cli.grandchildPid, 5_000)).toBe(true);
-      }
+    expect(captured.completed).toEqual([]);
+    expect(captured.cancelled).toEqual([]);
+    expect(captured.failed[0]?.payload.reason).toContain('RECOVERY_JOURNAL_PID_IDENTITY_FAILED');
+    expect(pidsAtFinish).toEqual([]);
+    expect(await waitForProcessExit(markerState.pid, 5_000)).toBe(true);
+    if (markerState.grandchildPid) {
+      expect(await waitForProcessExit(markerState.grandchildPid, 5_000)).toBe(true);
+    }
+    expect(JSON.parse(await readFile(join(root, `${executionId}.json`), 'utf8')).status).toBe(
+      'failed',
+    );
+    const scan = await new ExecutionRecovery(root, recoveryDependencies()).scan();
+    expect(scan.blocked).toEqual([]);
+    expect(scan.executions).toEqual([]);
+  }, 90_000);
 
-      const shutdown = await executor.shutdown('R09 shutdown');
-      expect(shutdown.clean).toBe(false);
-      expect(shutdown.remainingExecutionIds).toContain(executionId);
-      expect(captured.failed).toEqual([]);
-    },
-    90_000,
-  );
-
-  it(
-    'R10: recovery leaves a live reused PID untouched and blocks with its identity evidence',
-    async () => {
+  it('R06: the 15s terminal fallback re-checks the tree and keeps the journal active on the fake clock', async () => {
+    vi.useFakeTimers();
+    try {
       const root = await makeRoot();
       const executionId = unique('execution');
-      const unrelated = await startUnrelatedProcess(unique('unrelated'));
-      await writeActiveJournal(
-        root,
-        journalRecord({
-          executionId,
-          pid: unrelated.identity.pid,
-          processStartTime: differentStartTime(unrelated.identity.startTime),
-          processGroupId: unrelated.identity.processGroupId,
-          phase: 'running',
-        }),
-      );
-      const terminate = vi.fn(async () => undefined);
-      const scan = await new ExecutionRecovery(
-        root,
-        recoveryDependencies({ terminateProcessTree: terminate }),
-      ).scan();
-
-      expect(scan.executions[0]?.recoveryBlocked).toBe(true);
-      expect(scan.executions[0]?.pidReused).toBe(true);
-      expect(scan.blocked[0]?.reason).toContain('PID_REUSED');
-      expect(terminate).not.toHaveBeenCalled();
-      expect(isProcessAlive(unrelated.identity.pid)).toBe(true);
-      expect(JSON.parse(await readFile(join(root, `${executionId}.json`), 'utf8')).status).toBe(
-        'active',
-      );
-    },
-    30_000,
-  );
-
-  it(
-    'R11: recovery never assumes absent from an incomplete identity and never kills the PID',
-    async () => {
-      const root = await makeRoot();
-      const executionId = unique('execution');
-      const unrelated = await startUnrelatedProcess(unique('unrelated'));
-      await writeActiveJournal(
-        root,
-        journalRecord({
-          executionId,
-          pid: unrelated.identity.pid,
-          processStartTime: null,
-          processGroupId: unrelated.identity.processGroupId,
-          phase: 'running',
-        }),
-      );
-      const terminate = vi.fn(async () => undefined);
-      const scan = await new ExecutionRecovery(
-        root,
-        recoveryDependencies({ terminateProcessTree: terminate }),
-      ).scan();
-
-      expect(scan.executions[0]?.recoveryBlocked).toBe(true);
-      expect(scan.executions[0]?.processIdentityUnverified).toBe(true);
-      expect(scan.executions[0]?.processStateUnknown).toBe(true);
-      expect(scan.blocked[0]?.reason).toContain('PID_IDENTITY_UNVERIFIED');
-      expect(terminate).not.toHaveBeenCalled();
-      expect(isProcessAlive(unrelated.identity.pid)).toBe(true);
-    },
-    30_000,
-  );
-
-  it(
-    'R11b: a failed identity inspection never proves a live PID absent',
-    async () => {
-      const root = await makeRoot();
-      const executionId = unique('execution');
-      const unrelated = await startUnrelatedProcess(unique('unrelated'));
-      await writeActiveJournal(
-        root,
-        journalRecord({
-          executionId,
-          pid: unrelated.identity.pid,
-          processStartTime: unrelated.identity.startTime,
-          processGroupId: unrelated.identity.processGroupId,
-          phase: 'running',
-        }),
-      );
-      const terminate = vi.fn(async () => undefined);
-      const scan = await new ExecutionRecovery(
-        root,
-        recoveryDependencies({
-          inspectProcess: async () => null,
-          terminateProcessTree: terminate,
-        }),
-      ).scan();
-
-      expect(scan.clean).toBe(false);
-      expect(scan.executions[0]?.recoveryBlocked).toBe(true);
-      expect(scan.executions[0]?.processStateUnknown).toBe(true);
-      expect(scan.blocked[0]?.reason).toContain('PID_IDENTITY_UNVERIFIED');
-      expect(terminate).not.toHaveBeenCalled();
-      expect(isProcessAlive(unrelated.identity.pid)).toBe(true);
-      expect(JSON.parse(await readFile(join(root, `${executionId}.json`), 'utf8')).status).toBe(
-        'active',
-      );
-    },
-    30_000,
-  );
-
-  it(
-    'R12: a worktree attached to a blocked execution is never reused',
-    async () => {
-      const root = await makeRoot();
-      const blockedWorktree = join(root, 'worktrees', 'blocked');
-      await mkdir(blockedWorktree, { recursive: true });
-      const blockedExecutionId = unique('blocked');
-      await writeActiveJournal(
-        root,
-        journalRecord({
-          executionId: blockedExecutionId,
-          pid: null,
-          worktreePath: blockedWorktree,
-          phase: 'running',
-        }),
-      );
-      const recovery = new ExecutionRecovery(root, recoveryDependencies());
-      const scan = await recovery.scan();
-      expect(scan.clean).toBe(false);
-      expect(recovery.isWorktreeBlocked(blockedWorktree)).toBe(true);
-
+      const journal = {
+        begin: vi.fn().mockResolvedValue(undefined),
+        update: vi.fn().mockResolvedValue(undefined),
+        finish: vi.fn().mockResolvedValue(undefined),
+        flushAll: vi.fn().mockResolvedValue(undefined),
+        setBackgroundErrorHandler: vi.fn(),
+      };
+      const recovery = {
+        journal,
+        spool: { flush: vi.fn() },
+        isWorktreeBlocked: () => false,
+      } as unknown as ExecutionRecovery;
       const { captured, callbacks } = capturedCallbacks();
-      const spawnProcess = vi.fn();
-      const executionId = unique('execution');
+      const child = createFakeChild();
+      const terminateProcess = vi.fn(async () => {
+        throw new Error('injected termination failure');
+      });
       const executor = new RealExecutor(makeConfig(root), callbacks, recovery, {
         resolveExecutable: async () => ({ path: '/virtual/codex', searched: [], error: null }),
         probeAuthentication: async () => ({ authenticated: true, message: null }),
-        spawnProcess: spawnProcess as never,
+        spawnProcess: () => child as unknown as ChildProcess,
         buildArgs: () => [],
+        inspectProcess: async (pid: number) => ({
+          pid,
+          parentPid: 1,
+          processGroupId: pid,
+          startTime: 'start-test',
+          commandLine: 'codex exec',
+        }),
+        terminateProcess,
+        waitForProcessExit: async () => false,
         repositoryPolicy: fakeRepositoryPolicy(),
         git: {
           prepare: async () => ({
-            path: blockedWorktree,
+            path: join(root, 'worktree'),
             branchName: `haft/${executionId}`,
             baseCommit: 'a'.repeat(40),
           }),
           collect: async () => null,
-          cleanup: async () => ({ path: blockedWorktree, removed: false }),
+          cleanup: async () => ({ path: '', removed: false }),
         },
         shutdownForceWaitMs: 100,
       });
 
       const payload = startPayload(executionId);
-      const context = repositoryContext(executionId, blockedWorktree);
-      expect(await executor.canAdmit(payload, context)).toEqual({ ok: true });
-      executor.start(payload, context);
-      await waitFor(() => captured.failed.length === 1, 30_000, 'blocked worktree rejection');
+      executor.start(payload, repositoryContext(executionId, join(root, 'worktree')));
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        if (captured.phases.some((phase) => phase.phase === 'running')) break;
+        await vi.advanceTimersByTimeAsync(1);
+      }
+      expect(captured.phases.some((phase) => phase.phase === 'running')).toBe(true);
 
-      expect(captured.failed[0]?.payload.reason).toContain('RECOVERY_BLOCKED_WORKTREE');
-      expect(spawnProcess).not.toHaveBeenCalled();
-      expect(existsSync(blockedWorktree)).toBe(true);
-    },
-    30_000,
-  );
+      executor.cancel(executionId, 'R06 cancel');
+      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(journal.finish).not.toHaveBeenCalled();
+      expect(captured.completed).toEqual([]);
+      expect(captured.failed).toEqual([]);
+      expect(captured.cancelled).toEqual([]);
+      expect(executor.snapshot().map((session) => session.executionId)).toContain(executionId);
+      expect(
+        captured.logs.some((entry) =>
+          entry.entry.message.includes('recovery journal was left active'),
+        ),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 30_000);
+
+  it('R07: a corrupt journal is quarantined as evidence while other records still recover', async () => {
+    const root = await makeRoot();
+    const corruptPath = join(root, 'broken.json');
+    const original = '{"version":1,"executionId":';
+    await writeFile(corruptPath, original, 'utf8');
+    const validExecutionId = unique('execution');
+    await writeActiveJournal(root, journalRecord({ executionId: validExecutionId, pid: null }));
+
+    const recovery = new ExecutionRecovery(root, recoveryDependencies());
+    const scan = await recovery.scan();
+    expect(scan.clean).toBe(false);
+    expect(scan.corrupted).toHaveLength(1);
+    expect(scan.blocked.some((entry) => entry.kind === 'corrupt-journal')).toBe(true);
+    // A damaged record must not stop the remaining records from being scanned.
+    expect(scan.executions.map((entry) => entry.record.executionId)).toContain(validExecutionId);
+    expect(
+      scan.blocked.some(
+        (entry) =>
+          entry.executionId === validExecutionId && entry.reason.includes('PID_NOT_RECORDED'),
+      ),
+    ).toBe(true);
+    const quarantined = scan.corrupted[0]?.quarantinedPath;
+    expect(quarantined).toBeTruthy();
+    expect(existsSync(quarantined as string)).toBe(true);
+    expect(await readFile(quarantined as string, 'utf8')).toBe(original);
+    expect(existsSync(corruptPath)).toBe(false);
+
+    expect(
+      (await recovery.resolveCorruptJournal(quarantined as string, 'operator inspected the file'))
+        .resolved,
+    ).toBe(true);
+    expect(
+      (await recovery.resolveBlockedExecution(validExecutionId, 'no matching process remains'))
+        .resolved,
+    ).toBe(true);
+    const cleanScan = await new ExecutionRecovery(root, recoveryDependencies()).scan();
+    expect(cleanScan.clean).toBe(true);
+    expect(cleanScan.corrupted).toEqual([]);
+    expect(JSON.parse(await readFile(join(root, `${validExecutionId}.json`), 'utf8')).status).toBe(
+      'interrupted',
+    );
+  }, 30_000);
+
+  it('R08: a blocked scan rejects new work and advertises degraded readiness', async () => {
+    const root = await makeRoot();
+    await writeFile(join(root, 'broken.json'), 'not-json', 'utf8');
+    const scan = await new ExecutionRecovery(root, recoveryDependencies()).scan();
+    const config = makeConfig(root, {
+      mode: 'fake',
+      fakeRuntimes: ['codex'],
+      realRuntimes: [],
+    });
+    const client = new RunnerClient({
+      config,
+      repositoryPolicy: fakeRepositoryPolicy(),
+      recovery: new ExecutionRecovery(root, recoveryDependencies()),
+    });
+    const envelopes: RunnerEnvelope[] = [];
+    const fakeSocket = {
+      connected: true,
+      emit: (_event: string, envelope: RunnerEnvelope) => {
+        envelopes.push(envelope);
+      },
+      removeAllListeners: () => undefined,
+      disconnect: () => undefined,
+    };
+    (client as unknown as { socket: unknown }).socket = fakeSocket;
+
+    client.applyRecoveryScan(scan);
+    expect(client.isRecoveryBlocked()).toBe(true);
+    expect(client.recoveryBlockedReason()).toContain('CORRUPT');
+
+    const executionId = unique('execution');
+    await (
+      client as unknown as {
+        runAdmission(payload: ExecutionStartMessage['payload']): Promise<void>;
+      }
+    ).runAdmission(startPayload(executionId));
+    const rejected = envelopes.find(
+      (envelope) =>
+        envelope.type === 'execution.start.rejected' &&
+        (envelope.payload as { executionId?: string }).executionId === executionId,
+    );
+    expect(rejected).toBeDefined();
+    expect((rejected?.payload as { code?: string }).code).toBe(
+      ERROR_CODES.RUNNER_START_UNCONFIRMED,
+    );
+    expect((rejected?.payload as { message?: string }).message).toContain(
+      'RUNNER_RECOVERY_BLOCKED',
+    );
+
+    (client as unknown as { startHeartbeat(): void; stopHeartbeat(): void }).startHeartbeat();
+    const heartbeat = envelopes.find((envelope) => envelope.type === 'runner.heartbeat');
+    expect((heartbeat?.payload as { status?: string }).status).toBe('degraded');
+    (client as unknown as { stopHeartbeat(): void }).stopHeartbeat();
+
+    const port = await freePort();
+    const server = startHealthServer(port, config.runnerId, client);
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/ready`);
+      expect(response.status).toBe(503);
+      const body = (await response.json()) as { status?: string; recoveryBlocked?: boolean };
+      expect(body.status).toBe('degraded');
+      expect(body.recoveryBlocked).toBe(true);
+    } finally {
+      await new Promise<void>((resolve) => server?.close(() => resolve()) ?? resolve());
+    }
+  }, 60_000);
+
+  it('R09: a journal finalization failure sends no terminal event and keeps the active record', async () => {
+    const root = await makeRoot();
+    const worktreePath = join(root, 'worktree');
+    await mkdir(worktreePath, { recursive: true });
+    const executionId = unique('execution');
+    const marker = unique('marker');
+    const artifacts = join(root, 'artifacts');
+    await mkdir(artifacts, { recursive: true });
+    const cliOut = join(artifacts, `cli-${marker}.json`);
+    const recovery = new ExecutionRecovery(root, recoveryDependencies());
+    vi.spyOn(recovery.journal, 'finish').mockRejectedValue(
+      new Error('injected journal disk failure'),
+    );
+    const { captured, callbacks } = capturedCallbacks();
+
+    const executor = new RealExecutor(makeConfig(root), callbacks, recovery, {
+      resolveExecutable: async () => ({ path: process.execPath, searched: [], error: null }),
+      probeAuthentication: async () => ({ authenticated: true, message: null }),
+      buildArgs: () => [cliFixture, marker, cliOut, '1', 'none', '250'],
+      repositoryPolicy: fakeRepositoryPolicy(),
+      git: {
+        prepare: async () => ({
+          path: worktreePath,
+          branchName: `haft/${executionId}`,
+          baseCommit: 'a'.repeat(40),
+        }),
+        collect: async () => null,
+        cleanup: async () => ({ path: worktreePath, removed: false }),
+      },
+      shutdownForceWaitMs: 500,
+    });
+
+    const payload = startPayload(executionId);
+    const context = repositoryContext(executionId, worktreePath);
+    expect(await executor.canAdmit(payload, context)).toEqual({ ok: true });
+    executor.start(payload, context);
+    const cli = await waitForCliMarker(cliOut, true, 30_000);
+    trackedPids.add(cli.pid);
+    if (cli.grandchildPid) trackedPids.add(cli.grandchildPid);
+
+    await waitFor(
+      () =>
+        captured.logs.some((entry) =>
+          entry.entry.message.includes('no terminal event will be sent'),
+        ),
+      30_000,
+      'journal uncertainty latch',
+    );
+
+    expect(captured.completed).toEqual([]);
+    expect(captured.failed).toEqual([]);
+    expect(captured.cancelled).toEqual([]);
+    expect(executor.snapshot().map((session) => session.executionId)).toContain(executionId);
+    expect(JSON.parse(await readFile(join(root, `${executionId}.json`), 'utf8')).status).toBe(
+      'active',
+    );
+    expect(await waitForProcessExit(cli.pid, 5_000)).toBe(true);
+    if (cli.grandchildPid) {
+      expect(await waitForProcessExit(cli.grandchildPid, 5_000)).toBe(true);
+    }
+
+    const shutdown = await executor.shutdown('R09 shutdown');
+    expect(shutdown.clean).toBe(false);
+    expect(shutdown.remainingExecutionIds).toContain(executionId);
+    expect(captured.failed).toEqual([]);
+  }, 90_000);
+
+  it('R10: recovery leaves a live reused PID untouched and blocks with its identity evidence', async () => {
+    const root = await makeRoot();
+    const executionId = unique('execution');
+    const unrelated = await startUnrelatedProcess(unique('unrelated'));
+    await writeActiveJournal(
+      root,
+      journalRecord({
+        executionId,
+        pid: unrelated.identity.pid,
+        processStartTime: differentStartTime(unrelated.identity.startTime),
+        processGroupId: unrelated.identity.processGroupId,
+        phase: 'running',
+      }),
+    );
+    const terminate = vi.fn(async () => undefined);
+    const scan = await new ExecutionRecovery(
+      root,
+      recoveryDependencies({ terminateProcessTree: terminate }),
+    ).scan();
+
+    expect(scan.executions[0]?.recoveryBlocked).toBe(true);
+    expect(scan.executions[0]?.pidReused).toBe(true);
+    expect(scan.blocked[0]?.reason).toContain('PID_REUSED');
+    expect(terminate).not.toHaveBeenCalled();
+    expect(isProcessAlive(unrelated.identity.pid)).toBe(true);
+    expect(JSON.parse(await readFile(join(root, `${executionId}.json`), 'utf8')).status).toBe(
+      'active',
+    );
+  }, 30_000);
+
+  it('R11: recovery never assumes absent from an incomplete identity and never kills the PID', async () => {
+    const root = await makeRoot();
+    const executionId = unique('execution');
+    const unrelated = await startUnrelatedProcess(unique('unrelated'));
+    await writeActiveJournal(
+      root,
+      journalRecord({
+        executionId,
+        pid: unrelated.identity.pid,
+        processStartTime: null,
+        processGroupId: unrelated.identity.processGroupId,
+        phase: 'running',
+      }),
+    );
+    const terminate = vi.fn(async () => undefined);
+    const scan = await new ExecutionRecovery(
+      root,
+      recoveryDependencies({ terminateProcessTree: terminate }),
+    ).scan();
+
+    expect(scan.executions[0]?.recoveryBlocked).toBe(true);
+    expect(scan.executions[0]?.processIdentityUnverified).toBe(true);
+    expect(scan.executions[0]?.processStateUnknown).toBe(true);
+    expect(scan.blocked[0]?.reason).toContain('PID_IDENTITY_UNVERIFIED');
+    expect(terminate).not.toHaveBeenCalled();
+    expect(isProcessAlive(unrelated.identity.pid)).toBe(true);
+  }, 30_000);
+
+  it('R11b: a failed identity inspection never proves a live PID absent', async () => {
+    const root = await makeRoot();
+    const executionId = unique('execution');
+    const unrelated = await startUnrelatedProcess(unique('unrelated'));
+    await writeActiveJournal(
+      root,
+      journalRecord({
+        executionId,
+        pid: unrelated.identity.pid,
+        processStartTime: unrelated.identity.startTime,
+        processGroupId: unrelated.identity.processGroupId,
+        phase: 'running',
+      }),
+    );
+    const terminate = vi.fn(async () => undefined);
+    const scan = await new ExecutionRecovery(
+      root,
+      recoveryDependencies({
+        inspectProcess: async () => null,
+        terminateProcessTree: terminate,
+      }),
+    ).scan();
+
+    expect(scan.clean).toBe(false);
+    expect(scan.executions[0]?.recoveryBlocked).toBe(true);
+    expect(scan.executions[0]?.processStateUnknown).toBe(true);
+    expect(scan.blocked[0]?.reason).toContain('PID_IDENTITY_UNVERIFIED');
+    expect(terminate).not.toHaveBeenCalled();
+    expect(isProcessAlive(unrelated.identity.pid)).toBe(true);
+    expect(JSON.parse(await readFile(join(root, `${executionId}.json`), 'utf8')).status).toBe(
+      'active',
+    );
+  }, 30_000);
+
+  it('R12: a worktree attached to a blocked execution is never reused', async () => {
+    const root = await makeRoot();
+    const blockedWorktree = join(root, 'worktrees', 'blocked');
+    await mkdir(blockedWorktree, { recursive: true });
+    const blockedExecutionId = unique('blocked');
+    await writeActiveJournal(
+      root,
+      journalRecord({
+        executionId: blockedExecutionId,
+        pid: null,
+        worktreePath: blockedWorktree,
+        phase: 'running',
+      }),
+    );
+    const recovery = new ExecutionRecovery(root, recoveryDependencies());
+    const scan = await recovery.scan();
+    expect(scan.clean).toBe(false);
+    expect(recovery.isWorktreeBlocked(blockedWorktree)).toBe(true);
+
+    const { captured, callbacks } = capturedCallbacks();
+    const spawnProcess = vi.fn();
+    const executionId = unique('execution');
+    const executor = new RealExecutor(makeConfig(root), callbacks, recovery, {
+      resolveExecutable: async () => ({ path: '/virtual/codex', searched: [], error: null }),
+      probeAuthentication: async () => ({ authenticated: true, message: null }),
+      spawnProcess: spawnProcess as never,
+      buildArgs: () => [],
+      repositoryPolicy: fakeRepositoryPolicy(),
+      git: {
+        prepare: async () => ({
+          path: blockedWorktree,
+          branchName: `haft/${executionId}`,
+          baseCommit: 'a'.repeat(40),
+        }),
+        collect: async () => null,
+        cleanup: async () => ({ path: blockedWorktree, removed: false }),
+      },
+      shutdownForceWaitMs: 100,
+    });
+
+    const payload = startPayload(executionId);
+    const context = repositoryContext(executionId, blockedWorktree);
+    expect(await executor.canAdmit(payload, context)).toEqual({ ok: true });
+    executor.start(payload, context);
+    await waitFor(() => captured.failed.length === 1, 30_000, 'blocked worktree rejection');
+
+    expect(captured.failed[0]?.payload.reason).toContain('RECOVERY_BLOCKED_WORKTREE');
+    expect(spawnProcess).not.toHaveBeenCalled();
+    expect(existsSync(blockedWorktree)).toBe(true);
+  }, 30_000);
 });
 
 function freePort(): Promise<number> {

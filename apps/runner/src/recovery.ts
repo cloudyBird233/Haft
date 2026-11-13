@@ -20,6 +20,14 @@ import {
   type ProcessGuardRecord,
 } from './process-guard';
 import {
+  defaultEvidenceIo,
+  readCorruptProvenance,
+  readResolutionSidecar,
+  readValidCorruptResolution,
+  writeResolutionSidecar,
+  type EvidenceIo,
+} from './recovery-evidence';
+import {
   inspectProcess,
   isProcessAlive,
   terminateProcessTree,
@@ -36,6 +44,8 @@ export interface RecoveryDependencies {
   terminateProcessTree(pid: number): Promise<void>;
   waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean>;
   readGuard?(path: string): Promise<GuardReadResult>;
+  /** Test seam for resolution sidecar durability/failure injection. */
+  resolutionIo?: EvidenceIo;
 }
 
 export interface RecoveredExecution {
@@ -104,6 +114,7 @@ export class ExecutionRecovery {
   readonly spool: LogSpool;
   private readonly rootPath: string;
   private lastBlocked: RecoveryBlockedEntry[] = [];
+  private readonly resolutionIo: EvidenceIo;
   private readonly dependencies: Required<
     Pick<RecoveryDependencies, 'inspectProcess' | 'terminateProcessTree' | 'waitForProcessExit'>
   > &
@@ -124,6 +135,7 @@ export class ExecutionRecovery {
     },
   ) {
     this.rootPath = resolve(root);
+    this.resolutionIo = dependencies.resolutionIo ?? defaultEvidenceIo;
     this.dependencies = {
       inspectProcess: dependencies.inspectProcess,
       terminateProcessTree: dependencies.terminateProcessTree,
@@ -254,6 +266,12 @@ export class ExecutionRecovery {
     file: string,
     note: string,
   ): Promise<{ resolved: boolean; reason: string }> {
+    if (!note || !note.trim()) {
+      return {
+        resolved: false,
+        reason: 'An operator note is required to resolve corrupt evidence',
+      };
+    }
     const target = resolve(file);
     const root = resolve(this.root());
     const targetRelative = relative(root, target);
@@ -289,20 +307,55 @@ export class ExecutionRecovery {
         reason: 'The target is not a regular quarantined corrupt journal file',
       };
     }
-    await writeFile(
-      `${target}.resolution.json`,
-      `${JSON.stringify(
-        {
-          version: 1,
-          resolution: 'operator-confirmed-process-gone',
-          note,
-          resolvedAt: new Date().toISOString(),
-        },
-        null,
-        2,
-      )}\n`,
-      'utf8',
-    );
+
+    // A file name alone is not provenance. Only evidence written by the real
+    // corruption isolation path is resolvable, and its digest must still match.
+    const provenance = await readCorruptProvenance(target, root);
+    if (!provenance.valid) {
+      return {
+        resolved: false,
+        reason: `The corrupt journal has no valid isolation provenance: ${provenance.reason}`,
+      };
+    }
+    const existing = await readValidCorruptResolution(target, root);
+    if (existing.valid || !existing.missing) {
+      return {
+        resolved: false,
+        reason: existing.valid
+          ? 'The corrupt journal already has a valid resolution sidecar'
+          : `An invalid resolution sidecar already exists: ${existing.reason}`,
+      };
+    }
+
+    try {
+      const written = await writeResolutionSidecar(
+        target,
+        { executionId: provenance.record.executionId, note },
+        this.resolutionIo,
+      );
+      if (!written.ok) {
+        return {
+          resolved: false,
+          reason: `Could not publish the resolution sidecar: ${written.reason}`,
+        };
+      }
+    } catch (error) {
+      return {
+        resolved: false,
+        reason: `CORRUPT_RESOLUTION_WRITE_FAILED: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      };
+    }
+
+    const verification = await readValidCorruptResolution(target, root);
+    if (!verification.valid) {
+      return {
+        resolved: false,
+        reason: `The resolution evidence could not be verified: ${verification.reason}`,
+      };
+    }
+
     this.lastBlocked = this.lastBlocked.filter(
       (entry) => resolve(entry.file).toLowerCase() !== target.toLowerCase(),
     );
@@ -861,12 +914,13 @@ export class ExecutionRecovery {
     for (const name of entries) {
       if (!/\.corrupt-\d+$/.test(name)) continue;
       const file = join(root, name);
-      if (await resolutionExists(file)) continue;
+      const resolution = await readValidCorruptResolution(file, root);
+      if (resolution.valid) continue;
       blocked.push({
         kind: 'corrupt-journal',
         executionId: null,
         file,
-        reason: 'UNRESOLVED_CORRUPT_JOURNAL: an operator must confirm the process state',
+        reason: `UNRESOLVED_CORRUPT_JOURNAL: an operator must confirm the process state (${resolution.reason})`,
         pid: null,
         processStartTime: null,
         cliPid: null,
@@ -892,7 +946,8 @@ export class ExecutionRecovery {
       if (!name.endsWith('.guard.json')) continue;
       const file = join(guardsDirectory, name);
       if (referencedGuards.has(resolve(file))) continue;
-      if (await resolutionExists(file)) continue;
+      const resolution = await readResolutionSidecar(file);
+      if (resolution.valid) continue;
       const read = await (this.dependencies.readGuard ?? readProcessGuard)(file);
       if (read.kind === 'invalid') {
         blocked.push({
@@ -1003,15 +1058,6 @@ function isBlockedEntry(value: unknown): value is RecoveryBlockedEntry {
     typeof entry.reason === 'string' &&
     typeof entry.file === 'string'
   );
-}
-
-async function resolutionExists(file: string): Promise<boolean> {
-  try {
-    await stat(`${file}.resolution.json`);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function isOwnedProcess(identity: ProcessIdentity, record: ExecutionJournalRecord): boolean {

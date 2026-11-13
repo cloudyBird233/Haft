@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promise
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { ProcessIdentity } from './process-identity';
 import { isProcessAlive, terminateProcessTree } from './process-identity';
+import { EvidenceFileError, readRegularFileSnapshot } from './safe-file';
 
 /**
  * Durable process-tree guard owned by the per-execution supervisor.
@@ -13,13 +14,7 @@ import { isProcessAlive, terminateProcessTree } from './process-identity';
 export type ProcessGuardIsolation = 'windows-job' | 'linux-cgroup' | 'posix-group';
 
 export type ProcessGuardState =
-  | 'starting'
-  | 'running'
-  | 'terminating'
-  | 'exited'
-  | 'terminated'
-  | 'failed'
-  | 'unconfirmed';
+  'starting' | 'running' | 'terminating' | 'exited' | 'terminated' | 'failed' | 'unconfirmed';
 
 export interface ProcessGuardRecord {
   version: 1;
@@ -104,18 +99,15 @@ const KNOWN_STATES: ProcessGuardState[] = [
   'failed',
   'unconfirmed',
 ];
-const KNOWN_ISOLATIONS: ProcessGuardIsolation[] = [
-  'windows-job',
-  'linux-cgroup',
-  'posix-group',
-];
+const KNOWN_ISOLATIONS: ProcessGuardIsolation[] = ['windows-job', 'linux-cgroup', 'posix-group'];
 
 export async function readProcessGuard(guardPath: string): Promise<GuardReadResult> {
   let raw: string;
   try {
-    raw = await readFile(guardPath, 'utf8');
+    const snapshot = await readRegularFileSnapshot(guardPath, { maxBytes: 1024 * 1024 });
+    raw = snapshot.contents.toString('utf8');
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+    if (error instanceof EvidenceFileError && error.code === 'missing') {
       return { kind: 'missing', path: guardPath };
     }
     return {
@@ -192,7 +184,11 @@ export function guardPathFor(
   executionId: string,
   launchToken: string,
 ): string {
-  return join(recoveryRoot, 'guards', `${sanitize(executionId)}.${sanitize(launchToken)}.guard.json`);
+  return join(
+    recoveryRoot,
+    'guards',
+    `${sanitize(executionId)}.${sanitize(launchToken)}.guard.json`,
+  );
 }
 
 export function guardControlPathFor(guardPath: string): string {
