@@ -9,6 +9,10 @@ import {
 } from '@raft-lite/contracts';
 import { AppLogger } from '../../common/logger/app-logger';
 import { PrismaService } from '../../common/prisma/prisma.service';
+import {
+  HandshakeMessageService,
+  type HandshakeRegistrationBinding,
+} from './handshake-message.service';
 import { RepositoryDispatchCancelledError, RepositoryDispatchError } from './repository-errors';
 import { sameRepositoryPath } from './repository-state';
 import {
@@ -62,6 +66,8 @@ interface PendingDispatch {
   expectedPolicyVersion: string;
   expectedCanonicalPath: string;
   repositoryMessage: RunnerEnvelope;
+  /** Registration the pending messages are bound to. */
+  registration: HandshakeRegistrationBinding;
   repositoryDeferred: Deferred<ExecutionRepositoryAcceptedPayload>;
   startDeferred: Deferred<ExecutionAcceptedPayload>;
   startMessage: RunnerEnvelope | null;
@@ -74,6 +80,14 @@ interface PendingDispatch {
 const REPOSITORY_RETRY_DELAYS_MS = [2_000, 6_000] as const;
 const REPOSITORY_HANDSHAKE_TIMEOUT_MS = 15_000;
 const START_ACCEPT_TIMEOUT_MS = 20_000;
+/**
+ * Outer recovery bound measured from `startSentAt`. It is a recovery ceiling for
+ * the API, never a CLI execution timeout.
+ */
+const RECOVERY_OUTER_LIMIT_MS = 120_000;
+
+/** Internal sentinel: the conditional dispatch acquisition lost the race. */
+class DispatchAcquireConflict extends Error {}
 
 const REQUIRED_EXECUTION_FEATURES: readonly RunnerFeature[] = [
   'project-binding-v1',
@@ -100,6 +114,7 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
     private readonly prisma: PrismaService,
     private readonly runners: RunnerRegistryService,
     private readonly logger: AppLogger,
+    private readonly messages: HandshakeMessageService,
   ) {
     this.unsubscribeProtocol = this.runners.onProtocolEvent((event) => this.onProtocolEvent(event));
     // WP-D resumes persisted pre-start rows on register. WP-C records the hook
@@ -314,16 +329,58 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
           );
         }
 
-        const acquired = await this.prisma.execution.updateMany({
-          where: {
-            id: input.executionId,
-            status: 'running',
-            dispatchState: 'created',
-            cancelRequestedAt: null,
-          },
-          data: { dispatchState: 'repository_preparing' },
+        const binding = await this.prisma.projectRepositoryBinding.findUnique({
+          where: { id: snapshot.bindingId },
+          select: { path: true, canonicalPath: true, policyVersion: true },
         });
-        if (acquired.count === 0) {
+        if (!binding?.canonicalPath || !binding.policyVersion) {
+          throw new RepositoryDispatchError(
+            ERROR_CODES.PROJECT_BINDING_NOT_READY,
+            'The repository binding is not ready for execution',
+          );
+        }
+        bindingPolicyVersion = binding.policyVersion;
+
+        // The registration is captured before anything is persisted: every
+        // message written below is bound to it, so a later rotation makes the
+        // evidence recognisably stale instead of silently reusable.
+        const registration = this.requireLiveRegistration(input.runnerId);
+
+        const payload: ExecutionRepositoryPayload = {
+          executionId: input.executionId,
+          projectId: snapshot.projectId,
+          bindingId: snapshot.bindingId,
+          bindingVersion: snapshot.bindingVersion,
+          path: binding.path,
+          defaultBranch: snapshot.defaultBranch,
+          policyVersion: binding.policyVersion,
+        };
+        const repositoryMessage = this.runners.buildEnvelope(
+          input.runnerId,
+          'execution.repository',
+          payload,
+          randomUUID(),
+        );
+        // The start envelope is built once, before the repository round-trip, so
+        // its messageId can never change between evidence and send.
+        const startMessage = this.runners.buildEnvelope(input.runnerId, 'execution.start', {
+          executionId: input.executionId,
+          runtime: input.runtime,
+          taskId: input.taskId,
+          taskTitle: input.taskTitle,
+          taskDescription: input.taskDescription,
+          projectId: input.projectId,
+          prompt: input.prompt,
+          options: input.options ?? {},
+        });
+
+        const acquired = await this.acquireDispatch(
+          input,
+          registration,
+          repositoryMessage,
+          startMessage,
+        );
+        if (!acquired) {
           const latest = await this.prisma.execution.findUnique({
             where: { id: input.executionId },
             select: { status: true, dispatchState: true, cancelRequestedAt: true },
@@ -348,38 +405,12 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
           bindingVersion: snapshot.bindingVersion,
         });
 
-        const binding = await this.prisma.projectRepositoryBinding.findUnique({
-          where: { id: snapshot.bindingId },
-          select: { path: true, canonicalPath: true, policyVersion: true },
-        });
-        if (!binding?.canonicalPath || !binding.policyVersion) {
-          throw new RepositoryDispatchError(
-            ERROR_CODES.PROJECT_BINDING_NOT_READY,
-            'The repository binding is not ready for execution',
-          );
-        }
-        bindingPolicyVersion = binding.policyVersion;
-
-        const payload: ExecutionRepositoryPayload = {
-          executionId: input.executionId,
-          projectId: snapshot.projectId,
-          bindingId: snapshot.bindingId,
-          bindingVersion: snapshot.bindingVersion,
-          path: binding.path,
-          defaultBranch: snapshot.defaultBranch,
-          policyVersion: binding.policyVersion,
-        };
-        const repositoryMessage = this.runners.buildEnvelope(
-          input.runnerId,
-          'execution.repository',
-          payload,
-          randomUUID(),
-        );
-
         const created = this.createPending(
           input,
           snapshot,
           repositoryMessage,
+          startMessage,
+          registration,
           binding.canonicalPath,
           binding.policyVersion,
         );
@@ -393,6 +424,7 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
               true,
             );
           }
+          await this.messages.markSent(repositoryMessage.messageId);
         } catch (error) {
           this.clearPending(created);
           throw error;
@@ -404,17 +436,13 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
       this.clearRepositoryTimers(pending);
       await this.acceptedRepository(pending, accepted);
 
-      const startMessage = this.runners.buildEnvelope(input.runnerId, 'execution.start', {
-        executionId: input.executionId,
-        runtime: input.runtime,
-        taskId: input.taskId,
-        taskTitle: input.taskTitle,
-        taskDescription: input.taskDescription,
-        projectId: input.projectId,
-        prompt: input.prompt,
-        options: input.options ?? {},
-      });
-      pending.startMessage = startMessage;
+      const startMessage = pending.startMessage;
+      if (!startMessage) {
+        throw new RepositoryDispatchError(
+          ERROR_CODES.REPOSITORY_CONTEXT_NOT_READY,
+          'The execution.start envelope was not prepared for this dispatch',
+        );
+      }
       pending.startTimer = setTimeout(() => {
         pending?.startDeferred.reject(
           new RepositoryDispatchError(
@@ -456,6 +484,7 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
             true,
           );
         }
+        await this.messages.markSent(startMessage.messageId);
       });
       await pending.startDeferred.promise;
       pending.settled = true;
@@ -655,6 +684,8 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
     input: RepositoryDispatchInput,
     snapshot: ExecutionSnapshot,
     repositoryMessage: RunnerEnvelope,
+    startMessage: RunnerEnvelope,
+    registration: HandshakeRegistrationBinding,
     expectedCanonicalPath: string,
     expectedPolicyVersion: string,
   ): PendingDispatch {
@@ -668,9 +699,10 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
       expectedPolicyVersion,
       expectedCanonicalPath,
       repositoryMessage,
+      registration,
       repositoryDeferred,
       startDeferred,
-      startMessage: null,
+      startMessage,
       retryTimers: [],
       timeoutTimer: null,
       startTimer: null,
@@ -678,13 +710,88 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
     };
   }
 
+  private requireLiveRegistration(runnerId: string): HandshakeRegistrationBinding {
+    const live = this.runners.getLiveRegistration(runnerId);
+    if (!live) {
+      throw new RepositoryDispatchError(
+        ERROR_CODES.PROJECT_BINDING_NOT_READY,
+        'The selected runner is no longer registered',
+      );
+    }
+    return {
+      registrationId: live.registrationId,
+      registrationEpoch: live.registrationEpoch,
+    };
+  }
+
+  /**
+   * Persists the durable evidence and advances `created -> repository_preparing`
+   * in one transaction.
+   *
+   * Order matters: `Execution_dispatch_transition_guard` requires the
+   * `execution.repository` row to exist when the state moves, and the whole
+   * transaction rolls back when the conditional update loses the race, so a
+   * losing dispatcher never leaves orphan evidence behind.
+   */
+  private async acquireDispatch(
+    input: RepositoryDispatchInput,
+    registration: HandshakeRegistrationBinding,
+    repositoryMessage: RunnerEnvelope,
+    startMessage: RunnerEnvelope,
+  ): Promise<boolean> {
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await this.messages.create(tx, {
+          executionId: input.executionId,
+          runnerId: input.runnerId,
+          envelope: repositoryMessage,
+          registration,
+        });
+        // The start envelope is persisted at most once for the lifetime of the
+        // execution, long before it is sent. Persistence is evidence, never a
+        // replay permission.
+        await this.messages.create(tx, {
+          executionId: input.executionId,
+          runnerId: input.runnerId,
+          envelope: startMessage,
+          registration,
+        });
+        const moved = await tx.execution.updateMany({
+          where: {
+            id: input.executionId,
+            status: 'running',
+            dispatchState: 'created',
+            cancelRequestedAt: null,
+          },
+          data: {
+            dispatchState: 'repository_preparing',
+            registrationId: registration.registrationId,
+            registrationEpoch: registration.registrationEpoch,
+          },
+        });
+        if (moved.count !== 1) {
+          throw new DispatchAcquireConflict();
+        }
+      });
+      return true;
+    } catch (error) {
+      if (error instanceof DispatchAcquireConflict) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
   private armRepositoryTimers(pending: PendingDispatch): void {
     for (const delay of REPOSITORY_RETRY_DELAYS_MS) {
       const timer = setTimeout(() => {
         if (pending.settled) return;
         // Same message object: same messageId, same sentAt, byte-identical
-        // payload. The API relies on executionId for Runner idempotency.
+        // payload. The API relies on executionId for Runner idempotency. Only
+        // `execution.repository` is replayable; the persisted evidence records
+        // that the retry reused the original envelope.
         this.runners.sendEnvelope(pending.runnerId, pending.repositoryMessage);
+        this.messages.recordReplay(pending.repositoryMessage.messageId);
       }, delay);
       timer.unref();
       pending.retryTimers.push(timer);
@@ -855,6 +962,7 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
       }
 
       if (expectedState === 'repository_preparing') {
+        const preparedAt = new Date();
         const moved = await tx.execution.updateMany({
           where: {
             id: pending.executionId,
@@ -868,7 +976,7 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
             repositoryPolicyVersion: ack?.policyVersion ?? binding.policyVersion,
             repositoryContextId: ack?.contextId ?? null,
             repositoryBaseCommit: ack?.baseCommit ?? null,
-            repositoryPreparedAt: new Date(),
+            repositoryPreparedAt: preparedAt,
           },
         });
         if (moved.count === 0) {
@@ -881,25 +989,45 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
           }
           throw this.staleTransition(pending, 'repository_preparing');
         }
+        // The acknowledgement and the state it justifies commit together.
+        await this.messages.markAcked(tx, pending.repositoryMessage.messageId, preparedAt);
         return { state: 'repository_ready' as const, policyVersion: binding.policyVersion };
       }
 
+      // `repository_ready -> start_sent` fixes the start clock. T5 makes both
+      // timestamps write-once, so this is also the proof that the start was
+      // never re-issued.
+      const startSentAt = new Date();
       const moved = await tx.execution.updateMany({
         where: {
           id: pending.executionId,
           status: 'running',
           dispatchState: 'repository_ready',
           cancelRequestedAt: null,
+          startSentAt: null,
         },
-        data: { dispatchState: 'start_sent' },
+        data: {
+          dispatchState: 'start_sent',
+          startSentAt,
+          startAcceptDeadlineAt: new Date(startSentAt.getTime() + START_ACCEPT_TIMEOUT_MS),
+          recoveryDeadlineAt: new Date(startSentAt.getTime() + RECOVERY_OUTER_LIMIT_MS),
+        },
       });
       if (moved.count === 0) {
         const latest = await tx.execution.findUnique({
           where: { id: pending.executionId },
-          select: { status: true, cancelRequestedAt: true },
+          select: { status: true, dispatchState: true, cancelRequestedAt: true },
         });
         if (latest?.cancelRequestedAt || latest?.status !== 'running') {
           throw new RepositoryDispatchCancelledError();
+        }
+        if (latest?.dispatchState === 'start_sent' || latest?.dispatchState === 'running') {
+          // The start clock was already fixed by an earlier attempt. Never send
+          // a second execution.start.
+          throw new RepositoryDispatchError(
+            ERROR_CODES.EXECUTION_ALREADY_RUNNING,
+            'execution.start was already issued for this execution',
+          );
         }
         throw this.staleTransition(pending, 'repository_ready');
       }
@@ -979,6 +1107,7 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
       return;
     }
     if (event.type === 'execution.repository.rejected') {
+      await this.messages.markRejected(pending.repositoryMessage.messageId);
       pending.repositoryDeferred.reject(
         new RepositoryDispatchError(
           event.payload.code,
@@ -992,6 +1121,7 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
       if (!pending.startMessage) {
         return;
       }
+      await this.messages.markRejected(pending.startMessage.messageId);
       pending.startDeferred.reject(
         new RepositoryDispatchError(
           event.payload.code,
@@ -1005,14 +1135,21 @@ export class RepositoryHandshakeService implements OnModuleDestroy {
       if (!pending.startMessage) {
         return;
       }
-      const moved = await this.prisma.execution.updateMany({
-        where: {
-          id: pending.executionId,
-          status: 'running',
-          dispatchState: 'start_sent',
-          cancelRequestedAt: null,
-        },
-        data: { dispatchState: 'running' },
+      const startMessageId = pending.startMessage.messageId;
+      const moved = await this.prisma.$transaction(async (tx) => {
+        const result = await tx.execution.updateMany({
+          where: {
+            id: pending.executionId,
+            status: 'running',
+            dispatchState: 'start_sent',
+            cancelRequestedAt: null,
+          },
+          data: { dispatchState: 'running' },
+        });
+        if (result.count === 1) {
+          await this.messages.markAcked(tx, startMessageId);
+        }
+        return result;
       });
       if (moved.count === 0) {
         const current = await this.prisma.execution.findUnique({

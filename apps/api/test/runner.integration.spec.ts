@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
@@ -978,6 +978,49 @@ describe('Runner protocol v1 integration', () => {
         'start_sent',
         'running',
       ]);
+
+      // Slice 1 evidence: one durable row per handshake message, written before
+      // the transition it justifies, with a self-verifying hash, and bound to
+      // the live registration.
+      const messages = await prisma.repositoryHandshakeMessage.findMany({
+        where: { executionId: execution.id },
+        orderBy: { messageType: 'asc' },
+      });
+      expect(messages.map((message) => message.messageType)).toEqual([
+        'execution.repository',
+        'execution.start',
+      ]);
+      for (const message of messages) {
+        expect(message.status).toBe('acked');
+        expect(message.payloadHash).toBe(
+          createHash('sha256').update(message.envelopeJson, 'utf8').digest('hex'),
+        );
+        expect(message.createdRegistrationEpoch).toBeGreaterThan(0);
+        expect(message.createdRegistrationId).toBeTruthy();
+      }
+      const runnerRow = await prisma.runner.findUniqueOrThrow({ where: { id: RUNNER_ID } });
+      expect(messages[0]?.createdRegistrationId).toBe(runnerRow.registrationId);
+      expect(messages[0]?.createdRegistrationEpoch).toBe(runnerRow.registrationEpoch);
+
+      // The start envelope never persists the prompt or the task description.
+      const startEvidence = messages.find((message) => message.messageType === 'execution.start');
+      expect(startEvidence?.envelopeJson).not.toContain('Complete the runner integration loop.');
+      const startEnvelope = JSON.parse(startEvidence!.envelopeJson) as {
+        payload: Record<string, unknown>;
+      };
+      expect(startEnvelope.payload).not.toHaveProperty('prompt');
+      expect(startEnvelope.payload).not.toHaveProperty('taskDescription');
+      expect(startEnvelope.payload.redacted).toMatchObject({
+        promptSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+        taskDescriptionSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      });
+
+      // The start clock is fixed exactly once, with the 20 s accept window and
+      // the 120 s recovery ceiling.
+      const row = await prisma.execution.findUniqueOrThrow({ where: { id: execution.id } });
+      expect(row.startSentAt).toBeTruthy();
+      expect(row.recoveryDeadlineAt!.getTime() - row.startSentAt!.getTime()).toBe(120_000);
+      expect(row.startAcceptDeadlineAt!.getTime() - row.startSentAt!.getTime()).toBe(20_000);
     } finally {
       connected.socket.off('runner.message', handler);
     }

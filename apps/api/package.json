@@ -12,11 +12,12 @@
     "db:deploy": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
     "db:studio": "prisma studio",
-    "db:prepare:e2e": "dotenv -e .env.e2e -- node scripts/reset-database.mjs && dotenv -e .env.e2e -- prisma db push --force-reset --skip-generate",
-    "db:prepare:real-e2e": "dotenv -e .env.real-e2e -- node scripts/reset-database.mjs && dotenv -e .env.real-e2e -- prisma db push --force-reset --skip-generate",
+    "db:prepare:e2e": "dotenv -e .env.e2e -- node scripts/reset-database.mjs && dotenv -e .env.e2e -- prisma migrate deploy",
+    "db:prepare:real-e2e": "dotenv -e .env.real-e2e -- node scripts/reset-database.mjs && dotenv -e .env.real-e2e -- prisma migrate deploy",
     "start:e2e": "dotenv -e .env.e2e -- nest start",
     "start:real-e2e": "dotenv -e .env.real-e2e -- nest start",
-    "test": "dotenv -e .env.test -- node scripts/reset-database.mjs && dotenv -e .env.test -- prisma db push --force-reset --skip-generate && dotenv -e .env.test -- vitest run"
+    "test": "dotenv -e .env.test -- node scripts/reset-database.mjs && dotenv -e .env.test -- prisma migrate deploy && dotenv -e .env.test -- vitest run",
+    "db:migrate:verify": "dotenv -e .env.test -- node scripts/verify-migration-consistency.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^11.1.6",

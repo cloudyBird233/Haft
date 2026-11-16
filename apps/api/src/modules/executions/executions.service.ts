@@ -19,6 +19,11 @@ import { AppException } from '../../common/errors/app.exception';
 import { AppLogger } from '../../common/logger/app-logger';
 import { PrismaService } from '../../common/prisma/prisma.service';
 import {
+  terminalDecisionForOutcome,
+  terminalDecisionForStartFailure,
+  writeTerminalDecision,
+} from './execution-terminal';
+import {
   agentRelations,
   executionRelations,
   taskRelations,
@@ -580,26 +585,37 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     const reason = input?.reason ?? 'Cancelled by operator';
     const endedAt = new Date();
 
-    await this.prisma.$transaction([
-      this.prisma.execution.update({
-        where: { id: current.id },
-        data: {
-          status: 'cancelled',
-          phase: 'cancelled',
-          endedAt,
-          cancelReason: reason,
-          dispatchState: 'terminal',
-        },
-      }),
-      this.prisma.task.update({
+    const applied = await this.prisma.$transaction(async (tx) => {
+      // The mock runtime owns no process, so the cancellation is confirmed as
+      // soon as the runtime reports stopped. It still goes through the single
+      // terminal writer so the tuple and status stay consistent.
+      const written = await writeTerminalDecision(tx, {
+        executionId: current.id,
+        decision: 'CANCELLED_CONFIRMED',
+        decidedBy: 'api:operator-cancel',
+        endedAt,
+        patch: { cancelReason: reason },
+      });
+      if (!written) {
+        return false;
+      }
+      await tx.task.update({
         where: { id: current.taskId },
         data: { status: 'cancelled' },
-      }),
-      this.prisma.agent.update({
+      });
+      await tx.agent.update({
         where: { id: current.agentId },
         data: { status: 'idle', lastActiveAt: endedAt },
-      }),
-    ]);
+      });
+      return true;
+    });
+    if (!applied) {
+      throw new AppException(
+        'EXECUTION_NOT_RUNNING',
+        'The execution reached a terminal state before the cancellation was applied',
+        HttpStatus.CONFLICT,
+      );
+    }
 
     await this.appendLog(current.id, 'warning', `Execution cancelled: ${reason}`);
 
@@ -745,32 +761,23 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
   }): Promise<boolean> {
     const endedAt = new Date();
     const failureReason = formatStartFailureReason(input.error);
+    const failureCode =
+      input.error && typeof input.error === 'object' && 'code' in input.error
+        ? String((input.error as { code?: unknown }).code ?? '')
+        : null;
     const applied = await this.prisma.$transaction(async (tx) => {
-      const current = await tx.execution.findUnique({
-        where: { id: input.executionId },
-        select: { status: true, cancelRequestedAt: true },
-      });
       // Idempotent: a recovered failure or a duplicate caller may already have
-      // made the row terminal. Never overwrite its reason or restore twice.
+      // made the row terminal. Never overwrite its decision or restore twice.
       // A persisted operator cancel wins over a handshake failure.
-      if (!current || current.status !== 'running' || current.cancelRequestedAt) {
-        return false;
-      }
-      const updated = await tx.execution.updateMany({
-        where: {
-          id: input.executionId,
-          status: 'running',
-          cancelRequestedAt: null,
-        },
-        data: {
-          status: 'failed',
-          phase: 'failed',
-          endedAt,
-          failureReason,
-          dispatchState: 'terminal',
-        },
+      const written = await writeTerminalDecision(tx, {
+        executionId: input.executionId,
+        decision: terminalDecisionForStartFailure(failureCode),
+        decidedBy: 'api:start-failure',
+        endedAt,
+        requireNoCancelIntent: true,
+        patch: { failureReason },
       });
-      if (updated.count === 0) {
+      if (!written) {
         return false;
       }
       await tx.task.update({
@@ -971,16 +978,17 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     const git = metadata.git;
     const diff = git ? normalizeDiff(git.diff, git.diffTruncated) : null;
 
-    await this.prisma.$transaction(async (tx) => {
-      await tx.execution.update({
-        where: { id },
-        data: {
-          status: outcome,
-          phase: outcome,
+    const applied = await this.prisma.$transaction(async (tx) => {
+      // First terminal writer wins. The conditional update is the authoritative
+      // decision; the pre-read above is only a fast path.
+      const written = await writeTerminalDecision(tx, {
+        executionId: id,
+        decision: terminalDecisionForOutcome(outcome),
+        decidedBy: `api:${outcome === 'cancelled' ? 'operator-cancel' : 'runtime-event'}`,
+        endedAt,
+        patch: {
           progress: outcome === 'completed' ? 100 : current.progress,
           progressMode: outcome === 'completed' ? 'determinate' : current.progressMode,
-          endedAt,
-          dispatchState: 'terminal',
           ...(metadata.exitCode !== undefined ? { exitCode: metadata.exitCode } : {}),
           ...(metadata.summary !== undefined ? { summary: metadata.summary } : {}),
           ...(outcome === 'failed' && metadata.reason ? { failureReason: metadata.reason } : {}),
@@ -1000,6 +1008,9 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
             : {}),
         },
       });
+      if (!written) {
+        return false;
+      }
       if (git && diff) {
         await tx.executionArtifact.upsert({
           where: { executionId_kind: { executionId: id, kind: 'git-diff' } },
@@ -1025,7 +1036,13 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         where: { id: current.agentId },
         data: { status: nextAgentStatus, lastActiveAt: endedAt },
       });
+      return true;
     });
+    if (!applied) {
+      // Another path already decided the terminal outcome. Late events may
+      // append audit rows but never rewrite the decided state.
+      return;
+    }
 
     this.runtimes.noteFinished(current.runtime as AgentRuntimeType, id);
     this.handshake.noteTerminal(id);

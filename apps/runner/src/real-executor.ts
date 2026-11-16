@@ -76,6 +76,18 @@ export interface RealExecutorDependencies {
    */
   repositoryPolicy?: RepositoryPathPolicy | null;
   shutdownForceWaitMs: number;
+  /**
+   * Test seam for the frozen terminal timing. Production always uses
+   * `TERMINAL_FALLBACK_MS` (15 s); a test may shorten it so the fallback can be
+   * exercised against a real process tree without waiting 15 real seconds.
+   */
+  terminalFallbackMs?: number;
+  /**
+   * Test seam for the supervisor confirmation window. `undefined` keeps the
+   * supervisor's own production bound. Shortening it is how a test reaches the
+   * "termination not confirmed" decision deterministically.
+   */
+  treeTerminationTimeoutMs?: number;
 }
 
 interface RealSession extends RunnerSessionView {
@@ -173,6 +185,8 @@ export class RealExecutor implements RunnerExecutor {
   private readonly waitForProcessExit: RealExecutorDependencies['waitForProcessExit'];
   private readonly repositoryPolicy: RepositoryPathPolicy | null;
   private readonly shutdownForceWaitMs: number;
+  private readonly terminalFallbackMs: number;
+  private readonly treeTerminationTimeoutMs: number | undefined;
 
   constructor(
     private readonly config: RunnerConfig,
@@ -191,6 +205,8 @@ export class RealExecutor implements RunnerExecutor {
     this.waitForProcessExit = dependencies.waitForProcessExit ?? waitForProcessExit;
     this.repositoryPolicy = dependencies.repositoryPolicy ?? null;
     this.shutdownForceWaitMs = dependencies.shutdownForceWaitMs ?? SHUTDOWN_FORCE_WAIT_MS;
+    this.terminalFallbackMs = dependencies.terminalFallbackMs ?? TERMINAL_FALLBACK_MS;
+    this.treeTerminationTimeoutMs = dependencies.treeTerminationTimeoutMs;
     this.recovery?.journal.setBackgroundErrorHandler?.((executionId, error) => {
       const session = this.sessions.get(executionId);
       if (!session) return;
@@ -1018,7 +1034,7 @@ export class RealExecutor implements RunnerExecutor {
     if (session.managed) {
       let result: TreeTerminationResult;
       try {
-        result = await session.managed.terminate(force);
+        result = await session.managed.terminate(force, this.treeTerminationTimeoutMs);
       } catch (error) {
         result = {
           requested: true,
@@ -1103,7 +1119,7 @@ export class RealExecutor implements RunnerExecutor {
     if (session.fallbackTimer) return;
     session.fallbackTimer = setTimeout(() => {
       void this.handleTerminalFallback(session, outcome);
-    }, TERMINAL_FALLBACK_MS);
+    }, this.terminalFallbackMs);
   }
 
   /**

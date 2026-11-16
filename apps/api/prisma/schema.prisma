@@ -100,6 +100,13 @@ model Runner {
   lastHeartbeatAt         DateTime?
   connectedAt             DateTime?
   disconnectedAt          DateTime?
+  /// Identity of the current registration epoch. Rotated on every accepted
+  /// `runner.register`; `registrationEpoch` is monotonic and may only advance
+  /// together with a new `registrationId` (enforced by
+  /// `Runner_registration_guard`).
+  registrationId          String?                    @unique
+  registrationEpoch       Int                        @default(0)
+  lastRegisteredAt        DateTime?
   createdAt               DateTime                   @default(now())
   updatedAt               DateTime                   @updatedAt
   computer                Computer                   @relation(fields: [computerId], references: [id], onDelete: Cascade)
@@ -108,6 +115,7 @@ model Runner {
 
   @@index([status])
   @@index([lastHeartbeatAt])
+  @@index([lastRegisteredAt])
 }
 
 model Agent {
@@ -169,6 +177,21 @@ model Execution {
   repositoryBaseCommit      String?
   repositoryPreparedAt      DateTime?
   dispatchState             String                     @default("created")
+  /// Registration the execution is bound to. Slice 1 only records the binding;
+  /// takeover decisions are Slice 2.
+  registrationId            String?
+  registrationEpoch         Int                        @default(0)
+  /// Start clock. `startSentAt` and `startAcceptDeadlineAt` are write-once
+  /// (enforced by `Execution_start_clock_guard`); `recoveryDeadlineAt` may only
+  /// move earlier.
+  startSentAt               DateTime?
+  startAcceptDeadlineAt     DateTime?
+  recoveryDeadlineAt        DateTime?
+  /// Terminal tuple. Written exactly once, by the API, on the transition out of
+  /// `running`. `terminalDecision` is one of the 13 frozen values.
+  terminalDecision          String?
+  terminalDecidedAt         DateTime?
+  terminalDecidedBy         String?
   /// Durable operator cancel intent. Set before any Runner cancel message is
   /// sent and checked by every pre-start handshake transition. It is an
   /// internal field, not a substitute dispatch state.
@@ -202,6 +225,8 @@ model Execution {
   artifacts                 ExecutionArtifact[]
   activities                Activity[]
   repositoryHandshakeEvents RepositoryHandshakeEvent[]
+  handshakeMessages         RepositoryHandshakeMessage[]
+  registrationAudits        ExecutionRegistrationAudit[]
 
   @@index([taskId])
   @@index([agentId])
@@ -211,6 +236,10 @@ model Execution {
   @@index([phase])
   @@index([dispatchState])
   @@index([runnerId, dispatchState])
+  @@index([status, dispatchState])
+  @@index([runnerId, registrationEpoch])
+  @@index([recoveryDeadlineAt])
+  @@index([terminalDecision])
 }
 
 /// Durable audit trail for the execution repository handshake. It never stores
@@ -244,6 +273,73 @@ model ExecutionArtifact {
 
   @@unique([executionId, kind])
   @@index([executionId])
+}
+
+/// Durable evidence for an outbound execution handshake message.
+///
+/// The row is written *before* the message is handed to the transport, so
+/// `status = created` is the durable proof that a message may have been built
+/// but was not necessarily sent. `execution.start` is persisted at most once per
+/// execution (partial unique index in migration
+/// `20261116120000_p2_02_wpd_slice1_schema_migration`); the row is evidence,
+/// never a replay source.
+///
+/// `envelopeJson` never contains the raw prompt or task description for
+/// `execution.start`: sensitive fields are stored as content digests in the
+/// envelope's `redacted` block. See the Slice 1 report for the open ratification
+/// item.
+model RepositoryHandshakeMessage {
+  id                         String    @id @default(cuid())
+  executionId                String
+  /// Deliberately not a foreign key: message evidence must survive Runner
+  /// deletion (an Execution keeps its history, the Runner row may be removed).
+  runnerId                   String
+  messageType                String
+  messageId                  String    @unique
+  protocolVersion            Int       @default(1)
+  attempt                    Int       @default(1)
+  envelopeJson               String
+  payloadHash                String
+  canonicalizationVersion    String    @default("haft-jcs-1")
+  createdRegistrationId      String
+  createdRegistrationEpoch   Int       @default(0)
+  status                     String    @default("created")
+  sentAt                     DateTime?
+  ackedAt                    DateTime?
+  lastReplayedAt             DateTime?
+  createdAt                  DateTime  @default(now())
+  updatedAt                  DateTime  @updatedAt
+  execution                  Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+
+  @@unique([executionId, messageType, attempt])
+  @@index([executionId, messageType, createdAt])
+  @@index([status, createdAt])
+  @@index([runnerId, status])
+}
+
+/// Append-only audit of registration takeovers.
+///
+/// Updates are rejected by `ExecutionRegistrationAudit_no_update`; rows are only
+/// removed together with their Execution. `runnerId` is intentionally not a
+/// foreign key so a deleted Runner cannot erase takeover history.
+model ExecutionRegistrationAudit {
+  id                        String    @id @default(cuid())
+  executionId               String
+  runnerId                  String
+  previousRegistrationId    String?
+  previousRegistrationEpoch Int?
+  newRegistrationId         String
+  newRegistrationEpoch      Int
+  dispatchState             String
+  decision                  String
+  reasonCode                String?
+  detail                    String?
+  messageId                 String?
+  createdAt                 DateTime  @default(now())
+  execution                 Execution @relation(fields: [executionId], references: [id], onDelete: Cascade)
+
+  @@index([executionId, createdAt])
+  @@index([runnerId, createdAt])
 }
 
 model ExecutionLog {

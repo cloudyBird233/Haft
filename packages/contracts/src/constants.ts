@@ -51,6 +51,59 @@ export const DISPATCH_STATE_LABELS: Record<DispatchState, string> = {
   terminal: 'Terminal',
 };
 
+/**
+ * Frozen terminal decisions. The set, the spelling and the mapping onto
+ * `ExecutionStatus` are part of the WP-D Slice 1 baseline and are enforced by
+ * the `Execution_terminal_*` SQLite triggers. Never add, rename or remove a
+ * value here without a migration that updates the triggers in lockstep.
+ */
+export const TERMINAL_DECISIONS = [
+  'COMPLETED',
+  'CANCELLED_CONFIRMED',
+  'EXECUTION_FAILED',
+  'START_REJECTED',
+  'START_ACCEPT_TIMEOUT',
+  'START_SEND_UNCONFIRMED',
+  'RUNNER_DISCONNECTED',
+  'RUNNER_RESTARTED',
+  'RUNNER_INTERRUPTED',
+  'RUNNER_START_UNCONFIRMED',
+  'RECOVERY_DEADLINE_EXCEEDED',
+  'MESSAGE_INTEGRITY_FAILED',
+  'CLOCK_ANOMALY',
+] as const;
+export type TerminalDecision = (typeof TERMINAL_DECISIONS)[number];
+
+/** The only `ExecutionStatus` each terminal decision may produce. */
+export const TERMINAL_DECISION_STATUS: Record<TerminalDecision, ExecutionStatus> = {
+  COMPLETED: 'completed',
+  CANCELLED_CONFIRMED: 'cancelled',
+  EXECUTION_FAILED: 'failed',
+  START_REJECTED: 'failed',
+  START_ACCEPT_TIMEOUT: 'failed',
+  START_SEND_UNCONFIRMED: 'failed',
+  RUNNER_DISCONNECTED: 'failed',
+  RUNNER_RESTARTED: 'failed',
+  RUNNER_INTERRUPTED: 'failed',
+  RUNNER_START_UNCONFIRMED: 'failed',
+  RECOVERY_DEADLINE_EXCEEDED: 'failed',
+  MESSAGE_INTEGRITY_FAILED: 'failed',
+  CLOCK_ANOMALY: 'failed',
+};
+
+/** Execution statuses that may only be reached with a complete terminal tuple. */
+export const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'] as const;
+
+/** Handshake message statuses; the direction of travel is enforced in SQL. */
+export const HANDSHAKE_MESSAGE_STATUSES = ['created', 'sent', 'acked', 'rejected'] as const;
+export type HandshakeMessageStatus = (typeof HANDSHAKE_MESSAGE_STATUSES)[number];
+
+export const HANDSHAKE_MESSAGE_TYPES = ['execution.repository', 'execution.start'] as const;
+export type HandshakeMessageType = (typeof HANDSHAKE_MESSAGE_TYPES)[number];
+
+/** Canonicalisation version persisted next to every payload hash. */
+export const CANONICALIZATION_VERSION = 'haft-jcs-1';
+
 export const LOG_LEVELS = ['info', 'success', 'warning', 'error'] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
 

@@ -205,6 +205,42 @@ journal, logs `runner.shutdown_incomplete` when cleanup cannot be confirmed, and
 only then disconnects. It no longer assumes a fixed 150 ms sleep equals
 termination.
 
+### Process supervisor sidecar (Windows)
+
+Real executions are launched through a supervisor process that owns the protected
+tree (a Windows Job object, a Linux cgroup, or a POSIX process group). Before the
+CLI is created, the supervisor writes a guard file next to the execution journal:
+
+```text
+<recoveryRoot>/guards/<executionId>.<launchToken>.guard.json
+```
+
+The guard records the supervisor and CLI identities, the isolation mechanism and
+`treeConfirmedGone`. Recovery uses it as the earliest evidence when the runner
+dies between spawning the supervisor and persisting the CLI PID. A corrupt sidecar
+is quarantined and the execution is blocked from automatic resolution.
+
+**Resolving a corrupt sidecar is a manual, fail-closed act.** After proving that
+no process of the execution is still alive:
+
+```bash
+pnpm --filter @raft-lite/runner recovery-admin resolve-corrupt \
+  --root <recoveryRoot> --file <path-to-sidecar> --note "<why it is safe>"
+```
+
+The command records an operator resolution; it never deletes a journal, worktree
+or guard. Until a resolution exists, recovery keeps reporting the execution as
+unresolved instead of guessing.
+
+**Durability boundary.** On Linux the guard's directory entry is fsynced, so the
+sidecar survives a host power loss once the write returns. On Windows the
+directory entry is **not** fsynced (NTFS exposes no directory fsync through Node),
+so a sidecar written immediately before a power cut may be missing after reboot
+even though its contents were flushed. When that happens, recovery reports the
+execution as unresolved and the operator has to re-resolve it manually; the
+runner never assumes the tree is gone and never re-runs the execution. Every
+failure path stays fail-closed.
+
 ## Cancellation
 
 ### Mock
@@ -323,6 +359,9 @@ Guaranteed:
 
 Not guaranteed:
 
+- On Windows a supervisor guard written immediately before a power loss may be
+  lost, because the directory entry cannot be fsynced. Recovery then requires a
+  manual `resolve-corrupt` before the execution can be resolved.
 - Survival of an in-flight CLI across a runner crash (it is identified and
   terminated, not resumed).
 - Recovery of in-memory mock executions across an API restart.

@@ -213,6 +213,12 @@ export async function initializeDemoData(
       phase: 'completed',
       progress: 100,
       progressMode: 'determinate',
+      // A demo execution is inserted directly as terminal, so it must carry the
+      // complete tuple that `Execution_terminal_insert_guard` requires.
+      dispatchState: 'terminal',
+      terminalDecision: 'COMPLETED',
+      terminalDecidedAt: at('2026-01-12T14:00:18.000Z'),
+      terminalDecidedBy: 'seed:demo-data',
       startedAt: SEED.execution,
       endedAt: at('2026-01-12T14:00:18.000Z'),
       createdAt: SEED.execution,

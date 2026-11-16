@@ -64,6 +64,13 @@ export interface LiveRunnerRegistration {
   platform: string;
   architecture: string;
   features: RunnerFeature[];
+  /**
+   * Registration identity of this connection. It is rotated on every accepted
+   * `runner.register` and is the value handshake messages are bound to, so a
+   * message created under an older registration can be recognised as stale.
+   */
+  registrationId: string;
+  registrationEpoch: number;
   registeredAt: Date;
 }
 
@@ -458,6 +465,12 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
         payload.capabilities.maxConcurrentExecutions ?? existing.maxConcurrentExecutions ?? 1,
       ),
     );
+    // Registration rotation: the id changes and the epoch advances by exactly
+    // one in the same write. `Runner_registration_guard` rejects a jump, a
+    // rollback or an epoch advance that keeps the old id.
+    const registrationId = randomUUID();
+    const registrationEpoch = existing.registrationEpoch + 1;
+    const registeredAt = new Date();
     await this.prisma.runner.update({
       where: { id: existing.id },
       data: {
@@ -472,7 +485,10 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
         }),
         maxConcurrentExecutions: maxConcurrent,
         status: 'online',
-        lastHeartbeatAt: new Date(),
+        lastHeartbeatAt: registeredAt,
+        registrationId,
+        registrationEpoch,
+        lastRegisteredAt: registeredAt,
       },
     });
 
@@ -483,7 +499,9 @@ export class RunnerRegistryService implements OnModuleInit, OnModuleDestroy {
       architecture: payload.architecture,
       // Missing `features` means the empty set, never "supports everything".
       features: [...new Set(payload.capabilities.features ?? [])],
-      registeredAt: new Date(),
+      registrationId,
+      registrationEpoch,
+      registeredAt,
     });
 
     const event: RunnerRegisteredEvent = {
