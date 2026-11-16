@@ -1,20 +1,20 @@
 # P2-02 WP-D Slice 0.2.1 独立复审报告（C7）
 
-| 项目          | 内容                                                                                                                                               |
-| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 复审对象      | WP-D Slice 0.2.1（C6 发现 N-1、P2-2A、P2-2B、P2-2C 的修复）                                                                                        |
-| 复审类型      | 独立只读复审（C7），非实施任务                                                                                                                     |
-| 复审分支      | `feature/p2-02-wpd-slice0-2-1-remediation`                                                                                                         |
-| 代码/测试提交 | `41ef234ff427ae7ae4adac89b3e42d814d9ff7cf`                                                                                                         |
-| 实施报告提交  | `058e5d8119ebc106aa4be5e321472543319f7f62`                                                                                                         |
-| C6 复审提交   | `5357818999c885da6530974de9c55436b7801b5c`                                                                                                         |
-| 复审 diff     | `663cc28df213f1855ed72437dd8efb7cf96906ae..41ef234ff427ae7ae4adac89b3e42d814d9ff7cf`                                                               |
-| 复审环境      | Windows 10.0.26200.9711 / Node v22.22.2 / pnpm 11.5.2；Linux（WSL2）**BLOCKED**                                                                    |
-| **总体结论**  | **BLOCKED**（Windows 可执行范围与代码层全部通过；POSIX 真实执行证据与 Linux 矩阵无法在本环境产生）                                                 |
-| Slice 1 准入  | **不允许**（待 POSIX/N-1 真实证据与 Linux 矩阵补齐）                                                                                               |
-| 只读声明      | 复审期间未修改产品代码、测试、配置、契约、既有文档、`main`；未切换/重置/清理工作树；未实施修复；未启动 Slice 1。报告本体随后按指示单独提交到本分支 |
+| 项目          | 内容                                                                                                                                                           |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 复审对象      | WP-D Slice 0.2.1（C6 发现 N-1、P2-2A、P2-2B、P2-2C 的修复）                                                                                                    |
+| 复审类型      | 独立只读复审（C7），非实施任务                                                                                                                                 |
+| 复审分支      | `feature/p2-02-wpd-slice0-2-1-remediation`                                                                                                                     |
+| 代码/测试提交 | `41ef234ff427ae7ae4adac89b3e42d814d9ff7cf`                                                                                                                     |
+| 实施报告提交  | `058e5d8119ebc106aa4be5e321472543319f7f62`                                                                                                                     |
+| C6 复审提交   | `5357818999c885da6530974de9c55436b7801b5c`                                                                                                                     |
+| 复审 diff     | `663cc28df213f1855ed72437dd8efb7cf96906ae..41ef234ff427ae7ae4adac89b3e42d814d9ff7cf`                                                                           |
+| 复审环境      | Windows 10.0.26200.9711 / Node v22.22.2 / pnpm 11.5.2；Linux Ubuntu 24.04.5 LTS（WSL2，kernel 6.18.33.2-microsoft-standard-WSL2）/ Node v22.14.0 / pnpm 11.5.2 |
+| **总体结论**  | **PASS WITH WARNINGS**（四项 C6 发现在 Windows 与 Linux 双平台均以真实执行证据关闭；遗留 1 项 P2 文档级警告 C7-1、6 项 P3、P2-4 仍 Deferred）                  |
+| Slice 1 准入  | **允许，附条件**（C7-1 持久性边界必须写入文档；P2-4 与 N-2…N-6 须在 Slice 1 显式排期）                                                                         |
+| 只读声明      | 复审期间未修改产品代码、测试、配置、契约、既有文档、`main`；未切换/重置/清理工作树；未实施修复；未启动 Slice 1。报告本体随后按指示单独提交到本分支             |
 
-> 本报告不接受实施报告的 PASS WITH WARNINGS 结论，所有判断来自对真实 diff、源码、测试实现和独立运行的复核。
+> 本报告**不采信**实施报告的任何结论或测试输出作为依据，所有判断来自对真实 diff、源码、测试实现和独立运行的复核。最终结论虽与其同为 PASS WITH WARNINGS，但依据、警告项与准入条件均独立得出（其实施报告未提出 C7-1…C7-7 中的任何一项）。
 > 本报告是唯一新增产物，不修改任何既有文件；提交见 §附录 B。
 
 ---
@@ -28,13 +28,13 @@
 3. **P2-2B**：corrupt journal provenance 的产生路径、字段绑定、跨 root / 跨文件 / 内容篡改拒绝、信任边界。
 4. **P2-2C**：Journal PID 与进程身份 Schema 的单字段与跨字段校验、历史兼容。
 5. **回归保护**：P1-1（finalize single-flight）、P2-1（Windows starting guard）、P2-3（人工 resolve 全树证明）。
-6. **门禁**：Windows 全量测试、定向套件、typecheck、build、lint、Prettier、`format:check`。
+6. **门禁**：Windows 与 Linux 双平台的全量测试、定向套件、typecheck、build、lint、Prettier、`format:check`。
 
 ### 1.2 明确不覆盖
 
 - P2-4（managed/supervised 15s fallback）仍 Deferred，本报告不宣布关闭。
 - N-2、N-3、N-4、N-5、N-6（P3）不在本轮范围，仅确认未被声明关闭。
-- macOS、POSIX group fallback：无真实 OS 证据，保持 BLOCKED。
+- macOS 全部、POSIX `posix-group` 回退分支：无真实执行证据，保持 BLOCKED（见 §10.2）。
 - WP-D 整体、Slice 1 功能、API/Web/DB 侧测试。
 
 ---
@@ -71,7 +71,9 @@
 
 - 因任务禁止切换分支，**未执行 checkout**。`main` 工作树不包含本轮任何文件（`main` 甚至没有 `apps/runner/src/recovery-evidence.ts`），因此不能在该树上执行待审代码。
 - 执行验证使用 `git archive 41ef234f` 导出到仓库外目录 `%TEMP%\haft-review-41ef234`，`CI=true pnpm install --frozen-lockfile` 安装（lockfile 与 `main` 逐字节相同，`git diff 6a5ad16 41ef234f -- pnpm-lock.yaml` 为空），先构建 `@raft-lite/contracts` 再运行 runner 测试。
-- 该副本与我新增的探针文件不进入仓库；仓库工作树在复审前后均为 clean。
+- Linux 侧使用**同一个**归档在 WSL 的 ext4 分区另建副本 `/root/haft-c7`（Windows 的 `node_modules` 是 win32 安装产物，pnpm 会因平台不匹配要求清空重装，故不复用），`CI=true pnpm install --frozen-lockfile` 6.9 s 完成，未改动仓库。
+- 该两份副本与我新增的探针文件均不进入仓库；仓库工作树在复审前后均为 clean。
+- **环境变更说明（如实记录）**：复审开始时 `wsl.exe` 被本机 WorkBuddy 程序黑名单禁止，报告初稿据实标为 BLOCKED 并已提交（`bfb77b5`）。随后操作员解除该限制，本轮据同一提交补跑全部 Linux 证据，本版报告据此改判。**未因改判而放宽任何判定标准**：Linux 侧要求与 Windows 侧完全相同（同一归档、同一命令、同一跳过项逐条解释）。
 
 ### 2.3 变更范围
 
@@ -118,16 +120,16 @@ packages/  scripts/  .github/
 
 ## 3. 实际代码审查结果（总览）
 
-| 编号  | C6 结论           | 本报告独立结论                                                  | 证据来源                                   |
-| ----- | ----------------- | --------------------------------------------------------------- | ------------------------------------------ |
-| N-1   | FAIL/P2           | **CLOSED（代码 + 单元级）**；真实 POSIX spawn 证据 **BLOCKED**  | 源码 + 11 个可执行用例 + 静态唯一 spawn 点 |
-| P2-2A | FAIL/P2           | **CLOSED**（Windows 可执行范围）；持久性边界见 §5.4             | 源码 + 34 项独立探针                       |
-| P2-2B | FAIL/P2           | **CLOSED（在声明的同用户威胁模型内）**；真实性非密码学，见 §6.4 | 源码 + IR5 复现 + 伪造探针                 |
-| P2-2C | FAIL/P2           | **CLOSED**                                                      | 源码 + IR8 复现 + 15 类非法身份探针        |
-| P1-1  | CLOSED            | 保持 **CLOSED**                                                 | F1–F9 全通过                               |
-| P2-1  | CLOSED（Windows） | 保持 **CLOSED**                                                 | S1–S5、S7（真实 Windows supervisor）通过   |
-| P2-3  | CLOSED            | 保持 **CLOSED**                                                 | R13–R17、R19 通过；R18 POSIX-only 跳过     |
-| P2-4  | DEFERRED          | **仍 DEFERRED**                                                 | 未提及关闭，代码无相关变更                 |
+| 编号  | C6 结论           | 本报告独立结论                                                      | 证据来源                                                                                                    |
+| ----- | ----------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| N-1   | FAIL/P2           | **CLOSED**（代码 + Windows 单元 + **Linux 真实 POSIX supervisor**） | 源码 + 19 用例（Linux 19/19；Windows 11 passed / 8 skipped）+ 独立 IR7 探针 5/5（Linux）+ 静态唯一 spawn 点 |
+| P2-2A | FAIL/P2           | **CLOSED**（双平台）；Windows 断电持久性边界见 §5.4、C7-1           | 源码 + IR4/IR4b + 35 项独立探针（双平台）                                                                   |
+| P2-2B | FAIL/P2           | **CLOSED（在声明的同用户威胁模型内）**；真实性非密码学，见 §6.4     | 源码 + IR5 复现 + 伪造探针（双平台）                                                                        |
+| P2-2C | FAIL/P2           | **CLOSED**                                                          | 源码 + IR8 复现 + 15 类非法身份探针（双平台）                                                               |
+| P1-1  | CLOSED            | 保持 **CLOSED**                                                     | F1–F9 双平台通过                                                                                            |
+| P2-1  | CLOSED（Windows） | 保持 **CLOSED**                                                     | S1–S5、S7（真实 Windows supervisor）通过；S6/S8 在 Linux 通过                                               |
+| P2-3  | CLOSED            | 保持 **CLOSED**                                                     | R13–R17、R19 双平台通过；R18 在 Linux 通过                                                                  |
+| P2-4  | DEFERRED          | **仍 DEFERRED**                                                     | 未提及关闭，代码无相关变更                                                                                  |
 
 ---
 
@@ -192,9 +194,19 @@ packages/  scripts/  .github/
 
 ### 4.4 必须复跑项 IR7 的处置
 
-- **单元级（Windows 可执行）**：guard 路径为**目录**、空文件、坏 JSON、结构非法 JSON、`executionId`/`launchToken`/`supervisorPid`/`state` 不匹配、验证期间路径替换、预存普通文件/目录——**全部通过**（`posix-supervisor-guard-hardening.spec.ts`）。
-- **真实 POSIX supervisor + 真实 CLI 的 IR7 四种场景（目录/符号链接/FIFO/空文件）**：`it.skipIf(process.platform === 'win32')`，Windows 全部跳过；本环境 WSL 被安全策略禁止启动，**无法执行 → BLOCKED**。
-- 因此"CLI 创建次数为 0"这一**运行证据**在本报告中只对"目录/空文件/坏 JSON/身份不匹配"的**单元分支**成立，对"真实 supervisor 是否真的没有 spawn"**未取得本环境证据**，不外推。
+- **单元级（双平台）**：guard 路径为**目录**、空文件、坏 JSON、结构非法 JSON、`executionId`/`launchToken`/`supervisorPid`/`state` 不匹配、验证期间路径替换、预存普通文件/目录——**全部通过**（`posix-supervisor-guard-hardening.spec.ts`，Linux **19/19 passed**；Windows **11 passed / 8 skipped**，跳过项为符号链接/FIFO 语义与全部 IR7 真实 supervisor 用例）。
+- **真实 POSIX supervisor + 真实 CLI 的 IR7 四场景（目录/符号链接/FIFO/空文件）**：在 Linux 上真实执行并通过——仓库内该文件 **19/19**，四个 IR7 用例与"正常启动不受影响"对照全部 `✓`（每例 433–741 ms，非空转）。
+- **本报告自写的独立 IR7 探针**（`c7-ir7-probe.spec.ts`，不使用仓库 helper，直接调用 `spawnSupervisedProcess` + `fixtures/real-cli.cjs`）：Linux **5/5 passed**。判据是 CLI 自身产生的**副作用**而非返回值：
+
+```text
+expect(existsSync(cliOut)).toBe(false);                       // CLI 从未写出产物
+expect(await readdir(join(root, 'artifacts'))).toEqual([]);   // 产物目录为空
+expect(liveProcessesMatching(marker)).toEqual([]);            // ps -eo args 无残留进程
+control: 正常启动确实写出 marker → expect(existsSync(cliOut)).toBe(true)
+```
+
+- 对照项的意义：若探针本身失效（例如 supervisor 根本没启动），"产物不存在"会假性通过；因此同一文件内的正向对照证明该探针**有能力观测到 CLI 启动**，四例的"未创建"才是有效否定证据。
+- **结论**：IR7 由 BLOCKED 改判为 **CLOSED**，且证据独立于实施方测试。
 
 ---
 
@@ -248,9 +260,10 @@ packages/  scripts/  .github/
 2. **系统断电（power loss）**：NTFS 上目录项（硬链接名）不保证已落盘，因此**可能丢失 sidecar 文件名**。丢失后的行为是 `readValidCorruptResolution → invalid` → **scan 保持 blocked**，需要操作员重新 resolve。
 3. **不会出现的失败方向**：**不存在"目标名存在但内容半写"**——因为 inode 数据在 link 之前已 `fsync`；硬链接不会暴露部分内容。因此断电**不会**产生 `invalid sidecar → clean=true`。
 4. 结论：Windows 上本机制保证的是**原子性 + 内容持久性**，**不保证目录项跨断电持久**。即"可能多做一次人工 resolve"，不是"错误放行"。
-5. 因此**必须明确降低 Windows 的持久性保证级别**（Linux = 目录项持久；Windows = 进程崩溃持久、断电后可能需重新确认）。若产品文档对 Windows 承诺"resolve 结果跨断电持久"，则该承诺当前不成立，应记为 **P2 文档/契约级缺口**；若仅承诺"不会误判为已解决"，则当前实现满足。
+5. 因此**必须明确降低 Windows 的持久性保证级别**（Linux = 目录项持久；Windows = 进程崩溃持久、断电后可能需重新确认）。
+6. **文档现状核查（不只做假设）**：`docs/execution-recovery.md` 全文检索 `resolve` / `sidecar` / `provenance` / `recovery-admin` **零命中**；`recovery-admin` 与 `resolve-corrupt` 仅出现在 engineering 报告里，任何用户文档都没有它们。也就是说：**当前不存在"承诺跨断电持久"的文档，因而没有虚伪承诺；但也因此没有任何地方告诉运维"Windows 断电后可能需要重新确认"**。故本项记为 **C7-1（P2，文档级）**：需补写 sidecar / resolve 流程与平台持久性边界，而不是修改代码。
 
-安全方向已验证为 fail-closed，故本项不阻塞 Slice 0.2.1 的安全性结论，但**必须**在文档中写明边界（见 C7-1）。
+安全方向已验证为 fail-closed（最坏结果是"多做一次人工 resolve"，不是"错误放行"），故本项不阻塞 Slice 0.2.1 的安全性结论，但**必须**在文档中写明边界。
 
 ---
 
@@ -303,6 +316,8 @@ packages/  scripts/  .github/
 
 **判定**：这与 C6 自己声明的"本地同用户威胁模型"（C6 §4.4.3 与 §N-3 均把"拥有 recovery root 写权限的本地攻击者"明确定性为 P3）一致，故 **P2-2B 在声明的威胁模型内关闭**；但实施报告 E.2/G.2.5 之外应更明确地写成"**内容绑定 + 权限边界**"，而不是让读者以为 provenance 具备来源真实性证明。记为 C7-2（P3）。
 
+该伪造探针在 Linux 上同样通过（属于 35/35 的一部分），说明"内容绑定而非密码学"是**跨平台一致的机制属性**，不是某个文件系统的副作用。
+
 ---
 
 ## 7. P2-2C：Journal PID 与身份 Schema
@@ -349,21 +364,23 @@ packages/  scripts/  .github/
 
 ## 8. IR4 / IR4b / IR5 / IR7 / IR8 独立复现
 
-探针文件（我自写，不使用仓库测试 helper，只调用已提交的公开导出）：`test/c7-independent-probe.spec.ts`，**34 passed / 0 failed**；另有 `test/c7-trust-boundary-probe.spec.ts`，1 passed。
+探针文件（我自写，不使用仓库测试 helper，只调用已提交的公开导出）：`test/c7-independent-probe.spec.ts`，**34 passed / 0 failed**；另有 `test/c7-trust-boundary-probe.spec.ts`，1 passed。**两者在 Windows 与 Linux 上均为 35/35 通过**，断言与预期完全一致。
 
-| 探针         | 复现场景                                                                                                                                                                               | 修复前（C6 证据）                        | 本次结果                                                                                  |
-| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------- |
-| **IR4**      | 零字节 sidecar                                                                                                                                                                         | `clean=true`                             | **`clean=false`**，存在 `corrupt-journal` blocked 条目，隔离文件保留                      |
-| **IR4b**     | 截断 sidecar `{"version":2,"kind":`                                                                                                                                                    | `clean=true, blocked=0`                  | **`clean=false`**，隔离文件保留                                                           |
-| IR4c（新增） | JSON 合法但 schema 缺 `note`                                                                                                                                                           | —                                        | `clean=false`                                                                             |
-| **IR5**      | 任意 `plain-note.corrupt-999`                                                                                                                                                          | `resolved=true`                          | **`resolved=false`**，reason 含 `no valid isolation provenance`，无 sidecar，scan blocked |
-| IR5b（新增） | 有效 sidecar 但无 provenance                                                                                                                                                           | —                                        | `resolved=false`                                                                          |
-| IR5c（新增） | provenance 复制到同 root 另一隔离名                                                                                                                                                    | —                                        | `resolved=false`                                                                          |
-| IR5d（新增） | provenance 摘要被改                                                                                                                                                                    | —                                        | `resolved=false`                                                                          |
-| IR5e（新增） | 隔离后内容被改                                                                                                                                                                         | —                                        | `resolved=false`                                                                          |
-| **IR8**      | `pid:"not-a-number"`                                                                                                                                                                   | `clean=true` + finalize 为 `interrupted` | **quarantine**；`scan.executions=[]`；隔离内容 `status:"active"`，未 finalize             |
-| IR8 扩展     | 字符串/0/负/小数/超安全整数/布尔/缺失 PID、非法 `processStartTime`/`processGroupId`/`processKind`/`spawnState`、`supervisor-ready` 不匹配、direct 携带 supervisor 身份、`cliPid===pid` | —                                        | **15/15 全部 quarantine，0 个进入终态**                                                   |
-| **IR7**      | 真实 POSIX supervisor + CLI                                                                                                                                                            | CLI 被启动                               | **BLOCKED（本环境 WSL 禁止）**；仅单元级路径（目录/空文件/坏 JSON/身份不匹配）通过        |
+> 交叉校验：Windows 全量复跑在我加入这两个探针文件后为 `26 files / 294 passed / 12 skipped`，减去探针的 2 文件 / 35 用例，恰为仓库自身的 `24 files / 259 passed / 12 skipped`——说明探针未掩盖也未替换任何仓库用例。
+
+| 探针         | 复现场景                                                                                                                                                                               | 修复前（C6 证据）                        | 本次结果（双平台一致）                                                                       |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- | -------------------------------------------------------------------------------------------- |
+| **IR4**      | 零字节 sidecar                                                                                                                                                                         | `clean=true`                             | **`clean=false`**，存在 `corrupt-journal` blocked 条目，隔离文件保留                         |
+| **IR4b**     | 截断 sidecar `{"version":2,"kind":`                                                                                                                                                    | `clean=true, blocked=0`                  | **`clean=false`**，隔离文件保留                                                              |
+| IR4c（新增） | JSON 合法但 schema 缺 `note`                                                                                                                                                           | —                                        | `clean=false`                                                                                |
+| **IR5**      | 任意 `plain-note.corrupt-999`                                                                                                                                                          | `resolved=true`                          | **`resolved=false`**，reason 含 `no valid isolation provenance`，无 sidecar，scan blocked    |
+| IR5b（新增） | 有效 sidecar 但无 provenance                                                                                                                                                           | —                                        | `resolved=false`                                                                             |
+| IR5c（新增） | provenance 复制到同 root 另一隔离名                                                                                                                                                    | —                                        | `resolved=false`                                                                             |
+| IR5d（新增） | provenance 摘要被改                                                                                                                                                                    | —                                        | `resolved=false`                                                                             |
+| IR5e（新增） | 隔离后内容被改                                                                                                                                                                         | —                                        | `resolved=false`                                                                             |
+| **IR8**      | `pid:"not-a-number"`                                                                                                                                                                   | `clean=true` + finalize 为 `interrupted` | **quarantine**；`scan.executions=[]`；隔离内容 `status:"active"`，未 finalize                |
+| IR8 扩展     | 字符串/0/负/小数/超安全整数/布尔/缺失 PID、非法 `processStartTime`/`processGroupId`/`processKind`/`spawnState`、`supervisor-ready` 不匹配、direct 携带 supervisor 身份、`cliPid===pid` | —                                        | **15/15 全部 quarantine，0 个进入终态**                                                      |
+| **IR7**      | 真实 POSIX supervisor + CLI                                                                                                                                                            | CLI 被启动                               | **CLOSED（Linux 真实执行）**：仓库内 19/19；独立探针 5/5，CLI 产物与进程均不存在，含正向对照 |
 
 补充负向复现（全部为 fail-closed）：并发 resolve（恰好 1 个成功）、硬链接拒绝覆盖、目录 fsync 失败、发布中断、sidecar 跨目标复制、遗留 `.tmp` 不影响判定、provenance 写入失败后不可 resolve。
 
@@ -373,14 +390,15 @@ packages/  scripts/  .github/
 
 ### 9.1 环境
 
-| 项目     | Windows                                                                 | Linux（WSL2）                                                                |
-| -------- | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| OS       | 10.0.26200.9711                                                         | **BLOCKED**（`wsl.exe` 被 Security Center 程序黑名单禁止，策略声明不可绕过） |
-| Node     | **v22.22.2**（实施报告记录为 v24.14.0，版本不同）                       | —                                                                            |
-| pnpm     | 11.5.2                                                                  | —                                                                            |
-| 代码状态 | `41ef234f` 的 `git archive` 精确副本 + `pnpm install --frozen-lockfile` | —                                                                            |
+| 项目     | Windows                                                   | Linux（WSL2）                                                                |
+| -------- | --------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| OS       | 10.0.26200.9711                                           | Ubuntu 24.04.5 LTS，kernel `6.18.33.2-microsoft-standard-WSL2`，WSL 2.7.14.0 |
+| Node     | **v22.22.2**（实施报告记录为 v24.14.0，版本不同）         | **v22.14.0**（亦非 v24）                                                     |
+| pnpm     | 11.5.2                                                    | 11.5.2                                                                       |
+| 代码状态 | `41ef234f` 的 `git archive` 精确副本，`--frozen-lockfile` | **同一归档**，另建 `/root/haft-c7`（ext4），`--frozen-lockfile`              |
+| cgroup   | 不适用（Job Object）                                      | cgroup v2，隔离模式实测 `linux-cgroup`（见 9.3）                             |
 
-> 说明：Node 主版本与实施报告作者环境不同（22 vs 24）。本轮 Windows 结果因此是"在 Node 22 上的独立复跑"，不是对作者环境的逐位重放。
+> 说明：两侧 Node 主版本均为 22，与实施报告作者的 v24 不同。本轮因此是"在 Node 22 上的独立复跑"，不是对作者环境的逐位重放；但两平台之间用的是**同一个 Node 主版本**，跨平台对比不受版本差异干扰。
 
 ### 9.2 Windows
 
@@ -395,17 +413,46 @@ packages/  scripts/  .github/
 | F1–F9                                                    | 9 passed                                                                   |
 | S1–S8                                                    | 6 passed / 2 skipped（S6、S8 POSIX-only）                                  |
 | R13–R19                                                  | 7 passed / 1 skipped（R18 POSIX-only）                                     |
-| 独立探针                                                 | 34 passed + 1 passed（信任边界）                                           |
+| 独立探针                                                 | 35 passed（34 + 信任边界 1），位于 2 个额外文件                            |
 
-与实施报告 F.2 的 Windows 数字（259/12/271）**完全一致**。
+与实施报告 F.2 的 Windows 数字（259/12/271）**完全一致**。加入探针后复跑为 `26 files / 294 passed / 12 skipped`，两者相减正好回到 259，前后自洽。
 
 ### 9.3 Linux（WSL2）
 
-全部 **BLOCKED**。本环境无法启动 WSL（程序黑名单，策略明确禁止重试或等价绕过）。因此：
+| 命令                                                     | 结果                                                                                                           |
+| -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `pnpm --filter @raft-lite/runner test -- --reporter=dot` | **24 个测试文件；269 passed / 2 skipped / 0 failed（271 total）**，4.58 s                                      |
+| `pnpm --filter @raft-lite/runner typecheck`              | 通过                                                                                                           |
+| `pnpm --filter @raft-lite/runner build`                  | 通过（tsup，同 3 个入口：`main` 270.57 KB / `process-supervisor-child` 22.88 KB / `recovery-admin` 110.08 KB） |
+| `pnpm lint`                                              | 通过（`eslint . --max-warnings=0`）                                                                            |
+| `prettier --check`（本轮 12 个变更/新增文件）            | **全部通过**（`All matched files use Prettier code style!`）                                                   |
+| `pnpm format:check`                                      | **失败**，仅 `apps/runner/src/recovery-admin.ts`（与 Windows 同一文件）                                        |
+| `posix-supervisor-guard-hardening.spec.ts`               | **19/19 passed**（含四个 IR7 + 正常启动对照，无跳过）                                                          |
+| `recovery-hardening-os.spec.ts`                          | 13 passed / 1 skipped（R04b Windows-only）                                                                     |
+| `recovery-resolution.spec.ts`                            | **8/8 passed**（R18 在 Linux 上真实执行；Windows 为 7 passed / 1 skipped）                                     |
+| 独立探针                                                 | 35 passed（IR4/IR4b/IR5/IR8 + sidecar/provenance）+ **IR7 5 passed**                                           |
 
-- 实施报告声称的 "24 files / 269 passed / 2 skipped / 0 failed" **本报告未验证，不作背书**；
-- 不把 Windows 结果外推到 Linux；
-- Linux 专属项（POSIX supervisor、FIFO、cgroup、R18、S6、S8、真实 IR7）在本次复审中一律标 BLOCKED。
+与实施报告 F.2 声称的 Linux 数字（269/2/271）**完全一致**；本次为该数字提供了独立复跑，不再是"未验证"。
+
+**Linux 上的 2 个 skipped（逐项，非"通过"）**：
+
+| #   | 用例                                                                               | 原因                                     |
+| --- | ---------------------------------------------------------------------------------- | ---------------------------------------- |
+| 1   | `S7: Windows starting-guard failure blocks SpawnCli and cleanup stays unconfirmed` | Windows-only（`taskkill` / Job Object）  |
+| 2   | `R04b: a failed taskkill is reported as unconfirmed and the target stays alive`    | Windows-only（依赖 `taskkill` 失败语义） |
+
+合计 269 + 2 = 271，与 Windows 侧 259 + 12 = 271 **用例总数相同**，说明两平台跑的是同一套用例，只是平台专属项互换跳过。
+
+**cgroup 分支是否真的被覆盖（本报告单独取证）**：R03 中的 cgroup 断言写在 `if (process.platform === 'linux' && tree.guard.isolation === 'linux-cgroup')` 内，条件不成立时会静默跳过。为排除"看似通过实则未进入分支"，我用独立探针（`c7-isolation-probe.spec.ts`）走同一 `spawnSupervisedProcess` 路径打印实际选择：
+
+```text
+C7_ISOLATION_PROBE {"isolation":"linux-cgroup",
+                    "cgroupPath":"/sys/fs/cgroup/haft-runner/token_1794809568426",
+                    "cliPid":105644,"supervisorPid":105632,"processGroupId":105632}
+C7_CGROUP_PIDS      {"pids":[105632,105644],"cliPid":105644}
+```
+
+即本机确实选择 `linux-cgroup`，`cgroup.procs` 同时包含 supervisor 与 CLI，R03 的 cgroup 断言**被实际执行**而非跳过。终止后 `/sys/fs/cgroup/haft-runner/` 只剩 55 个控制文件、**无子目录残留**，未观察到 cgroup 泄漏。
 
 ### 9.4 格式门禁归因
 
@@ -416,6 +463,8 @@ packages/  scripts/  .github/
 - `scripts/acceptance/format-baseline.json` blob 在 `663cc28d`/`41ef234f` 相同（`b610f266…`）。
 
 结论：**该格式失败在 C6 基线上已存在，与本轮无关**，未发现"用格式债掩盖新问题"。本轮 12 个代码文件全部 Prettier-clean。
+
+Linux 侧输出与 Windows **逐字相同**（`49 unformatted file(s); 76 are grandfathered legacy debt`，唯一未祖父化文件同为 `apps/runner/src/recovery-admin.ts`），失败集合不随平台变化，进一步排除"本机格式配置差异"这一解释。
 
 ---
 
@@ -442,14 +491,14 @@ packages/  scripts/  .github/
 
 ### 10.2 BLOCKED
 
-| 项目                                             | 原因                               |
-| ------------------------------------------------ | ---------------------------------- |
-| 全部 Linux 测试（24 文件 / 271 用例）            | WSL 被安全策略禁止                 |
-| IR7 真实 supervisor 四场景 + 正常 POSIX 启动回归 | 同上                               |
-| cgroup 回归（含 R19 cgroup 分支）                | 同上                               |
-| POSIX finalize single-flight 复跑                | 同上（Windows 侧 F1–F9 已通过）    |
-| macOS 全部                                       | 无真实 OS 证据（沿用既有 BLOCKED） |
-| POSIX group fallback                             | 无真实 OS 证据                     |
+解除 WSL 限制后，原先整块 BLOCKED 的 Linux 矩阵已全部取得真实证据。**剩余 BLOCKED 仅两项，且都不是本轮修复引入的**：
+
+| 项目                 | 原因                                                                                                                             |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| macOS 全部           | 无真实 OS 证据（沿用既有 BLOCKED），本轮未获得 macOS 环境                                                                        |
+| POSIX group fallback | 本机 cgroup v2 可用，实测隔离模式为 `linux-cgroup`；`posix-group` 回退分支**未被任何平台执行**，因此其行为只能靠代码阅读，不外推 |
+
+> `posix-group` 回退分支属于既有设计（非本轮新增），其未覆盖状态与本轮四项发现无关；但"未覆盖"就是未覆盖，本报告不将其计入通过。
 
 ---
 
@@ -457,24 +506,24 @@ packages/  scripts/  .github/
 
 ### 11.1 复审矩阵
 
-| 编号    | 问题                                                                                         | 独立复审结论                                                        | 证据                                                                                                                                    |
-| ------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| N-1     | POSIX starting guard / spawn 门禁                                                            | **CLOSED（代码 + 单元级）；真实 POSIX spawn 证据 BLOCKED**          | `process-supervisor-child.ts:115-138`（唯一 spawn 点）；`process-supervisor-guard.ts:29,71`；`safe-file.ts:86-153`；19 用例中 11 passed |
-| P2-2A   | Sidecar 原子性与完整性                                                                       | **CLOSED**（Windows 可执行范围）；Windows 断电持久性边界见 C7-1     | `recovery-evidence.ts:74-110,120-207,293-330,317-330`；IR4/IR4b + 8 项 sidecar 探针                                                     |
-| P2-2B   | Corrupt provenance                                                                           | **CLOSED（同用户威胁模型内）**；真实性为内容绑定而非密码学，见 C7-2 | `execution-journal.ts:413-447`；`recovery-evidence.ts:293-330,418-450`；IR5 + 4 项伪造/篡改探针                                         |
-| P2-2C   | Journal PID / 身份 Schema                                                                    | **CLOSED**                                                          | `execution-journal.ts:521-614`；IR8 + 15 类非法身份 + 历史兼容探针                                                                      |
-| P1-1    | 回归保护（finalize single-flight）                                                           | 保持 **CLOSED**                                                     | F1–F9 全通过（Windows）                                                                                                                 |
-| P2-1    | 回归保护（Windows guard）                                                                    | 保持 **CLOSED**                                                     | S1–S5、S7（真实 Windows supervisor）通过；`.cs` 无 diff                                                                                 |
-| P2-3    | 回归保护（人工 resolve 全树）                                                                | 保持 **CLOSED**                                                     | R13–R17、R19 通过；R18 POSIX-only skipped                                                                                               |
-| P2-4    | Managed fallback                                                                             | **DEFERRED（未关闭）**                                              | 代码无相关变更；报告未宣称关闭                                                                                                          |
-| N-2…N-6 | 既有 P3                                                                                      | **仍开放（本轮未处理）**                                            | N-6：`recovery-resolution.spec.ts:66` 仍为 `isolation:'windows-job'`，双平台同一 fixture                                                |
-| C7-1    | Windows 目录项持久性边界                                                                     | **P2（需文档化降级）**                                              | `recovery-evidence.ts:94-96`；断电场景推演 + fail-closed 证明                                                                           |
-| C7-2    | provenance 非密码学真实性；`executionId` 绑定在 null/null 时退化                             | **P3**                                                              | 伪造探针 1 passed；`execution-journal.ts:616-624`                                                                                       |
-| C7-3    | quarantine 后 provenance 写入失败/崩溃 → 永久不可 resolve，`recovery-admin` 无补写或清理命令 | **P3**                                                              | `execution-journal.ts:420-435`；`recovery-admin.ts` 命令集仅 status/list/resolve/resolve-corrupt                                        |
-| C7-4    | 发布后校验失败会留下"无效 sidecar"，后续 resolve 永久被拒                                    | **P3**                                                              | `recovery-evidence.ts:101-113` + `recovery.ts:320-333`                                                                                  |
-| C7-5    | 崩溃遗留 `.tmp` 无 GC（惰性无害）                                                            | **P3**                                                              | 探针"leftover sidecar temp file does not make recovery clean"                                                                           |
-| C7-6    | 同一 corrupt 文件产生两条 blocked 条目（`CORRUPT_JOURNAL` + `UNRESOLVED_CORRUPT_JOURNAL`）   | **P3**                                                              | R08 运行日志                                                                                                                            |
-| C7-7    | `phase` 只校验 `typeof === 'string'`，允许空字符串                                           | **P3**                                                              | `execution-journal.ts:527`                                                                                                              |
+| 编号    | 问题                                                                                         | 独立复审结论                                                        | 证据                                                                                                                                                |
+| ------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| N-1     | POSIX starting guard / spawn 门禁                                                            | **CLOSED**（代码 + Windows 单元 + Linux 真实 POSIX spawn）          | `process-supervisor-child.ts:115-138`（唯一 spawn 点）；`process-supervisor-guard.ts:29,71`；`safe-file.ts:86-153`；19 用例双平台通过；IR7 探针 5/5 |
+| P2-2A   | Sidecar 原子性与完整性                                                                       | **CLOSED**（双平台）；Windows 断电持久性边界见 C7-1                 | `recovery-evidence.ts:74-110,120-207,293-330,317-330`；IR4/IR4b + 8 项 sidecar 探针                                                                 |
+| P2-2B   | Corrupt provenance                                                                           | **CLOSED（同用户威胁模型内）**；真实性为内容绑定而非密码学，见 C7-2 | `execution-journal.ts:413-447`；`recovery-evidence.ts:293-330,418-450`；IR5 + 4 项伪造/篡改探针                                                     |
+| P2-2C   | Journal PID / 身份 Schema                                                                    | **CLOSED**                                                          | `execution-journal.ts:521-614`；IR8 + 15 类非法身份 + 历史兼容探针                                                                                  |
+| P1-1    | 回归保护（finalize single-flight）                                                           | 保持 **CLOSED**                                                     | F1–F9 双平台通过                                                                                                                                    |
+| P2-1    | 回归保护（Windows guard）                                                                    | 保持 **CLOSED**                                                     | S1–S5、S7（真实 Windows supervisor）通过；`.cs` 无 diff                                                                                             |
+| P2-3    | 回归保护（人工 resolve 全树）                                                                | 保持 **CLOSED**                                                     | R13–R17、R19 双平台通过；R18 在 Linux 通过                                                                                                          |
+| P2-4    | Managed fallback                                                                             | **DEFERRED（未关闭）**                                              | 代码无相关变更；报告未宣称关闭                                                                                                                      |
+| N-2…N-6 | 既有 P3                                                                                      | **仍开放（本轮未处理）**                                            | N-6：`recovery-resolution.spec.ts:66` 仍为 `isolation:'windows-job'`，双平台同一 fixture                                                            |
+| C7-1    | Windows 目录项持久性边界未文档化；且用户文档完全没有 sidecar/`resolve-corrupt` 的描述        | **P2（文档级，方向 fail-closed）**                                  | `recovery-evidence.ts:94-96`；`docs/execution-recovery.md` 全文无 `resolve`/`sidecar` 命中；断电推演 + fail-closed 证明                             |
+| C7-2    | provenance 非密码学真实性；`executionId` 绑定在 null/null 时退化                             | **P3**                                                              | 伪造探针 1 passed；`execution-journal.ts:616-624`                                                                                                   |
+| C7-3    | quarantine 后 provenance 写入失败/崩溃 → 永久不可 resolve，`recovery-admin` 无补写或清理命令 | **P3**                                                              | `execution-journal.ts:420-435`；`recovery-admin.ts` 命令集仅 status/list/resolve/resolve-corrupt                                                    |
+| C7-4    | 发布后校验失败会留下"无效 sidecar"，后续 resolve 永久被拒                                    | **P3**                                                              | `recovery-evidence.ts:101-113` + `recovery.ts:320-333`                                                                                              |
+| C7-5    | 崩溃遗留 `.tmp` 无 GC（惰性无害）                                                            | **P3**                                                              | 探针"leftover sidecar temp file does not make recovery clean"                                                                                       |
+| C7-6    | 同一 corrupt 文件产生两条 blocked 条目（`CORRUPT_JOURNAL` + `UNRESOLVED_CORRUPT_JOURNAL`）   | **P3**                                                              | R08 运行日志                                                                                                                                        |
+| C7-7    | `phase` 只校验 `typeof === 'string'`，允许空字符串                                           | **P3**                                                              | `execution-journal.ts:527`                                                                                                                          |
 
 **未发现新的 P0/P1，未发现新的安全绕过路径。**
 
@@ -483,45 +532,68 @@ packages/  scripts/  .github/
 - **"存在即放行"是否彻底消失**：是。`resolutionExists()` 已删除；两条 scan 路径（corrupt journal、guard sidecar）都改为内容校验。
 - **"guard 格式正确"是否仍在冒充"身份正确"**：否。`matchesStartingGuard()` 逐字段比对本次 launch 身份。
 - **"sidecar 原子性"是否只因出现 `link` 就成立**：硬链接保证"要么没有目标名、要么目标名指向完整 inode"，且 `EEXIST` 阻断覆盖；配合发布前 fsync，原子性与内容完整性成立。唯一不成立的是 Windows 的目录项断电持久性（C7-1），且方向为 fail-closed。
+- **IR7 的"未创建 CLI"是否只是测试断言而非真实证据**：是真实证据。判据是 CLI fixture 自身写出的产物文件与 `ps -eo args` 的进程快照，且同文件内的正向对照证明该判据能观测到启动；四例的否定结论因此有效。
+- **Linux 结果是否只是"把 Windows 结果换个平台重跑"**：不是。Linux 独有覆盖包括真实 POSIX supervisor（`linux-cgroup` 隔离、`mkfifo`、symlink 语义）、cgroup 成员核验、S6/S8/R18，这些在 Windows 上全部 skip。
 - **P2-4 未被误判关闭**：确认仍 Deferred。
 
 ---
 
 ## 12. 最终结论
 
-### **BLOCKED**
+### **PASS WITH WARNINGS**
 
-理由（严格按任务 §11 的 PASS 条件逐条）：
+理由（严格按任务的 PASS 条件逐条）：
 
-| PASS 条件                       | 状态                                                           |
-| ------------------------------- | -------------------------------------------------------------- |
-| 1. N-1 完全关闭                 | ⚠️ 代码与单元级关闭；**真实 POSIX spawn 证据无法在本环境产生** |
-| 2. P2-2A 完全关闭               | ✅（Windows 可执行范围）                                       |
-| 3. P2-2B 完全关闭               | ✅（声明威胁模型内）                                           |
-| 4. P2-2C 完全关闭               | ✅                                                             |
-| 5. 既有 CLOSED 保持             | ✅                                                             |
-| 6. 无新增 P0/P1                 | ✅                                                             |
-| 7. 双平台可执行范围有真实证据   | ❌ Windows ✅ / Linux **BLOCKED**                              |
-| 8. Windows 持久性限制已明确评估 | ✅ 本报告 §5.4 完成，结论需文档化（C7-1）                      |
-| 9. 无新的安全绕过路径           | ✅                                                             |
+| PASS 条件                       | 状态                                                                                      |
+| ------------------------------- | ----------------------------------------------------------------------------------------- |
+| 1. N-1 完全关闭                 | ✅ 代码 + Windows 单元 + **Linux 真实 POSIX spawn（仓库 19/19、独立探针 5/5）**           |
+| 2. P2-2A 完全关闭               | ✅ 双平台（IR4/IR4b + 原子发布/并发/故障注入探针）                                        |
+| 3. P2-2B 完全关闭               | ✅ 双平台（声明威胁模型内）                                                               |
+| 4. P2-2C 完全关闭               | ✅ 双平台（IR8 + 15 类非法身份 + 历史兼容）                                               |
+| 5. 既有 CLOSED 保持             | ✅ P1-1、P2-1、P2-3 均无回归                                                              |
+| 6. 无新增 P0/P1                 | ✅ 新增最高为 C7-1（P2，文档级，方向 fail-closed）                                        |
+| 7. 双平台可执行范围有真实证据   | ✅ Windows 24 文件/259 passed/12 skipped；Linux 24 文件/269 passed/2 skipped，均 0 failed |
+| 8. Windows 持久性限制已明确评估 | ✅ §5.4 完成；结论是"必须文档化降级"→ C7-1                                                |
+| 9. 无新的安全绕过路径           | ✅ 未发现                                                                                 |
 
-**性质说明**：BLOCKED 不是 FAIL。我没有发现任何缺陷或回归；所有在 Windows 上可执行的验证与我自写的 35 项独立探针全部通过，四项 Finding 在代码层与 Windows 层均已 fail-closed。BLOCKED 的唯一原因是：N-1 本质上是 POSIX 专属修复，其"真实 supervisor 不创建 CLI"的闭环证据必须在 Linux/POSIX 上取得，而本环境的 WSL 被安全策略禁止，Linux 矩阵整体不可执行——按任务 §2 纪律，不得用 Windows 结果外推。
+**为什么不是 PASS**：C7-1 是一项**仍未处理的 P2**。它不是代码缺陷（方向 fail-closed，最坏情况是多做一次人工确认），但"Windows 断电后可能丢失 resolve 结果、需要重新确认"这一运维可见的边界，当前在**任何用户文档中都不存在**——`docs/execution-recovery.md` 连 `resolve`/`sidecar` 都没写。按"未文档化的行为等于未定义行为"的标准，不能签无条件 PASS。
 
-若在可执行 WSL2 的环境中补齐 IR7 四场景与 Linux 全量矩阵，**按当前代码与已获得的证据，预期结论为 PASS**（前提是 C7-1 的持久性边界被写入文档）。
+**为什么不是 FAIL**：四项 C6 发现在两个平台上都以真实执行证据关闭，没有发现任何可导致"误判进程已死""覆盖审计证据""伪造隔离来源""非法 PID 被 finalize"的路径。所有故障注入的失败方向都是 blocked / quarantine。
+
+**为什么不是 BLOCKED**：上一版 BLOCKED 的唯一原因是 POSIX 证据缺失；该原因已消除（WSL 解除后取得 IR7 与 Linux 全量矩阵）。剩余 BLOCKED 仅 macOS 与 `posix-group` 回退分支，二者与本轮四项发现无关，且不影响 Slice 0.2.1 的安全性判定。
+
+**Warnings（须在 Slice 1 前处理或显式接受）**：
+
+| 编号 | 级别 | 内容                                                                       | 处置建议                                        |
+| ---- | ---- | -------------------------------------------------------------------------- | ----------------------------------------------- |
+| C7-1 | P2   | Windows 目录项持久性未文档化；sidecar/resolve 流程无用户文档               | 补写 `docs/execution-recovery.md`，写明平台差异 |
+| C7-2 | P3   | provenance 为内容绑定而非密码学真实性；null/null 时 `executionId` 绑定退化 | 文档措辞改为"内容绑定 + 权限边界"               |
+| C7-3 | P3   | quarantine 后 provenance 写入失败 → 永久不可 resolve                       | 评估 `recovery-admin` 补写/清理命令             |
+| C7-4 | P3   | 发布后校验失败留下永久阻塞的无效 sidecar                                   | 同上                                            |
+| C7-5 | P3   | 崩溃遗留 `.tmp` 无 GC                                                      | 惰性无害，可排期                                |
+| C7-6 | P3   | 同一 corrupt 文件产生两条 blocked 条目                                     | 去重或合并展示                                  |
+| C7-7 | P3   | `phase` 仅校验 `typeof string`，允许空串                                   | 收紧为非空                                      |
 
 ---
 
 ## 13. Slice 1 准入建议
 
-1. **Slice 0.2.1 是否通过**：**未通过（BLOCKED）**。已执行范围内无缺陷，但 POSIX 侧的关闭证据缺失，不能签署 PASS。
-2. **Slice 1 是否满足准入条件**：**不满足**。N-1 是跨平台安全门禁，缺少真实 POSIX 证据时不应启动 Slice 1。
-3. **仍 BLOCKED 的平台与功能**：Linux/WSL2 全部；macOS 全部；POSIX group fallback；IR7 真实 supervisor；cgroup 回归（含 R19 cgroup 分支）。
-4. **补齐建议（按优先级）**：
-   - 在允许 WSL2 的环境中复跑 Linux 全量矩阵 + IR7 四场景 + cgroup + R18/S6/S8，并记录"CLI marker 未生成"的运行证据；
-   - 在文档中写入 Windows 目录项持久性边界（C7-1），明确 Windows 的持久性等级低于 Linux；
-   - 复核 `recovery-admin` 是否需要"provenance 缺失时的补写/清理"命令（C7-3）；
-   - P2-4（15s fallback）仍须在 Slice 1 处理，本报告不宣布其关闭；
-   - N-2/N-3/N-4/N-5/N-6 仍为 P3，建议在 Slice 1 计划中显式排期，尤其是 N-6（R19 未覆盖 cgroup 分支）。
+1. **Slice 0.2.1 是否通过**：**通过（PASS WITH WARNINGS）**。四项 C6 发现在双平台均以真实执行证据关闭，未发现回归；警告项为 C7-1（P2 文档级）与 C7-2…C7-7（P3）。
+2. **Slice 1 是否满足准入条件**：**满足，附条件**。N-1 跨平台安全门禁已在 Linux 真实 supervisor 上闭环，不再构成阻塞；但下列条件应在 Slice 1 计划中绑定：
+   - C7-1 必须在 Slice 1 交付前写入文档（否则 Windows 运维无法解释"为什么要再 resolve 一次"）；
+   - P2-4（managed/supervised 15s fallback）仍 **Deferred**，必须作为 Slice 1 的显式工作项，不得默认已关闭。
+3. **仍 BLOCKED 的平台与功能（仅两项）**：
+   - **macOS 全部**：无真实 OS 证据，沿用既有 BLOCKED；
+   - **POSIX `posix-group` 回退分支**：本机 cgroup v2 可用，该分支未被任何平台执行，仅能代码阅读。
+   - 已解除：Linux 全量矩阵、IR7 四场景、cgroup 回归、R18/S6/S8、POSIX finalize single-flight。
+4. **Slice 1 建议补齐的遗留测试**（按优先级）：
+   - `posix-group` 回退分支的运行证据：在禁用/不可写 cgroup v2 的容器或内核下跑一次 R03 等价路径，覆盖 `isolation==='posix-group'`；
+   - C7-3 的可恢复性：为"quarantine 成功但 provenance 写入失败"增加一条从 blocked 状态恢复的测试（当前只有"永久不可 resolve"的负向断言）；
+   - C7-4：为"发布后校验失败留下无效 sidecar"增加一条"后续仍可人工修复"的用例，或明确接受永久阻塞并写入运维文档；
+   - C7-5：`.tmp` 遗留的 GC 策略若实现，需配套"GC 不影响在途发布"的并发测试；
+   - N-6：R19 目前未覆盖 cgroup 分支，建议补齐（与第 1 项同源）。
+5. **不需要在 Slice 1 重做的部分**：N-1 门禁、P2-2A 原子发布、P2-2B provenance 绑定、P2-2C 身份 Schema——本轮已双平台验证，只要不修改 `safe-file.ts`/`process-supervisor-guard.ts`/`recovery-evidence.ts`/`execution-journal.ts` 的相应逻辑，无需重复取证。
+6. **对实施报告的最终态度**：其实施结论（PASS WITH WARNINGS）在**结论层面**与本报告一致，但依据不同——本报告的每一项都来自独立复跑与自写探针，未采信其测试输出；其 F.2 的 Linux 数字（269/2/271）本轮已独立复现并确认无误。
 
 ---
 
@@ -546,10 +618,36 @@ npx vitest run test/c7-independent-probe.spec.ts        → 34 passed
 npx vitest run test/c7-trust-boundary-probe.spec.ts     → 1 passed
 ```
 
+Linux（WSL2）——**全部经 `wsl -d Ubuntu-24.04 -- bash -c '…'` 执行**：
+
+```text
+wsl -v ; uname -r ; node -v ; pnpm -v
+  → 2.7.14.0 / 6.18.33.2-microsoft-standard-WSL2 / v22.14.0 / 11.5.2
+tar -xf /mnt/c/Users/A11720/AppData/Local/Temp/haft-41ef234.tar -C /root/haft-c7
+  （与 Windows 同一个 git archive，非二次导出）
+CI=true pnpm install --frozen-lockfile                  → 6.9 s
+pnpm --filter @raft-lite/contracts build
+pnpm --filter @raft-lite/runner test -- --reporter=dot  → 24 files / 269 passed / 2 skipped
+pnpm --filter @raft-lite/runner exec vitest run --reporter=verbose | grep ↓
+  → S7（Windows-only）、R04b（Windows-only）
+pnpm --filter @raft-lite/runner typecheck               → 通过
+pnpm --filter @raft-lite/runner build                   → 3 入口
+pnpm lint                                               → 通过
+npx prettier --check <12 files>                         → All matched files use Prettier code style!
+pnpm format:check                                       → 仅 apps/runner/src/recovery-admin.ts
+npx vitest run test/c7-independent-probe.spec.ts test/c7-trust-boundary-probe.spec.ts → 35 passed
+npx vitest run test/c7-ir7-probe.spec.ts                → 5 passed（真实 POSIX supervisor）
+npx vitest run test/c7-isolation-probe.spec.ts          → 1 passed（打印 isolation=linux-cgroup）
+ls /sys/fs/cgroup/haft-runner/ | wc -l                  → 55（仅控制文件，无子目录残留）
+```
+
+> 可复现性注记：本机的 WorkBuddy 会把裸 `bash` 解析到 Windows PortableGit，故 `wsl --exec /bin/bash` 与 `bash -lc` 均失败（`execvpe(E:/workbuddy/.../PortableGit/usr/bin/bash) failed`）。必须使用 `wsl -d <distro> -- bash -c '<script>'` 的写法。
+
 ## 附录 B：只读与边界声明
 
 - 未修改 `apps/runner`、`packages`、`scripts`、CI 配置或任何既有文档。
 - 未检出/切换/重置分支，`main` 工作树在复审前后均为 clean（`git status --short` 前后均为空）。
-- 未 commit / push / rebase；未删除任何文件；未启动 Slice 1；未实施任何修复。
-- 执行验证在仓库外副本（`%TEMP%\haft-review-41ef234`）进行，两个探针文件只存在于该副本。
-- 本报告是唯一新增产物，落在 `docs/engineering/P2-02_WP-D_SLICE0_2_1_INDEPENDENT_REVIEW.md`，作为独立文档提交在本分支；提交发生在复审结论定稿之后，不改变任何被审代码。
+- 除本报告外未 commit / push / rebase；未删除任何文件；未启动 Slice 1；未实施任何修复。
+- 执行验证在两份仓库外副本进行：Windows `%TEMP%\haft-review-41ef234`、Linux `/root/haft-c7`；三个探针文件只存在于这两份副本，均已清理或不被提交。
+- 本报告是唯一新增产物，落在 `docs/engineering/P2-02_WP-D_SLICE0_2_1_INDEPENDENT_REVIEW.md`。初版（WSL 受限，结论 BLOCKED）提交为 `bfb77b5`；WSL 解除后据同一被审提交 `41ef234f` 补跑 Linux 证据，本版为改判后的修订，**被审代码在任何阶段都未被触碰**。
+- 改判只改变结论，不改变证据标准：上一版把 Linux 全部标为 BLOCKED 是因为无法执行，不是因为执行后不通过；本版把每一项 BLOCKED 逐条替换为实际命令与实际输出，未删除任何一条曾经的保留意见。
