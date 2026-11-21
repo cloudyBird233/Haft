@@ -55,7 +55,8 @@
 | 未修改 `main` | ✅ `main` 仍为 `6a5ad16`，本轮分支基于 `2c9e037` |
 | 未启动 Slice 2 | ✅ 无 `execution.terminal` 消息、无恢复重建逻辑、无新终态枚举 |
 | 未改 P2-00 冻结协议 | ✅ `dispatchState` 六态、13 种 `terminalDecision`、13 个 Audit 字段全部保持原样 |
-| 未 Commit / Push / Merge | ✅ `git log` 仍停在 `2c9e037` |
+| 未在修正过程中 Commit / Push / Merge | ✅ 修正全程 `git log` 停在 `2c9e037`，改动以未提交状态交付复审 |
+| 复审前的提交与推送 | 按用户明确指示，在本报告定稿后执行（见 §9.4），不改变上述修正内容 |
 
 ---
 
@@ -544,9 +545,12 @@ pnpm typecheck && pnpm lint && pnpm build && pnpm --filter @raft-lite/api test
 
 ### 9.4 停止点
 
-本轮工作到此结束：
+Slice 1.1 的修正工作到此结束：
 
 - **未启动 Slice 2**；
-- **未提交、未推送、未合并**（`git log` 仍停在 `2c9e037`）；
-- **`main` 未改动**（仍为 `6a5ad16`）；
-- 等待新的独立只读复审。
+- 修正内容全部以 `fix(p2-02): align WP-D slice 1 with the L2 v1.1 contract and make the migration atomic` 提交，落在
+  `feature/p2-02-wpd-slice1-1-remediation` 分支上；
+- **未合并到 `main`**，`main` 仍为 `6a5ad16`；
+- 提交与推送发生在修正定稿之后，按用户明确指示执行——修正本身仍以未提交状态完成，供独立只读复审对照。
+
+下一步是新的独立只读复审；本分支不在本轮触碰 `main`。
