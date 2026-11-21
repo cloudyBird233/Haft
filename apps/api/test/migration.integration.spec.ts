@@ -1,6 +1,9 @@
 import { PrismaClient } from '@prisma/client';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  TERMINAL_DECIDED_BY_IDENTITIES,
   TERMINAL_DECISIONS,
   TERMINAL_DECISION_STATUS,
   type ExecutionStatus,
@@ -18,6 +21,20 @@ import {
  * structure on an empty database, and that structure must be enforced by the
  * database itself, not by application code.
  */
+
+interface L2Contract {
+  terminalDecisions: string[];
+  terminalDecisionStatus: Record<string, string>;
+  terminalStatuses: string[];
+  terminalDecidedBy: { prefixes: string[]; identities: string[] };
+  executionRegistrationAudit: { columns: string[]; decisions: string[] };
+}
+
+const L2: L2Contract = JSON.parse(
+  readFileSync(join(__dirname, 'fixtures', 'l2-v1.1-contract.json'), 'utf8'),
+) as L2Contract;
+
+const NOW_MS_SQL = `CAST(strftime('%s','now') AS INTEGER) * 1000`;
 
 const EXECUTION_COLUMNS = [
   'registrationId',
@@ -210,6 +227,28 @@ describe('A. fresh database', () => {
       expect(definition[0]?.sql).toContain(decision);
     }
   });
+
+  it('matches the checked-in L2 v1.1 contract fixture', async () => {
+    expect([...TERMINAL_DECISIONS]).toEqual(L2.terminalDecisions);
+    expect(TERMINAL_DECISION_STATUS).toEqual(L2.terminalDecisionStatus);
+    expect([...TERMINAL_DECIDED_BY_IDENTITIES]).toEqual(L2.terminalDecidedBy.identities);
+    expect([...AUDIT_COLUMNS]).toEqual(L2.executionRegistrationAudit.columns);
+
+    const auditTrigger = await prisma.$queryRawUnsafe<Array<{ sql: string }>>(
+      `SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'ExecutionRegistrationAudit_insert_guard'`,
+    );
+    for (const decision of L2.executionRegistrationAudit.decisions) {
+      expect(auditTrigger[0]?.sql).toContain(`'${decision}'`);
+    }
+  });
+
+  it('passes SQLite integrity and foreign key checks', async () => {
+    const integrity = await prisma.$queryRawUnsafe<Array<{ integrity_check: string }>>(
+      'PRAGMA integrity_check',
+    );
+    expect(integrity.map((row) => row.integrity_check)).toEqual(['ok']);
+    expect(await prisma.$queryRawUnsafe<unknown[]>('PRAGMA foreign_key_check')).toEqual([]);
+  });
 });
 
 describe('D. migration regression', () => {
@@ -266,7 +305,7 @@ describe('terminal decision mapping', () => {
     const insertTerminal = (id: string, status: ExecutionStatus, decision: string): Promise<number> =>
       prisma.$executeRawUnsafe(
         `INSERT INTO "Execution" (id, taskId, agentId, status, phase, dispatchState, endedAt, terminalDecision, terminalDecidedAt, terminalDecidedBy, createdAt, updatedAt)
-         VALUES ('${id}', 'tk_map', 'ag_map', '${status}', '${status}', 'terminal', CURRENT_TIMESTAMP, '${decision}', CURRENT_TIMESTAMP, 'test', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+         VALUES ('${id}', 'tk_map', 'ag_map', '${status}', '${status}', 'terminal', CURRENT_TIMESTAMP, '${decision}', ${NOW_MS_SQL}, 'API:terminal-event', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
       );
 
     await expect(insertTerminal('ex_map_bad_1', 'completed', 'EXECUTION_FAILED')).rejects.toThrow(

@@ -74,10 +74,92 @@ export function legacyMigrationIds(): string[] {
     .sort();
 }
 
+/** All migration directories in apply order, including Slice 1. */
+export function allMigrationIds(): string[] {
+  return readdirSync(MIGRATIONS_DIR, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+}
+
 export interface TempDatabase {
   dir: string;
   path: string;
   url: string;
+}
+
+/** An empty SQLite file target; Prisma creates the file on first use. */
+export function createEmptyDatabase(label: string): TempDatabase {
+  const dir = makeTempDir(`haft-${label}-`);
+  const path = join(dir, 'database.db');
+  return { dir, path, url: sqliteUrl(path) };
+}
+
+export type MigrationFaultStage =
+  | 'after-ddl'
+  | 'after-backfill'
+  | 'mid-triggers'
+  | 'after-triggers';
+
+export interface FaultInjectedChain {
+  dir: string;
+  schemaPath: string;
+  migrationsDir: string;
+  stage: MigrationFaultStage;
+}
+
+const FAULT_STATEMENT = `SELECT * FROM "__fault_injection_probe__";`;
+
+/**
+ * Builds a private copy of the real migration chain with one guaranteed failure
+ * injected at the requested stage. The failure statement is valid SQL that only
+ * fails at execution time, so Prisma reaches the injected point and the SQLite
+ * transaction boundary is what has to do the rollback.
+ */
+export function createFaultInjectedMigrationChain(
+  label: string,
+  stage: MigrationFaultStage,
+): FaultInjectedChain {
+  const dir = makeTempDir(`haft-${label}-`);
+  const schemaDir = join(dir, 'schema');
+  const migrationsDir = join(schemaDir, 'migrations');
+  mkdirSync(migrationsDir, { recursive: true });
+  writeFileSync(join(schemaDir, 'schema.prisma'), readFileSync(PRISMA_SCHEMA, 'utf8'));
+  for (const id of allMigrationIds()) {
+    cpSync(join(MIGRATIONS_DIR, id), join(migrationsDir, id), { recursive: true });
+  }
+  cpSync(
+    join(MIGRATIONS_DIR, 'migration_lock.toml'),
+    join(migrationsDir, 'migration_lock.toml'),
+  );
+
+  const migrationPath = join(migrationsDir, SLICE1_MIGRATION, 'migration.sql');
+  const original = readFileSync(migrationPath, 'utf8');
+  writeFileSync(migrationPath, injectFault(original, stage));
+  return { dir, schemaPath: join(schemaDir, 'schema.prisma'), migrationsDir, stage };
+}
+
+/** Replaces the fault-injected migration with the real one for the retry test. */
+export function repairFaultInjectedChain(chain: FaultInjectedChain): void {
+  cpSync(
+    join(MIGRATIONS_DIR, SLICE1_MIGRATION, 'migration.sql'),
+    join(chain.migrationsDir, SLICE1_MIGRATION, 'migration.sql'),
+  );
+}
+
+function injectFault(sql: string, stage: MigrationFaultStage): string {
+  const markers: Record<MigrationFaultStage, string> = {
+    'after-ddl': '-- 4. RepositoryHandshakeMessage (18 columns, 6 indexes)',
+    'after-backfill': '-- 7. Triggers (10)',
+    'mid-triggers': '-- T6. Registration epoch is monotonic',
+    'after-triggers': 'COMMIT;',
+  };
+  const marker = markers[stage];
+  const index = sql.indexOf(marker);
+  if (index < 0) {
+    throw new Error(`fault injection marker not found for stage ${stage}: ${marker}`);
+  }
+  return `${sql.slice(0, index)}${FAULT_STATEMENT}\n${sql.slice(index)}`;
 }
 
 const tempDirs: string[] = [];

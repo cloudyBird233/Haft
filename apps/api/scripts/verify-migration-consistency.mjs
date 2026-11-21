@@ -21,6 +21,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
 const apiRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -93,11 +94,59 @@ try {
     );
   }
 
+  // A database can be structurally complete and still be missing the triggers
+  // that own the WP-D invariants (that is exactly the state a partial migration
+  // used to leave behind). Fail the gate if the chain does not end with all of
+  // them.
+  const requiredTriggers = [
+    'Execution_terminal_insert_guard',
+    'Execution_terminal_update_guard',
+    'Execution_terminal_write_guard',
+    'Execution_dispatch_transition_guard',
+    'Execution_start_clock_guard',
+    'Runner_registration_guard',
+    'RepositoryHandshakeMessage_insert_guard',
+    'RepositoryHandshakeMessage_update_guard',
+    'ExecutionRegistrationAudit_insert_guard',
+    'ExecutionRegistrationAudit_no_update',
+  ];
+  const requiredIndexes = [
+    'Execution_status_dispatchState_idx',
+    'Execution_runnerId_registrationEpoch_idx',
+    'Execution_recoveryDeadlineAt_idx',
+    'Execution_terminalDecision_idx',
+    'RepositoryHandshakeMessage_execution_start_unique',
+    'ExecutionRegistrationAudit_executionId_createdAt_idx',
+  ];
+  const db = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const triggers = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'trigger'`)
+      .all()
+      .map((row) => row.name);
+    const missingTriggers = requiredTriggers.filter((name) => !triggers.includes(name));
+    if (missingTriggers.length > 0) {
+      fail(`migration chain is missing triggers: ${missingTriggers.join(', ')}`);
+    }
+    const indexes = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'index'`)
+      .all()
+      .map((row) => row.name);
+    const missingIndexes = requiredIndexes.filter((name) => !indexes.includes(name));
+    if (missingIndexes.length > 0) {
+      fail(`migration chain is missing indexes: ${missingIndexes.join(', ')}`);
+    }
+  } finally {
+    db.close();
+  }
+
   process.stdout.write(
     [
       'verify-migration-consistency: OK',
       `  migrations applied from empty: ${migrations.length}`,
       '  datamodel drift: none (empty migration)',
+      `  required triggers present: ${requiredTriggers.length}`,
+      `  required indexes present: ${requiredIndexes.length}`,
       '',
     ].join('\n'),
   );

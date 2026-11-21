@@ -13,6 +13,7 @@ import {
   type ListDto,
   type TaskCancellationDto,
   type TaskDto,
+  type TerminalDecidedBy,
 } from '@raft-lite/contracts';
 import type { Prisma } from '@prisma/client';
 import { AppException } from '../../common/errors/app.exception';
@@ -592,7 +593,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       const written = await writeTerminalDecision(tx, {
         executionId: current.id,
         decision: 'CANCELLED_CONFIRMED',
-        decidedBy: 'api:operator-cancel',
+        decidedBy: 'API:operator',
         endedAt,
         patch: { cancelReason: reason },
       });
@@ -665,7 +666,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       // session confirms it), but the API does not need to wait for process
       // termination evidence that cannot be produced.
       await this.withExecutionLock(execution.id, () =>
-        this.finishExecution(execution.id, 'cancelled', { reason }),
+        this.finishExecution(execution.id, 'cancelled', { reason }, 'API:operator'),
       );
       return this.getExecutionDto(execution.id);
     }
@@ -772,7 +773,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       const written = await writeTerminalDecision(tx, {
         executionId: input.executionId,
         decision: terminalDecisionForStartFailure(failureCode),
-        decidedBy: 'api:start-failure',
+        decidedBy: 'API:start-gate',
         endedAt,
         requireNoCancelIntent: true,
         patch: { failureReason },
@@ -963,6 +964,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
         diffTruncated: boolean;
       } | null;
     } = {},
+    requestedDecidedBy?: TerminalDecidedBy,
   ): Promise<void> {
     const current = await this.prisma.execution.findUnique({
       where: { id },
@@ -977,6 +979,11 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
     const nextAgentStatus = outcome === 'failed' ? 'error' : 'idle';
     const git = metadata.git;
     const diff = git ? normalizeDiff(git.diff, git.diffTruncated) : null;
+    // The L2 v1.1 baseline distinguishes the operator path, the mock runtime
+    // and a runner-reported terminal event. Other runtime drivers use the
+    // terminal-event identity; an explicit caller (operator safe-finalize) wins.
+    const decidedBy =
+      requestedDecidedBy ?? (current.runtime === 'mock' ? 'API:mock-runtime' : 'API:terminal-event');
 
     const applied = await this.prisma.$transaction(async (tx) => {
       // First terminal writer wins. The conditional update is the authoritative
@@ -984,7 +991,7 @@ export class ExecutionsService implements OnModuleInit, OnModuleDestroy {
       const written = await writeTerminalDecision(tx, {
         executionId: id,
         decision: terminalDecisionForOutcome(outcome),
-        decidedBy: `api:${outcome === 'cancelled' ? 'operator-cancel' : 'runtime-event'}`,
+        decidedBy,
         endedAt,
         patch: {
           progress: outcome === 'completed' ? 100 : current.progress,

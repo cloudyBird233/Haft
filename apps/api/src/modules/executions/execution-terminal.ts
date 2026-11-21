@@ -1,7 +1,9 @@
 import type { Prisma } from '@prisma/client';
 import {
   TERMINAL_DECISION_STATUS,
+  isLegalTerminalDecidedBy,
   type ExecutionStatus,
+  type TerminalDecidedBy,
   type TerminalDecision,
 } from '@raft-lite/contracts';
 
@@ -12,9 +14,10 @@ export interface TerminalWriteInput {
   decision: TerminalDecision;
   /**
    * Stable, non-secret marker of the code path that decided the outcome. It is
-   * audit metadata, never user input.
+   * audit metadata, never user input. The L2 v1.1 baseline only allows the
+   * `API:` and `MIGRATION:` prefixes; the SQLite triggers reject anything else.
    */
-  decidedBy: string;
+  decidedBy: TerminalDecidedBy;
   endedAt?: Date;
   /** Business fields written in the same conditional update. */
   patch?: Omit<
@@ -40,6 +43,11 @@ export async function writeTerminalDecision(
   tx: TerminalTx,
   input: TerminalWriteInput,
 ): Promise<boolean> {
+  if (!isLegalTerminalDecidedBy(input.decidedBy)) {
+    throw new Error(
+      `writeTerminalDecision: "${input.decidedBy}" is not a legal terminalDecidedBy identity`,
+    );
+  }
   const decidedAt = input.endedAt ?? new Date();
   const status: ExecutionStatus = TERMINAL_DECISION_STATUS[input.decision];
   const result = await tx.execution.updateMany({

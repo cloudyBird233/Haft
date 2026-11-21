@@ -1,0 +1,79 @@
+{
+  "source": "P2-02 WP-D L2 v1.1 schema final review, 2026-11-12",
+  "terminalDecisions": [
+    "COMPLETED",
+    "CANCELLED_CONFIRMED",
+    "EXECUTION_FAILED",
+    "START_REJECTED",
+    "START_ACCEPT_TIMEOUT",
+    "START_SEND_UNCONFIRMED",
+    "RUNNER_DISCONNECTED",
+    "RUNNER_RESTARTED",
+    "RUNNER_INTERRUPTED",
+    "RUNNER_START_UNCONFIRMED",
+    "RECOVERY_DEADLINE_EXCEEDED",
+    "MESSAGE_INTEGRITY_FAILED",
+    "CLOCK_ANOMALY"
+  ],
+  "terminalDecisionStatus": {
+    "COMPLETED": "completed",
+    "CANCELLED_CONFIRMED": "cancelled",
+    "EXECUTION_FAILED": "failed",
+    "START_REJECTED": "failed",
+    "START_ACCEPT_TIMEOUT": "failed",
+    "START_SEND_UNCONFIRMED": "failed",
+    "RUNNER_DISCONNECTED": "failed",
+    "RUNNER_RESTARTED": "failed",
+    "RUNNER_INTERRUPTED": "failed",
+    "RUNNER_START_UNCONFIRMED": "failed",
+    "RECOVERY_DEADLINE_EXCEEDED": "failed",
+    "MESSAGE_INTEGRITY_FAILED": "failed",
+    "CLOCK_ANOMALY": "failed"
+  },
+  "terminalStatuses": ["completed", "failed", "cancelled"],
+  "terminalTuple": {
+    "fields": ["terminalDecision", "terminalDecidedAt", "terminalDecidedBy"],
+    "terminalDecidedAt": {
+      "storage": "integer",
+      "unit": "unix-ms",
+      "minimum": 1
+    },
+    "terminalStatusRequirements": [
+      "dispatchState = terminal",
+      "phase = status",
+      "endedAt is not null",
+      "terminalDecidedAt is a positive integer unix-ms value"
+    ],
+    "onlyTransitionIntoTerminal": "running -> completed | failed | cancelled"
+  },
+  "terminalDecidedBy": {
+    "prefixes": ["API:", "MIGRATION:"],
+    "identities": [
+      "API:operator",
+      "API:terminal-event",
+      "API:reconciler",
+      "API:start-gate",
+      "API:recovery-scanner",
+      "API:mock-runtime",
+      "MIGRATION:wp-d-backfill"
+    ]
+  },
+  "executionRegistrationAudit": {
+    "columns": [
+      "id",
+      "executionId",
+      "runnerId",
+      "previousRegistrationId",
+      "previousRegistrationEpoch",
+      "newRegistrationId",
+      "newRegistrationEpoch",
+      "dispatchState",
+      "decision",
+      "reasonCode",
+      "detail",
+      "messageId",
+      "createdAt"
+    ],
+    "decisions": ["adopted", "rejected", "superseded"]
+  }
+}

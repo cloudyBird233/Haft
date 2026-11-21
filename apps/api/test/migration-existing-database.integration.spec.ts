@@ -47,6 +47,9 @@ async function seedLegacyRows(prisma: PrismaClient): Promise<void> {
     `INSERT INTO "Runner" (id, computerId, tokenHash, protocolVersion, runnerVersion, platform, architecture, status, capabilitiesJson, maxConcurrentExecutions, createdAt, updatedAt) VALUES ('rn_legacy', 'cp_legacy', 'hash', 1, '0.1.0', 'win32', 'x64', 'offline', '{}', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
     // A completed execution with its logs, artifact and activity.
     `INSERT INTO "Execution" (id, taskId, agentId, runtime, status, phase, progress, progressMode, dispatchState, startedAt, endedAt, createdAt, updatedAt) VALUES ('ex_legacy_completed', 'tk_legacy', 'ag_legacy', 'mock', 'completed', 'completed', 100, 'determinate', 'terminal', '2026-01-02T00:00:00.000Z', '2026-01-02T00:01:00.000Z', '2026-01-02T00:00:00.000Z', '2026-01-02T00:01:00.000Z')`,
+    // A second completed row in the representation Prisma actually writes:
+    // DateTime as an INTEGER number of Unix milliseconds.
+    `INSERT INTO "Execution" (id, taskId, agentId, runtime, status, phase, progress, progressMode, dispatchState, startedAt, endedAt, createdAt, updatedAt) VALUES ('ex_legacy_completed_integer', 'tk_legacy', 'ag_legacy', 'mock', 'completed', 'completed', 100, 'determinate', 'terminal', 1767312000000, 1767312060000, 1767312000000, 1767312060000)`,
     `INSERT INTO "ExecutionLog" (id, executionId, seq, level, message, timestamp) VALUES ('log_legacy_1', 'ex_legacy_completed', 1, 'info', 'legacy log', '2026-01-02T00:00:30.000Z')`,
     `INSERT INTO "ExecutionArtifact" (id, executionId, kind, content, byteSize, truncated, createdAt, updatedAt) VALUES ('art_legacy_1', 'ex_legacy_completed', 'git-diff', 'diff', 4, false, '2026-01-02T00:01:00.000Z', '2026-01-02T00:01:00.000Z')`,
     `INSERT INTO "Activity" (id, workspaceId, type, summary, taskId, agentId, executionId, createdAt) VALUES ('act_legacy_1', 'ws_legacy', 'execution.completed', 'done', 'tk_legacy', 'ag_legacy', 'ex_legacy_completed', '2026-01-02T00:01:00.000Z')`,
@@ -88,7 +91,7 @@ describe('B. existing database upgrade', () => {
     const before = await counts(legacyPrisma);
     const after = await counts(upgradedPrisma);
     expect(after).toEqual(before);
-    expect(after.Execution).toBe(5);
+    expect(after.Execution).toBe(6);
     expect(after.ExecutionLog).toBe(1);
     expect(after.ExecutionArtifact).toBe(1);
     expect(after.Activity).toBe(1);
@@ -117,12 +120,12 @@ describe('B. existing database upgrade', () => {
     const failed = rows.find((row) => row.id === 'ex_legacy_failed');
     expect(completed).toMatchObject({
       terminalDecision: 'COMPLETED',
-      terminalDecidedBy: 'legacy-backfill',
+      terminalDecidedBy: 'MIGRATION:wp-d-backfill',
       dispatchState: 'terminal',
     });
     expect(failed).toMatchObject({
       terminalDecision: 'EXECUTION_FAILED',
-      terminalDecidedBy: 'legacy-backfill',
+      terminalDecidedBy: 'MIGRATION:wp-d-backfill',
       dispatchState: 'terminal',
     });
     // The decision instant is the recorded end of the execution, not "now".
@@ -134,6 +137,29 @@ describe('B. existing database upgrade', () => {
       throw new Error('the upgrade did not record a decision instant for a legacy terminal row');
     }
     expect(new Date(decidedAt).toISOString()).toBe(new Date(endedAt).toISOString());
+  });
+
+  it('records the backfill instant as a positive integer Unix ms value', async () => {
+    const rows = await upgradedPrisma.$queryRawUnsafe<
+      Array<{ storage: string; value: number | null }>
+    >(
+      `SELECT typeof(terminalDecidedAt) AS storage, terminalDecidedAt AS value
+       FROM "Execution" WHERE id = 'ex_legacy_completed'`,
+    );
+    expect(rows[0]?.storage).toBe('integer');
+    expect(Number(rows[0]?.value)).toBeGreaterThan(0);
+    const integerRows = await upgradedPrisma.$queryRawUnsafe<
+      Array<{ storage: string; value: number | null }>
+    >(
+      `SELECT typeof(terminalDecidedAt) AS storage, terminalDecidedAt AS value
+       FROM "Execution" WHERE id = 'ex_legacy_completed_integer'`,
+    );
+    expect(integerRows[0]?.storage).toBe('integer');
+    expect(Number(integerRows[0]?.value)).toBe(1767312060000);
+    const stale = await upgradedPrisma.$queryRawUnsafe<Array<{ c: bigint }>>(
+      `SELECT COUNT(*) AS c FROM "Execution" WHERE terminalDecidedBy = 'legacy-backfill'`,
+    );
+    expect(Number(stale[0]?.c)).toBe(0);
   });
 
   it('never invents CANCELLED_CONFIRMED for legacy cancellations', async () => {

@@ -5,6 +5,18 @@
 基线提交：`d409d2e`（Slice 0.2.1 生产代码 + C7 复审）
 日期：2026-11-16
 
+> **2026-11-21 Slice 1.1 修正声明**
+>
+> 本报告首次交付时，§2.1、§2.4、§3.2、§3.3、§4.1、§5.1–5.3、§6.1、§6.6
+> 在 `terminalDecidedBy` 身份、`ExecutionRegistrationAudit` 字段、13 种
+> `terminalDecision` 映射以及测试数量上与代码/Schema 不一致（独立复审
+> `S1-P2-1`）。上述章节已按 **2026-11-12 L2 v1.1 Schema 终审** 修正；契约原件
+> 已固化为 `docs/engineering/P2-02_WP-D_L2_V1_1_CONTRACT_BASELINE.md` 与
+> `apps/api/test/fixtures/l2-v1.1-contract.json`。迁移原子性修复、Trigger 加固
+> 与新增测试的完整证据见
+> `docs/engineering/P2-02_WP-D_SLICE1_1_REMEDIATION_REPORT.md`。本报告其余
+> 章节（范围、P2-4、canonical JSON、平台边界）保持首次交付时的结论不变。
+
 ---
 
 ## 1. 范围与基线
@@ -57,7 +69,7 @@ Slice 0.2.1 的生产代码（`process-supervisor-child.ts`、`process-guard.ts`
 | `recoveryDeadlineAt` | `DateTime?` | `startSentAt + 120s`，只允许收紧 |
 | `terminalDecision` | `String?` | 13 种终态裁决之一 |
 | `terminalDecidedAt` | `DateTime?` | 裁决时刻（历史行为 `endedAt`/`updatedAt`） |
-| `terminalDecidedBy` | `String?` | 裁决来源（`api:*` / `seed:*` / `legacy-backfill`） |
+| `terminalDecidedBy` | `String?` | 裁决来源，只允许 `API:` / `MIGRATION:` 前缀（既定身份见 L2 v1.1 契约基线） |
 
 ### 2.2 Runner（3 个标量字段）
 
@@ -77,8 +89,9 @@ Slice 0.2.1 的生产代码（`process-supervisor-child.ts`、`process-guard.ts`
 
 ### 2.4 ExecutionRegistrationAudit（新表，13 个标量字段，append-only）
 
-`id`、`executionId`、`runnerId`、`previousRegistrationId`、`previousRegistrationEpoch`、`newRegistrationId`、`newRegistrationEpoch`、`reason`、`actor`、`createdAt`、`ipAddress`、`userAgent`、`detail`。
+`id`、`executionId`、`runnerId`、`previousRegistrationId`、`previousRegistrationEpoch`、`newRegistrationId`、`newRegistrationEpoch`、`dispatchState`、`decision`、`reasonCode`、`detail`、`messageId`、`createdAt`。
 
+- `decision` 只允许 `adopted` / `rejected` / `superseded`；`rejected` 必须有 `reasonCode`。
 - `runnerId` 同样不是外键（审计不因 Runner 变更失效）。
 - 由 Trigger 保证不可 UPDATE；DELETE 仅随 `Execution` 级联（SQLite 对级联删除不触发 Trigger，因此级联仍可用）。
 
@@ -105,7 +118,11 @@ Prisma datamodel 无法表达 Partial Index，因此该索引只存在于 Migrat
 
 ## 3. Migration
 
-文件：`apps/api/prisma/migrations/20261116120000_p2_02_wpd_slice1_schema_migration/migration.sql`（470 行）
+文件：`apps/api/prisma/migrations/20261116120000_p2_02_wpd_slice1_schema_migration/migration.sql`（556 行）
+
+> Slice 1.1 起，整份脚本包在显式 `BEGIN IMMEDIATE; ... COMMIT;` 中，使 SQLite 迁移
+> 具备全有或全无语义。Prisma 自身不会为 SQLite 的单个 migration 文件开事务；该边界
+> 已被真实 `migrate deploy` 与四个阶段的故障注入验证（见修复报告第 5 节）。
 
 | 对象 | 数量 |
 | --- | --- |
@@ -128,13 +145,19 @@ UPDATE "Execution"
            WHEN 'completed' THEN 'COMPLETED'
            WHEN 'failed'    THEN 'EXECUTION_FAILED'
        END,
-       "terminalDecidedAt" = COALESCE("endedAt", "updatedAt"),
-       "terminalDecidedBy" = 'legacy-backfill',
+       "terminalDecidedAt" = CASE typeof(COALESCE("endedAt", "updatedAt"))
+           WHEN 'integer' THEN COALESCE("endedAt", "updatedAt")
+           WHEN 'real'    THEN CAST(COALESCE("endedAt", "updatedAt") AS INTEGER)
+           ELSE CAST(strftime('%s', COALESCE("endedAt", "updatedAt")) AS INTEGER) * 1000
+                + CAST(substr(strftime('%f', COALESCE("endedAt", "updatedAt")), 4, 3) AS INTEGER)
+       END,
+       "terminalDecidedBy" = 'MIGRATION:wp-d-backfill',
        "dispatchState" = 'terminal'
  WHERE "status" IN ('completed', 'failed');
 ```
 
 - `completed` / `failed` 是**可从既有数据确定性推导**的裁决，允许回填。
+- `terminalDecidedAt` 保留历史时刻，但把存储统一为 L2 v1.1 要求的**正整数 Unix 毫秒**：Prisma 写出的 INTEGER 原样保留，ISO-8601 TEXT 精确换算（秒 × 1000 + 毫秒小数），不用"迁移时刻"替换历史时间。
 - `cancelled` **不**回填为 `CANCELLED_CONFIRMED`：数据库不持有任何"进程终止已确认"的证据，回填等于伪造。这类行只把 `dispatchState` 置为 `terminal`，`terminalDecision` 保持 `NULL`，留给 Slice 2 的恢复判定或人工处理。
 - start 之前的行（`created` / `repository_preparing`）完全不动，也不会为它们伪造任何握手消息。
 
@@ -142,15 +165,15 @@ UPDATE "Execution"
 
 | # | Trigger | 时机 | 强制的约束 |
 | --- | --- | --- | --- |
-| T1 | `Execution_terminal_insert_guard` | BEFORE INSERT | 终态行必须带合法的 `terminalDecision` + `terminalDecidedAt` + `terminalDecidedBy`，且 decision 与 status 匹配（13 种） |
-| T2 | `Execution_terminal_update_guard` | BEFORE UPDATE | 终态一旦写入不可被改成另一种裁决，也不可被清空；先写者胜 |
-| T3 | `Execution_terminal_write_guard` | BEFORE UPDATE | 终态行不可再改 `status` / `dispatchState` / `endedAt`；复活被拒 |
+| T1 | `Execution_terminal_insert_guard` | BEFORE INSERT | 终态行必须 `dispatchState=terminal`、`phase=status`、有 `endedAt`，且带完整的 `terminalDecision` + 正整数 Unix ms `terminalDecidedAt` + 合法 `terminalDecidedBy`；decision 与 status 匹配（13 种）；非终态行不得携带元组 |
+| T2 | `Execution_terminal_update_guard` | BEFORE UPDATE | 终态行不可改写 `status` / `phase` / `dispatchState` / 终态元组 / `endedAt` / `exitCode`；先写者胜 |
+| T3 | `Execution_terminal_write_guard` | BEFORE UPDATE | 离开 `running` 必须一次性写完整、类型正确、身份合法且 `phase=status` 的终态；`running` 行不得携带终态元组；只允许 `running → completed/failed/cancelled` |
 | T4 | `Execution_dispatch_transition_guard` | BEFORE UPDATE | 六态只能按 `created → repository_preparing → repository_ready → start_sent → running → terminal` 前进；`start_sent` 必须有 `execution.start` 持久化证据（EXISTS 检查） |
 | T5 | `Execution_start_clock_guard` | BEFORE UPDATE | `startSentAt` / `startAcceptDeadlineAt` 只能写一次；`recoveryDeadlineAt` 只能收紧 |
 | T6 | `Runner_registration_guard` | BEFORE UPDATE | `registrationEpoch` 不可回退、不可跳跃；epoch+1 必须同时换 `registrationId` |
 | T7 | `RepositoryHandshakeMessage_insert_guard` | BEFORE INSERT | `payloadHash` 必须是 64 位小写 hex；status 合法；`sent`/`acked` 必须有时间戳；`execution.start` 不得有 `lastReplayedAt` |
 | T8 | `RepositoryHandshakeMessage_update_guard` | BEFORE UPDATE | 身份/信封不可变；`created → sent\|acked\|rejected`、`sent → acked\|rejected`；`execution.start` 不可 replay |
-| T9 | `ExecutionRegistrationAudit_insert_guard` | BEFORE INSERT | 审计行字段合法、epoch 与 id 一致 |
+| T9 | `ExecutionRegistrationAudit_insert_guard` | BEFORE INSERT | `adopted` 必须恰好前进一个 epoch（首次绑定除外）；`rejected` 必须有 `reasonCode`；`superseded` 必须带被替换的 registration 且 epoch 严格更新 |
 | T10 | `ExecutionRegistrationAudit_no_update` | BEFORE UPDATE | append-only：任何 UPDATE 直接 `RAISE(ABORT)` |
 
 所有 Trigger 使用 `RAISE(ABORT, '<Trigger 名>: <原因>')`，测试断言错误文本确实来自 `RAISE`，并验证失败后原行未被修改（回滚）。
@@ -164,10 +187,11 @@ UPDATE "Execution"
 | status | decisions |
 | --- | --- |
 | `completed` | `COMPLETED` |
-| `failed` | `EXECUTION_FAILED`、`START_ACCEPT_TIMEOUT`、`RUNNER_START_UNCONFIRMED`、`CLI_EXIT_NONZERO`、`CLI_TIMEOUT`、`REPOSITORY_PREPARE_FAILED`、`REPOSITORY_READY_TIMEOUT`、`DISPATCH_REJECTED`、`RUNNER_LOST`、`RECOVERY_UNRESOLVED` |
-| `cancelled` | `CANCELLED_CONFIRMED`、`CANCELLED_BEFORE_START` |
+| `cancelled` | `CANCELLED_CONFIRMED` |
+| `failed` | `EXECUTION_FAILED`、`START_REJECTED`、`START_ACCEPT_TIMEOUT`、`START_SEND_UNCONFIRMED`、`RUNNER_DISCONNECTED`、`RUNNER_RESTARTED`、`RUNNER_INTERRUPTED`、`RUNNER_START_UNCONFIRMED`、`RECOVERY_DEADLINE_EXCEEDED`、`MESSAGE_INTEGRITY_FAILED`、`CLOCK_ANOMALY` |
 
-枚举定义在 `packages/contracts/src/constants.ts`（`TERMINAL_DECISIONS` as const、`TERMINAL_DECISION_STATUS`），并由 `migration.integration.spec.ts` 反向断言"每个 decision 都出现在 T1 的 Trigger SQL 中"——枚举与数据库不会漂移。
+枚举定义在 `packages/contracts/src/constants.ts`（`TERMINAL_DECISIONS` as const、`TERMINAL_DECISION_STATUS`），并由 `migration.integration.spec.ts` 从
+`apps/api/test/fixtures/l2-v1.1-contract.json` 反向断言：枚举、映射、Audit 列与身份列表必须与 fixture 完全一致，T1 的 Trigger SQL 必须包含全部 13 个值。枚举与数据库不会漂移。
 
 ### 4.2 dispatchState 六态
 
@@ -201,7 +225,7 @@ deadline 只能收紧：T5 拒绝任何让 `recoveryDeadlineAt` 变晚的 UPDATE
 
 ### 5.1 A. Fresh DB
 
-`apps/api/test/migration.integration.spec.ts`（10 用例，全部通过）：
+`apps/api/test/migration.integration.spec.ts`（12 用例，全部通过）：
 
 - 迁移链在空库上完整应用（7 条迁移）；
 - 42 个新增列全部存在，类型/可空性正确；
@@ -209,16 +233,18 @@ deadline 只能收紧：T5 拒绝任何让 `recoveryDeadlineAt` 变晚的 UPDATE
 - 14 个索引/唯一约束存在，且 `execution.start` 索引 `PRAGMA index_list` 的 `partial = 1`；
 - 10 个 Trigger 存在，`sqlite_master` 中可见；
 - 13 个 decision 与 status 映射正确，且全部出现在 T1 的 SQL 中；
+- 契约 fixture（13 decisions / 映射 / Audit 13 列 / 身份列表）与代码、Migration 完全一致；
+- `PRAGMA integrity_check` 返回 `ok`，`PRAGMA foreign_key_check` 为空；
 - 迁移后可写一条完整的 execution + 握手消息。
 
 ### 5.2 B. Existing DB
 
-`apps/api/test/migration-existing-database.integration.spec.ts`（7 用例，全部通过）：
+`apps/api/test/migration-existing-database.integration.spec.ts`（8 用例，全部通过）：
 
 - 用 **Slice 1 之前的迁移子集**建历史库，再用手工 SQL 写入 legacy 行（completed / failed / cancelled / repository_preparing / created）；
 - 升级后 `Execution` / `Log` / `Artifact` / `Activity` 行数与升级前**逐表一致**；
 - `PRAGMA foreign_key_check` 为空（外键完整）；
-- `completed → COMPLETED`、`failed → EXECUTION_FAILED`，`terminalDecidedAt` 等于历史 `endedAt`，`terminalDecidedBy = 'legacy-backfill'`；
+- `completed → COMPLETED`、`failed → EXECUTION_FAILED`，`terminalDecidedAt` 等于历史 `endedAt`（并统一为整数 Unix ms），`terminalDecidedBy = 'MIGRATION:wp-d-backfill'`；
 - `cancelled` 保持 `terminalDecision IS NULL`（**没有**被伪造成 `CANCELLED_CONFIRMED`）；
 - start 之前的行 `dispatchState` 不变，`RepositoryHandshakeMessage` 为空（未伪造发送证据）；
 - Runner 基线干净（`registrationId = NULL`、`registrationEpoch = 0`）；
@@ -226,7 +252,7 @@ deadline 只能收紧：T5 拒绝任何让 `recoveryDeadlineAt` 变晚的 UPDATE
 
 ### 5.3 C. Trigger 逐条
 
-`apps/api/test/database-triggers.integration.spec.ts`（40 用例，全部通过）：T1–T10 每条至少一个合法用例 + 一个非法用例，非法用例断言错误文本来自对应的 `RAISE`，并复查失败后目标行未被修改。
+`apps/api/test/database-triggers.integration.spec.ts`（57 用例，全部通过）：T1–T10 每条至少一个合法用例 + 一个非法用例，非法用例断言错误文本来自对应的 `RAISE`，并复查失败后目标行未被修改。Slice 1.1 追加：13 decisions × 正确/错误 status 全矩阵、`phase != status`、`terminalDecidedAt` 的 TEXT/0/负数/浮点拒绝、非法 `terminalDecidedBy`、adopted/rejected/superseded、终态元组逐字段不可变、双连接 first-writer-wins。
 
 ### 5.4 D. Migration 回归
 
@@ -360,9 +386,9 @@ data: { status, phase: status, dispatchState: 'terminal', terminalDecision, term
 
 返回 `count === 1` 即"本写入者胜出"。三条既有路径改为走它：
 
-- `failExecutionStart` → `terminalDecisionForStartFailure(code)`，`decidedBy: 'api:start-failure'`，`requireNoCancelIntent: true`（**start 失败不得覆盖已发生的取消意图**）。
-- `finishExecution` → `terminalDecisionForOutcome(outcome)`，`applied === false` 时直接返回（迟到事件不覆盖终态）。
-- `cancelMockExecution` → `CANCELLED_CONFIRMED`，`decidedBy: 'api:operator-cancel'`，失败抛 `EXECUTION_NOT_RUNNING` CONFLICT。
+- `failExecutionStart` → `terminalDecisionForStartFailure(code)`，`decidedBy: 'API:start-gate'`，`requireNoCancelIntent: true`（**start 失败不得覆盖已发生的取消意图**）。
+- `finishExecution` → `terminalDecisionForOutcome(outcome)`，`applied === false` 时直接返回（迟到事件不覆盖终态）；`decidedBy` 为 `API:mock-runtime`（mock）或 `API:terminal-event`（runner/runtime），操作员安全终结路径显式传 `API:operator`。
+- `cancelMockExecution` → `CANCELLED_CONFIRMED`，`decidedBy: 'API:operator'`，失败抛 `EXECUTION_NOT_RUNNING` CONFLICT。
 
 ### 6.2 消息与 Registration 的事务顺序（P1-4）
 
@@ -397,7 +423,7 @@ data: { status, phase: status, dispatchState: 'terminal', terminalDecision, term
 
 ### 6.6 Seed / Fixture（P1-2）
 
-`demo-data.ts` 的 completed execution 补齐 `dispatchState: 'terminal'`、`terminalDecision: 'COMPLETED'`、`terminalDecidedAt`、`terminalDecidedBy: 'seed:demo-data'`。否则 T1 会在 seed 时拒绝写入——这正是 P1-2 要求提前发现的破坏。
+`demo-data.ts` 的 completed execution 补齐 `dispatchState: 'terminal'`、`terminalDecision: 'COMPLETED'`、`terminalDecidedAt`、`terminalDecidedBy: 'API:mock-runtime'`。否则 T1 会在 seed 时拒绝写入——这正是 P1-2 要求提前发现的破坏。
 
 ### 6.7 RealExecutor 的两个时间接缝
 

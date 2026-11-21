@@ -12,6 +12,16 @@
 -- historical terminal decision is invented: legacy `cancelled` rows keep a NULL
 -- terminal tuple because the database holds no process-termination evidence for
 -- them (see docs/engineering/P2-02_WP-D_SLICE1_IMPLEMENTATION_REPORT.md).
+--
+-- Atomicity: Prisma Migrate does not wrap a SQLite migration file in a
+-- transaction (a mid-file failure otherwise leaves the earlier ALTER/CREATE
+-- statements committed and blocks every later `migrate deploy`). The explicit
+-- boundary below makes the whole script all-or-nothing; it is verified by
+-- `apps/api/test/migration-atomicity.integration.spec.ts` with failures
+-- injected after the DDL, after the backfill and in the middle of the trigger
+-- block.
+
+BEGIN IMMEDIATE;
 
 -- ---------------------------------------------------------------------------
 -- 1. Execution: registration binding, start clock and terminal tuple (8 columns)
@@ -117,14 +127,23 @@ CREATE INDEX "ExecutionRegistrationAudit_runnerId_createdAt_idx" ON "ExecutionRe
 -- ---------------------------------------------------------------------------
 
 -- `completed` and `failed` map deterministically: both are API-observed
--- outcomes, not inferred ones.
+-- outcomes, not inferred ones. `terminalDecidedAt` keeps the historical instant
+-- but normalises its storage to the L2 v1.1 representation: an INTEGER number of
+-- Unix milliseconds. Prisma already stores DateTime as INTEGER, while a legacy
+-- row written as an ISO-8601 string is converted exactly (seconds * 1000 plus
+-- the millisecond fraction); the instant is never replaced by "now".
 UPDATE "Execution"
 SET "terminalDecision" = CASE "status"
         WHEN 'completed' THEN 'COMPLETED'
         WHEN 'failed' THEN 'EXECUTION_FAILED'
     END,
-    "terminalDecidedAt" = COALESCE("endedAt", "updatedAt"),
-    "terminalDecidedBy" = 'legacy-backfill',
+    "terminalDecidedAt" = CASE typeof(COALESCE("endedAt", "updatedAt"))
+        WHEN 'integer' THEN COALESCE("endedAt", "updatedAt")
+        WHEN 'real' THEN CAST(COALESCE("endedAt", "updatedAt") AS INTEGER)
+        ELSE CAST(strftime('%s', COALESCE("endedAt", "updatedAt")) AS INTEGER) * 1000
+             + CAST(substr(strftime('%f', COALESCE("endedAt", "updatedAt")), 4, 3) AS INTEGER)
+    END,
+    "terminalDecidedBy" = 'MIGRATION:wp-d-backfill',
     "dispatchState" = 'terminal'
 WHERE "status" IN ('completed', 'failed');
 
@@ -146,30 +165,53 @@ WHERE "status" = 'cancelled';
 -- ---------------------------------------------------------------------------
 
 -- T1. Terminal INSERT integrity: a row inserted directly as terminal must carry
---     the complete tuple and the matching decision; a running row must not
---     pretend to be terminal.
+--     the complete tuple, the matching decision and `phase = status`; a running
+--     row must not pretend to be terminal. `terminalDecidedAt` is stored by
+--     Prisma SQLite as an INTEGER number of Unix milliseconds, so the trigger
+--     rejects TEXT dates, zero, negative and fractional values at the database
+--     boundary instead of trusting the writer.
 CREATE TRIGGER "Execution_terminal_insert_guard"
 BEFORE INSERT ON "Execution"
 FOR EACH ROW
 BEGIN
-    SELECT RAISE(ABORT, 'Execution_terminal_insert_guard: a terminal execution must be inserted with dispatchState=terminal, endedAt, terminalDecision, terminalDecidedAt and terminalDecidedBy')
+    SELECT RAISE(ABORT, 'Execution_terminal_insert_guard: a terminal execution must have dispatchState=terminal, phase=status and endedAt')
     WHERE NEW."status" IN ('completed', 'failed', 'cancelled')
       AND (
-            NEW."dispatchState" <> 'terminal'
+            NEW."dispatchState" IS NOT 'terminal'
+         OR NEW."phase" IS NOT NEW."status"
          OR NEW."endedAt" IS NULL
-         OR NEW."terminalDecision" IS NULL
+      );
+
+    SELECT RAISE(ABORT, 'Execution_terminal_insert_guard: the terminal tuple must be complete and terminalDecidedAt must be a positive integer Unix ms')
+    WHERE NEW."status" IN ('completed', 'failed', 'cancelled')
+      AND (
+            NEW."terminalDecision" IS NULL
          OR NEW."terminalDecidedAt" IS NULL
+         OR typeof(NEW."terminalDecidedAt") <> 'integer'
+         OR NEW."terminalDecidedAt" <= 0
          OR NEW."terminalDecidedBy" IS NULL
          OR length(trim(NEW."terminalDecidedBy")) = 0
-         OR NOT (
-                (NEW."status" = 'completed' AND NEW."terminalDecision" = 'COMPLETED')
-             OR (NEW."status" = 'cancelled' AND NEW."terminalDecision" = 'CANCELLED_CONFIRMED')
-             OR (NEW."status" = 'failed' AND NEW."terminalDecision" IN (
-                    'EXECUTION_FAILED', 'START_REJECTED', 'START_ACCEPT_TIMEOUT',
-                    'START_SEND_UNCONFIRMED', 'RUNNER_DISCONNECTED', 'RUNNER_RESTARTED',
-                    'RUNNER_INTERRUPTED', 'RUNNER_START_UNCONFIRMED', 'RECOVERY_DEADLINE_EXCEEDED',
-                    'MESSAGE_INTEGRITY_FAILED', 'CLOCK_ANOMALY'))
-            )
+      );
+
+    SELECT RAISE(ABORT, 'Execution_terminal_insert_guard: terminalDecidedBy must use the API: or MIGRATION: prefix')
+    WHERE NEW."status" IN ('completed', 'failed', 'cancelled')
+      AND NEW."terminalDecidedBy" IS NOT NULL
+      AND NOT (
+            (NEW."terminalDecidedBy" GLOB 'API:*' AND length(NEW."terminalDecidedBy") > 4)
+         OR (NEW."terminalDecidedBy" GLOB 'MIGRATION:*' AND length(NEW."terminalDecidedBy") > 10)
+      );
+
+    SELECT RAISE(ABORT, 'Execution_terminal_insert_guard: terminalDecision does not match the terminal status')
+    WHERE NEW."status" IN ('completed', 'failed', 'cancelled')
+      AND NEW."terminalDecision" IS NOT NULL
+      AND NOT (
+            (NEW."status" = 'completed' AND NEW."terminalDecision" = 'COMPLETED')
+         OR (NEW."status" = 'cancelled' AND NEW."terminalDecision" = 'CANCELLED_CONFIRMED')
+         OR (NEW."status" = 'failed' AND NEW."terminalDecision" IN (
+                'EXECUTION_FAILED', 'START_REJECTED', 'START_ACCEPT_TIMEOUT',
+                'START_SEND_UNCONFIRMED', 'RUNNER_DISCONNECTED', 'RUNNER_RESTARTED',
+                'RUNNER_INTERRUPTED', 'RUNNER_START_UNCONFIRMED', 'RECOVERY_DEADLINE_EXCEEDED',
+                'MESSAGE_INTEGRITY_FAILED', 'CLOCK_ANOMALY'))
       );
 
     SELECT RAISE(ABORT, 'Execution_terminal_insert_guard: a non-terminal execution must not carry a terminal tuple or dispatchState=terminal')
@@ -189,8 +231,9 @@ BEFORE UPDATE ON "Execution"
 FOR EACH ROW
 WHEN OLD."status" IN ('completed', 'failed', 'cancelled')
 BEGIN
-    SELECT RAISE(ABORT, 'Execution_terminal_update_guard: a terminal execution is immutable (status, dispatchState, terminal tuple, endedAt and exitCode cannot change)')
+    SELECT RAISE(ABORT, 'Execution_terminal_update_guard: a terminal execution is immutable (status, phase, dispatchState, terminal tuple, endedAt and exitCode cannot change)')
     WHERE NEW."status" IS NOT OLD."status"
+       OR NEW."phase" IS NOT OLD."phase"
        OR NEW."dispatchState" IS NOT OLD."dispatchState"
        OR NEW."terminalDecision" IS NOT OLD."terminalDecision"
        OR NEW."terminalDecidedAt" IS NOT OLD."terminalDecidedAt"
@@ -200,21 +243,41 @@ BEGIN
 END;
 
 -- T3. The only legal way into a terminal state is a complete, consistent write
---     from `running`. A running row also may not carry a terminal tuple.
+--     from `running`: `phase = status`, a positive integer `terminalDecidedAt`,
+--     a legal `terminalDecidedBy` and the decision that matches the status.
+--     A running row may never carry a terminal tuple.
 CREATE TRIGGER "Execution_terminal_write_guard"
 BEFORE UPDATE ON "Execution"
 FOR EACH ROW
 BEGIN
-    SELECT RAISE(ABORT, 'Execution_terminal_write_guard: leaving running requires dispatchState=terminal, endedAt and the full terminal tuple')
+    SELECT RAISE(ABORT, 'Execution_terminal_write_guard: leaving running requires dispatchState=terminal, phase=status and endedAt')
     WHERE OLD."status" = 'running'
       AND NEW."status" IN ('completed', 'failed', 'cancelled')
       AND (
-            NEW."dispatchState" <> 'terminal'
+            NEW."dispatchState" IS NOT 'terminal'
+         OR NEW."phase" IS NOT NEW."status"
          OR NEW."endedAt" IS NULL
-         OR NEW."terminalDecision" IS NULL
+      );
+
+    SELECT RAISE(ABORT, 'Execution_terminal_write_guard: the terminal tuple must be complete and terminalDecidedAt must be a positive integer Unix ms')
+    WHERE OLD."status" = 'running'
+      AND NEW."status" IN ('completed', 'failed', 'cancelled')
+      AND (
+            NEW."terminalDecision" IS NULL
          OR NEW."terminalDecidedAt" IS NULL
+         OR typeof(NEW."terminalDecidedAt") <> 'integer'
+         OR NEW."terminalDecidedAt" <= 0
          OR NEW."terminalDecidedBy" IS NULL
          OR length(trim(NEW."terminalDecidedBy")) = 0
+      );
+
+    SELECT RAISE(ABORT, 'Execution_terminal_write_guard: terminalDecidedBy must use the API: or MIGRATION: prefix')
+    WHERE OLD."status" = 'running'
+      AND NEW."status" IN ('completed', 'failed', 'cancelled')
+      AND NEW."terminalDecidedBy" IS NOT NULL
+      AND NOT (
+            (NEW."terminalDecidedBy" GLOB 'API:*' AND length(NEW."terminalDecidedBy") > 4)
+         OR (NEW."terminalDecidedBy" GLOB 'MIGRATION:*' AND length(NEW."terminalDecidedBy") > 10)
       );
 
     SELECT RAISE(ABORT, 'Execution_terminal_write_guard: terminalDecision does not match the terminal status')
@@ -231,10 +294,11 @@ BEGIN
                 'MESSAGE_INTEGRITY_FAILED', 'CLOCK_ANOMALY'))
       );
 
-    SELECT RAISE(ABORT, 'Execution_terminal_write_guard: a running execution must not carry a terminal tuple')
+    SELECT RAISE(ABORT, 'Execution_terminal_write_guard: a running execution must not carry a terminal tuple or dispatchState=terminal')
     WHERE NEW."status" = 'running'
       AND (
-            NEW."terminalDecision" IS NOT NULL
+            NEW."dispatchState" = 'terminal'
+         OR NEW."terminalDecision" IS NOT NULL
          OR NEW."terminalDecidedAt" IS NOT NULL
          OR NEW."terminalDecidedBy" IS NOT NULL
       );
@@ -438,12 +502,18 @@ BEGIN
 END;
 
 -- T9. Registration audit INSERT legitimacy.
+--     * `adopted` takes over the immediately next registration epoch (the only
+--       advance `Runner_registration_guard` permits).
+--     * `rejected` must explain itself with a reasonCode and keeps history as
+--       it was.
+--     * `superseded` is the historical record of a registration that was
+--       replaced: it requires the previous identity and a strictly newer epoch.
 CREATE TRIGGER "ExecutionRegistrationAudit_insert_guard"
 BEFORE INSERT ON "ExecutionRegistrationAudit"
 FOR EACH ROW
 BEGIN
-    SELECT RAISE(ABORT, 'ExecutionRegistrationAudit_insert_guard: decision must be adopted or rejected')
-    WHERE NEW."decision" NOT IN ('adopted', 'rejected');
+    SELECT RAISE(ABORT, 'ExecutionRegistrationAudit_insert_guard: decision must be adopted, rejected or superseded')
+    WHERE NEW."decision" NOT IN ('adopted', 'rejected', 'superseded');
 
     SELECT RAISE(ABORT, 'ExecutionRegistrationAudit_insert_guard: dispatchState must be one of the six frozen states')
     WHERE NEW."dispatchState" NOT IN ('created', 'repository_preparing', 'repository_ready', 'start_sent', 'running', 'terminal');
@@ -458,6 +528,20 @@ BEGIN
     SELECT RAISE(ABORT, 'ExecutionRegistrationAudit_insert_guard: the new epoch must not roll back')
     WHERE NEW."previousRegistrationEpoch" IS NOT NULL
       AND NEW."newRegistrationEpoch" < NEW."previousRegistrationEpoch";
+
+    SELECT RAISE(ABORT, 'ExecutionRegistrationAudit_insert_guard: an adopted takeover must advance the registration epoch by exactly one')
+    WHERE NEW."decision" = 'adopted'
+      AND NEW."previousRegistrationEpoch" IS NOT NULL
+      AND NEW."newRegistrationEpoch" IS NOT NEW."previousRegistrationEpoch" + 1;
+
+    SELECT RAISE(ABORT, 'ExecutionRegistrationAudit_insert_guard: a superseded registration requires the registration it replaced')
+    WHERE NEW."decision" = 'superseded'
+      AND (NEW."previousRegistrationId" IS NULL OR NEW."previousRegistrationEpoch" IS NULL);
+
+    SELECT RAISE(ABORT, 'ExecutionRegistrationAudit_insert_guard: a superseded registration must be newer than the one it replaced')
+    WHERE NEW."decision" = 'superseded'
+      AND NEW."previousRegistrationEpoch" IS NOT NULL
+      AND NEW."newRegistrationEpoch" <= NEW."previousRegistrationEpoch";
 END;
 
 -- T10. Audit rows are append-only. SQLite does not fire triggers for foreign-key
@@ -468,3 +552,5 @@ FOR EACH ROW
 BEGIN
     SELECT RAISE(ABORT, 'ExecutionRegistrationAudit_no_update: registration audit rows are append-only');
 END;
+
+COMMIT;

@@ -94,6 +94,37 @@ export const TERMINAL_DECISION_STATUS: Record<TerminalDecision, ExecutionStatus>
 /** Execution statuses that may only be reached with a complete terminal tuple. */
 export const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'] as const;
 
+/**
+ * Provenance prefixes for `Execution.terminalDecidedBy` from the L2 v1.1
+ * baseline. A runner identity never uses either prefix, which is what keeps a
+ * Runner from writing a terminal decision.
+ */
+export const TERMINAL_DECIDED_BY_PREFIXES = ['API:', 'MIGRATION:'] as const;
+
+/**
+ * The identities established by the L2 v1.1 baseline. `API:reconciler` and
+ * `API:recovery-scanner` are reserved for the recovery paths; Slice 1 does not
+ * invent them early. `MIGRATION:wp-d-backfill` is the only identity a migration
+ * may use for historical rows.
+ */
+export const TERMINAL_DECIDED_BY_IDENTITIES = [
+  'API:operator',
+  'API:terminal-event',
+  'API:reconciler',
+  'API:start-gate',
+  'API:recovery-scanner',
+  'API:mock-runtime',
+  'MIGRATION:wp-d-backfill',
+] as const;
+export type TerminalDecidedBy = (typeof TERMINAL_DECIDED_BY_IDENTITIES)[number];
+
+/** Prefix-level test used by writers; the triggers enforce the same rule in SQL. */
+export function isLegalTerminalDecidedBy(value: string): boolean {
+  return TERMINAL_DECIDED_BY_PREFIXES.some(
+    (prefix) => value.length > prefix.length && value.startsWith(prefix),
+  );
+}
+
 /** Handshake message statuses; the direction of travel is enforced in SQL. */
 export const HANDSHAKE_MESSAGE_STATUSES = ['created', 'sent', 'acked', 'rejected'] as const;
 export type HandshakeMessageStatus = (typeof HANDSHAKE_MESSAGE_STATUSES)[number];

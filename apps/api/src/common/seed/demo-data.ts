@@ -218,7 +218,7 @@ export async function initializeDemoData(
       dispatchState: 'terminal',
       terminalDecision: 'COMPLETED',
       terminalDecidedAt: at('2026-01-12T14:00:18.000Z'),
-      terminalDecidedBy: 'seed:demo-data',
+      terminalDecidedBy: 'API:mock-runtime',
       startedAt: SEED.execution,
       endedAt: at('2026-01-12T14:00:18.000Z'),
       createdAt: SEED.execution,
