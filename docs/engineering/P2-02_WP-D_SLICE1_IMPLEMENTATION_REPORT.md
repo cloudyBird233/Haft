@@ -158,7 +158,17 @@ UPDATE "Execution"
 
 - `completed` / `failed` 是**可从既有数据确定性推导**的裁决，允许回填。
 - `terminalDecidedAt` 保留历史时刻，但把存储统一为 L2 v1.1 要求的**正整数 Unix 毫秒**：Prisma 写出的 INTEGER 原样保留，ISO-8601 TEXT 精确换算（秒 × 1000 + 毫秒小数），不用"迁移时刻"替换历史时间。
-- `cancelled` **不**回填为 `CANCELLED_CONFIRMED`：数据库不持有任何"进程终止已确认"的证据，回填等于伪造。这类行只把 `dispatchState` 置为 `terminal`，`terminalDecision` 保持 `NULL`，留给 Slice 2 的恢复判定或人工处理。
+- `cancelled` **不**回填为 `CANCELLED_CONFIRMED`：数据库不持有任何"进程终止已确认"的证据，回填等于伪造。这类行只把 `dispatchState` 置为 `terminal`，`terminalDecision` 保持 `NULL`。
+
+  **这个 `NULL` 不是"留给 Slice 2 补写"的占位。** 行一旦 `dispatchState = terminal`，就进入 T2 的保护范围：T2 对 `OLD.status IN ('completed','failed','cancelled')` 的行拒绝任何终态元组变更（`migration.sql:229-243`）；T3 只对 `OLD.status = 'running'` 生效（`:249-310`）；应用层 `writeTerminalDecision` 的条件更新同样要求 `status = 'running'`（`execution-terminal.ts:53-59`），对这类行 `count = 0`。三层都关死，因此 **Slice 2 不能通过普通更新为这些历史行补写裁决**，也不得为了补写而放宽 T2。正确用法是只查询、不补写：
+
+  ```sql
+  SELECT id FROM "Execution" WHERE status = 'cancelled' AND terminalDecision IS NULL;
+  ```
+
+  后续处置只有三种，且都需要单独决策：(a) 保持现状，把 `NULL` 当作"历史证据不足"的显式记录；(b) 用新的 forward migration 以**不声称证据**的方式标注；(c) 由操作员按 `docs/execution-recovery.md` 的 playbook 处理业务影响，数据库保持不变。详见 `P2-02_WP-D_SLICE2_SCOPE_AND_ENTRY_CONTRACT.md` §4。
+
+  > 修订记录（2026-11-24）：本段原写作"…留给 Slice 2 的恢复判定或人工处理"，与冻结的 T2 冲突——Slice 2 的恢复判定没有任何可写入路径。已按上述事实更正，未改动本节其它结论。
 - start 之前的行（`created` / `repository_preparing`）完全不动，也不会为它们伪造任何握手消息。
 
 ### 3.3 Trigger T1–T10
